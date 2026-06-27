@@ -83,3 +83,22 @@ class Position(BaseModel):
     size: float
     entry_price: float
     unrealized_pnl: float = 0.0
+
+
+class OpenOrder(BaseModel):
+    coin: str
+    oid: int
+    side: Side
+    size: float
+    price: float
+    order_type: str = "limit"
+    reduce_only: bool = False
+
+
+class OrderResult(BaseModel):
+    """Outcome of an exchange write (order / cancel / leverage)."""
+
+    accepted: bool
+    status: str = ""
+    order_id: str | None = None
+    message: str = ""

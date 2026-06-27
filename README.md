@@ -8,10 +8,17 @@
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"        # add [exchange] / [llm] when those phases land
+pip install -e ".[dev]"        # paper + all reads work keyless; add [exchange] to trade live, [llm] later
 hl --help
 hl exec once                   # paper, no-op pass
 hl config show                 # resolved hard caps + clamped tunable surface
+hl markets prices              # live public marks (paper)
+hl asset book BTC -w           # live order book, -w to watch
+
+# live trading (needs the exchange extra + an approved agent wallet):
+pip install -e ".[exchange]"
+hl --network testnet account add main --address 0xYOURADDR   # prompts for agent key
+hl --network testnet trade order limit BTC long 0.001 50000
 ```
 
 ## Trading modes
@@ -36,5 +43,5 @@ real fills) → `mainnet` (real money, **gated**: needs `HL_ENABLE_MAINNET=1` +
 
 ## Status
 
-Current phase: **Phase 0 — Skeleton** ✅ complete → next: Phase 1 (Manual trade)
+Current phase: **Phase 1 — Manual trade** ✅ code complete (live testnet order deferred) → next: Phase 2 (deterministic executor)
 Last updated: 2026-06-27

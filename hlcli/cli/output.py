@@ -30,6 +30,29 @@ def emit(payload: dict[str, Any], *, as_json: bool, title: str | None = None) ->
     _console.print(table)
 
 
+def emit_rows(
+    rows: list[dict[str, Any]],
+    *,
+    as_json: bool,
+    title: str | None = None,
+    columns: list[str] | None = None,
+) -> None:
+    """Render a list of uniform dicts as a table, or as a JSON array under `--json`."""
+    if as_json:
+        _console.print_json(data=rows)
+        return
+    if not rows:
+        _console.print(f"[dim]no {title or 'rows'}.[/dim]")
+        return
+    cols = columns or list(rows[0].keys())
+    table = Table(title=title, box=box.SIMPLE)
+    for col in cols:
+        table.add_column(col)
+    for row in rows:
+        table.add_row(*(str(row.get(col, "")) for col in cols))
+    _console.print(table)
+
+
 def note(message: str) -> None:
     """A one-line human status message (suppressed implicitly under `--json` callers)."""
     _console.print(message)

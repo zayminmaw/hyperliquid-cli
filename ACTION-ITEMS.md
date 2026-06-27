@@ -21,19 +21,21 @@ Gate: `hl --help` works; paper `exec once` no-ops cleanly. ✅ passed
 ✅ Phase 0 complete — `hl --help`, paper `exec once`, `config show` all work; lazy-dep constraint verified (no anthropic/hyperliquid/eth_account at import time)
 
 ## Phase 1: Manual trade (Mode A)
-Gate: place + manage a real **testnet** order end-to-end.
+Gate: place + manage a real **testnet** order end-to-end. ⏳ deferred — code complete; awaiting a funded testnet agent wallet (user's choice: build on paper + mocks).
 
-- [ ] 1.1 `accounts/store.py` — SQLite account store (`~/.hyperliquid-cli/accounts.db`): alias, address, network, type, key ref
-- [ ] 1.2 `accounts/keystore.py` — agent ("API") wallet keys, locked file perms, never logged
-- [ ] 1.3 `account` commands: add | ls | set-default | remove | positions | orders | balances | portfolio
-- [ ] 1.4 `exchange/marks.py` — marks feed + cache (public mainnet marks for paper)
-- [ ] 1.5 `exchange/hyperliquid.py` — testnet+mainnet via hyperliquid-python-sdk (lazy import) + eth-account signing
-- [ ] 1.6 `trade` commands (Mode A: hard caps + exchange validation only): order limit|market|stop-loss|take-profit, cancel, cancel-all, set-leverage
-- [ ] 1.7 `markets` ls|prices; `asset` price|book
-- [ ] 1.8 `executor/monitor.py` — monitor SL/TP/expiry
-- [ ] 1.9 Watch modes (`-w`) via websocket-client for positions/orders/book
-- [ ] 1.10 `exec status` | `report`
-- [ ] 1.11 Tests: order command validation, marks cache, monitor
+- [x] 1.1 `accounts/store.py` — SQLite account store (`~/.hyperliquid-cli/accounts.db`): alias, address, network, type, key_ref; per-network default
+- [x] 1.2 `accounts/keystore.py` — agent key per-account `0600` file, never logged; `agent_address` derivation lazy via eth_account
+- [x] 1.3 `account` commands: add | ls | set-default | remove | positions | orders | balances | portfolio
+- [x] 1.4 `exchange/marks.py` — marks + book via public `/info` over **httpx** (no SDK), TTL cache. *Deviation: reads use httpx not the SDK Info, so paper stays keyless/SDK-free (httpx moved to core deps).*
+- [x] 1.5 `exchange/hyperliquid.py` — live testnet+mainnet backend; SDK + eth_account lazy-imported; writes blocked on read-only accounts
+- [x] 1.6 `trade` commands (Mode A: allowed-coin + notional + leverage caps + exchange validation): order limit|market|stop-loss|take-profit, cancel, cancel-all, set-leverage
+- [x] 1.7 `markets` ls|prices; `asset` price|book
+- [x] 1.8 `executor/monitor.py` — `position_health` (read-only view; automated SL/TP action deferred to Phase 2/5)
+- [x] 1.9 Watch modes (`-w`) for positions/orders/asset book/price. *Deviation: poll-based `rich.Live` refresh, not native websocket; SDK `Info.subscribe` is a later refinement, call sites unchanged.*
+- [x] 1.10 `exec status` | `report`
+- [x] 1.11 Tests: accounts/keystore, marks (mocked httpx), live-read + order-response parsing, CLI (account/trade/caps) — 44 passing, keyless-safe
+
+✅ Phase 1 code complete (gate deferred) — verified keyless: full suite + paper + live public reads run with **no** hyperliquid/eth_account installed. Live testnet order pending a funded agent wallet.
 
 ## Phase 2: Executor — deterministic
 Gate: candidates → paper fills; fully deterministic; restart-safe.
