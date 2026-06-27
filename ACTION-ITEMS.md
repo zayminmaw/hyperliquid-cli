@@ -5,18 +5,20 @@
 > Do not build ahead of the current phase or skip a gate.
 
 ## Phase 0: Skeleton
-Gate: `hl --help` works; paper `exec once` no-ops cleanly.
+Gate: `hl --help` works; paper `exec once` no-ops cleanly. ✅ passed
 
-- [ ] 0.1 Project scaffold: `pyproject.toml` (Python ≥3.12; deps: typer, rich, pydantic, pydantic-settings; dev: pytest), `hl` console script entry point
-- [ ] 0.2 Package skeleton: `hlcli/` with `cli/ core/ exchange/ accounts/ executor/ tuner/ state/ safety/ tests/` and `__main__.py`
-- [ ] 0.3 `core/config.py` — hard caps via pydantic-settings from `.env` (network gate, paths, STARTING_EQUITY, MAX_NOTIONAL_PER_TRADE, MAX_CONCURRENT_POSITIONS, DAILY_LOSS_LIMIT_PCT, MAX_LEVERAGE, RR_FLOOR, ALLOWED_COINS, MAX_SIGNAL_AGE_MINUTES, model names + token budgets)
-- [ ] 0.4 `core/config_schema.py` — tunable surface load + clamp; missing file → safe defaults; bad value can't reach order path
-- [ ] 0.5 `core/network.py` — network resolution (paper default) + mainnet gate (HL_ENABLE_MAINNET + --network mainnet + confirm)
-- [ ] 0.6 `core/types.py` — domain types (Candidate, Decision, Order, Position, Fill, etc.)
-- [ ] 0.7 `exchange/base.py` — exchange protocol; `exchange/paper.py` — paper book stub
-- [ ] 0.8 `cli/app.py` — typer app + command groups (account/markets/asset/trade/exec/tune/config) as stubs; global flags (--network/--account/--json/--dry-run/-y); rich+json output helper
-- [ ] 0.9 `exec once` paper path no-ops cleanly (full pass stub)
-- [ ] 0.10 Tests: config clamp, network/mainnet gate, CLI `--help`
+- [x] 0.1 Project scaffold: `pyproject.toml` (Python ≥3.12; deps: typer, rich, pydantic, pydantic-settings; extras: exchange/llm/dev; `hl` console script)
+- [x] 0.2 Package skeleton: `hlcli/` with `cli/ core/ exchange/ accounts/ executor/ tuner/ state/ safety/ tests/` and `__main__.py`
+- [x] 0.3 `core/config.py` — hard caps via pydantic-settings from `.env` (network gate, paths, STARTING_EQUITY, MAX_NOTIONAL_PER_TRADE, MAX_CONCURRENT_POSITIONS, DAILY_LOSS_LIMIT_PCT, MAX_LEVERAGE, RR_FLOOR, ALLOWED_COINS, MAX_SIGNAL_AGE_MINUTES, model names + token budgets)
+- [x] 0.4 `core/config_schema.py` — tunable surface load + clamp; missing file → safe defaults; malformed → ConfigError
+- [x] 0.5 `core/network.py` — network resolution (paper default) + mainnet gate (HL_ENABLE_MAINNET + --network mainnet + typed confirm)
+- [x] 0.6 `core/types.py` — domain types (Network, Side, OrderType, Action, Timing, Candidate, Decision, Order, Position)
+- [x] 0.7 `exchange/base.py` — Exchange protocol + OrderResult; `exchange/paper.py` — paper book stub; `exchange/factory.py`
+- [x] 0.8 `cli/app.py` — typer app + command groups (account/markets/asset/trade/exec/tune/config); global flags; `cli/output.py` rich+json helper; `_lazy.py` lazy-import helper
+- [x] 0.9 `exec once` paper path no-ops cleanly (`executor/runner.py`); bonus working `config show`
+- [x] 0.10 Tests: config clamp, network/mainnet gate, CLI `--help`/`exec once`/stubs — 18 passing
+
+✅ Phase 0 complete — `hl --help`, paper `exec once`, `config show` all work; lazy-dep constraint verified (no anthropic/hyperliquid/eth_account at import time)
 
 ## Phase 1: Manual trade (Mode A)
 Gate: place + manage a real **testnet** order end-to-end.

@@ -6,11 +6,12 @@
 
 ## Quick Start
 
-_Coming in Phase 0 — not runnable yet (greenfield)._
-
-```
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"        # add [exchange] / [llm] when those phases land
 hl --help
-hl --network paper exec once
+hl exec once                   # paper, no-op pass
+hl config show                 # resolved hard caps + clamped tunable surface
 ```
 
 ## Trading modes
@@ -35,5 +36,5 @@ real fills) → `mainnet` (real money, **gated**: needs `HL_ENABLE_MAINNET=1` +
 
 ## Status
 
-Current phase: **Phase 0 — Skeleton** (not started)
+Current phase: **Phase 0 — Skeleton** ✅ complete → next: Phase 1 (Manual trade)
 Last updated: 2026-06-27

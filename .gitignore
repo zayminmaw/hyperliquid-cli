@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# secrets + local state — never commit
+.env
+config/active_config.json
+config/proposed_*
+*.db
+
+.pytest_cache/
+.DS_Store

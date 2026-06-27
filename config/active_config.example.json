@@ -1,0 +1,14 @@
+{
+  "risk_per_trade_pct": 0.5,
+  "regime": {
+    "enabled": true,
+    "allowed_regimes": ["trend", "range"]
+  },
+  "sizing": {
+    "min_conviction": 0.3,
+    "floor_fraction": 0.25,
+    "ceil_fraction": 1.0
+  },
+  "max_candidates_per_pass": 5,
+  "decision_temperature": 0.2
+}

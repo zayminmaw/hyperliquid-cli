@@ -1,41 +1,41 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-06-27 | Session: plan:start — generated ACTION-ITEMS.md, scaffolding pending
+> Last updated: 2026-06-27 | Session: Phase 0 built + verified; Phase 1 next
 
 ---
 
 ## 🎯 CURRENT TASK
 
-- Task: Phase 0 — Skeleton
-- Goal: CLI scaffold, config (hard caps) + tunable clamp, network resolution, paper stub
-- Status: not started (awaiting user sign-off on ACTION-ITEMS.md)
-- Next action: confirm ACTION-ITEMS.md, then build item 0.1 (pyproject.toml + scaffold)
-- Blocked by: user confirmation of the plan breakdown
+- Task: Phase 1 — Manual trade (Mode A)
+- Goal: account store + keystore, marks feed, live hyperliquid backend, trade order commands, monitor, watch modes
+- Status: not started (Phase 0 ✅ complete)
+- Next action: confirm §13 Q2/Q3 not needed yet; start 1.1 accounts/store.py (SQLite at ~/.hyperliquid-cli/accounts.db)
+- Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: Ran plan:start — read PLAN.md, generated ACTION-ITEMS.md, README.md, this file
-- Result: Phases 0–5 broken into granular checklist items; no code yet
-- File(s) touched: ACTION-ITEMS.md, README.md, AGENT-CONTEXT.md
+- Did: Built + verified Phase 0 skeleton (venv py3.12, `pip install -e .[dev]`)
+- Result: `hl --help`, paper `exec once`, `config show` work; 18 tests pass; no heavy deps at import time
+- File(s) touched: pyproject.toml, hlcli/** (core, exchange, cli, executor), tests, .env.example, .gitignore
 
 ---
 
 ## 🗺️ CODEBASE MAP
 
-<!-- Greenfield — no code yet. Intended layout (PLAN.md §12): -->
-
 | Path | Role |
 | ---- | ---- |
 | `PLAN.md` | Authoritative spec — resolves conflicts |
-| `ACTION-ITEMS.md` | Phase-by-phase status (source of truth for progress) |
-| `CLAUDE.md` | Working rules: ask when unclear, think before code, verify before assume |
-| `hlcli/cli/` | typer app + command groups (planned) |
-| `hlcli/core/` | config hard caps, config_schema clamp, types, network gate (planned) |
-| `hlcli/exchange/` | base protocol, paper book, hyperliquid, marks (planned) |
-| `hlcli/executor/` | intake, enrich, decision(LLM), gate, execute, monitor (planned) |
-| `hlcli/safety/` | breaker / kill switch / loss limits / mainnet gate (planned) |
+| `ACTION-ITEMS.md` | Phase-by-phase status (source of truth) |
+| `hlcli/core/config.py` | Hard caps (pydantic-settings, `HL_*` env); `get_caps()` |
+| `hlcli/core/config_schema.py` | Tunable surface + `clamp()` + `load_tunable()` |
+| `hlcli/core/network.py` | `resolve_network` + `enforce_mainnet_gate` (I/O-free) |
+| `hlcli/core/types.py` | Network/Side/OrderType/Action/Timing, Candidate/Decision/Order/Position |
+| `hlcli/cli/app.py` | Typer app, global flags, stub factory, `exec once` + `config show` |
+| `hlcli/exchange/{base,paper,factory}.py` | Exchange protocol, paper stub, backend factory |
+| `hlcli/executor/runner.py` | `run_once` pass (no-op skeleton) |
+| `hlcli/_lazy.py` | `require()` lazy-import helper for optional deps |
 
 ---
 
@@ -61,5 +61,6 @@
 ## 🔗 CONTEXT LINKS
 
 - Plan: ./PLAN.md
+- Hyperliquid docs: https://hyperliquid.gitbook.io/hyperliquid-docs (use for Phase 1 exchange + Phase 5 trigger orders)
 - Reference CLI surface: chrisling-dev/hyperliquid-cli (TypeScript)
 - SDK: hyperliquid-python-sdk
