@@ -1,60 +1,150 @@
-"""`hl exec` — LLM executor (Mode B). Phase 1 ships `once`/`status`/`report`."""
+"""`hl exec` — LLM executor (Mode B). Phase 2 ships the deterministic pipeline."""
 
 from __future__ import annotations
 
+import json
+import time
+from pathlib import Path
+from typing import Optional
+
 import typer
 
-from hlcli.cli.context import build_for, state_of
-from hlcli.cli.output import emit, emit_rows
+from hlcli.cli.context import GlobalState, build_for, state_of
+from hlcli.cli.output import emit, emit_rows, note
 from hlcli.cli.stubs import stub_command
 from hlcli.cli.watch import watch_rows
+from hlcli.core.config import Caps, get_caps
+from hlcli.core.config_schema import TunableConfig, load_tunable
+from hlcli.core.types import Network
+from hlcli.exchange.base import Exchange
+from hlcli.exchange.paper import PaperExchange
+from hlcli.executor.intake import make_candidate, parse_batch
 from hlcli.executor.monitor import position_health
 from hlcli.executor.runner import run_once
+from hlcli.safety.breaker import Breaker
+from hlcli.state.store import StateStore, open_state
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
 
-# Order-path verbs land in their phases.
-for _cmd, _phase in {"propose": 2, "run": 2, "shadow": 3, "breaker": 2}.items():
-    app.command(name=_cmd)(stub_command("exec", _cmd, _phase))
+# The LLM decision + shadow mode arrive in Phase 3.
+app.command(name="shadow")(stub_command("exec", "shadow", 3))
+
+
+def _env(g: GlobalState, *, for_write: bool) -> tuple[Exchange, StateStore, Caps, TunableConfig]:
+    """Build the executor's (exchange, state, caps, tunable) for the current network."""
+    caps = get_caps()
+    state = open_state(caps, g.network)
+    tunable = load_tunable()
+    if g.network is Network.PAPER:
+        exchange: Exchange = PaperExchange(caps.starting_equity, state=state)
+    else:
+        exchange = build_for(g, for_write=for_write)
+    return exchange, state, caps, tunable
+
+
+@app.command("propose")
+def propose(
+    ctx: typer.Context,
+    coin: Optional[str] = typer.Option(None, "--coin", "--pair"),
+    entry: Optional[float] = typer.Option(None, "--entry"),
+    tp: Optional[float] = typer.Option(None, "--tp"),
+    sl: Optional[float] = typer.Option(None, "--sl"),
+    reason: str = typer.Option("", "--reason"),
+    news: str = typer.Option("", "--news"),
+    file: Optional[Path] = typer.Option(None, "--file", help="JSON list/object batch"),
+) -> None:
+    """Queue candidate setup(s) into the intake stream for the current network."""
+    g = state_of(ctx)
+    state = open_state(get_caps(), g.network)
+
+    try:
+        if file is not None:
+            data = json.loads(file.read_text())
+            candidates = parse_batch(data if isinstance(data, list) else [data])
+        elif None in (coin, entry, tp, sl):
+            raise typer.BadParameter("provide --coin --entry --tp --sl, or --file <batch.json>")
+        else:
+            candidates = [make_candidate(coin, entry, tp, sl, reasoning=reason, news=news)]
+    except ValueError as exc:  # incoherent levels
+        raise typer.BadParameter(str(exc))
+
+    enqueued = sum(state.enqueue(c) for c in candidates)
+    emit(
+        {"network": g.network.value, "submitted": len(candidates),
+         "enqueued": enqueued, "duplicates": len(candidates) - enqueued},
+        as_json=g.json_out, title="exec propose",
+    )
 
 
 @app.command("once")
 def once(ctx: typer.Context) -> None:
-    """One full executor pass (Phase 0/1: no-op skeleton)."""
-    state = state_of(ctx)
-    exchange = build_for(state, for_write=True)
-    summary = run_once(exchange, dry_run=state.dry_run)
-    emit(summary.model_dump(), as_json=state.json_out, title="exec once")
+    """One full executor pass (intake → decision → gate → fire → log)."""
+    g = state_of(ctx)
+    exchange, state, caps, tunable = _env(g, for_write=True)
+    summary = run_once(exchange, state, caps, tunable, dry_run=g.dry_run)
+    emit(summary.model_dump(), as_json=g.json_out, title="exec once")
+
+
+@app.command("run")
+def run(ctx: typer.Context, interval: float = typer.Option(5.0, "--interval", help="seconds between passes")) -> None:
+    """Continuous executor loop (ctrl-c to stop)."""
+    g = state_of(ctx)
+    exchange, state, caps, tunable = _env(g, for_write=True)
+    note(f"executor running every {interval}s on {g.network.value} — ctrl-c to stop")
+    try:
+        while True:
+            s = run_once(exchange, state, caps, tunable, dry_run=g.dry_run)
+            note(f"[dim]{time.strftime('%H:%M:%S')}[/dim] seen={s.seen} fired={s.fired} rejected={s.rejected}")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        note("stopped")
+
+
+@app.command("breaker")
+def breaker(
+    ctx: typer.Context,
+    switch: Optional[bool] = typer.Option(None, "--on/--off", help="trip or clear the kill switch"),
+) -> None:
+    """Show or toggle the kill switch (halts new fires; open positions still managed)."""
+    g = state_of(ctx)
+    caps = get_caps()
+    b = Breaker(open_state(caps, g.network), caps)
+    if switch is not None:
+        b.set(switch)
+    emit(
+        {"network": g.network.value, "breaker": "tripped" if b.tripped() else "clear"},
+        as_json=g.json_out, title="exec breaker",
+    )
 
 
 @app.command("status")
 def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch")) -> None:
-    """Live position health for the current account."""
-    state = state_of(ctx)
-    exchange = build_for(state, for_write=False)
+    """Live position health for the executor's book."""
+    g = state_of(ctx)
+    exchange, _state, _caps, _tunable = _env(g, for_write=False)
 
     def rows() -> list[dict]:
         return position_health(exchange)
 
-    if watch and not state.json_out:
+    if watch and not g.json_out:
         watch_rows(rows, title="exec status")
         return
-    emit_rows(rows(), as_json=state.json_out, title="exec status")
+    emit_rows(rows(), as_json=g.json_out, title="exec status")
 
 
 @app.command("report")
 def report(ctx: typer.Context) -> None:
-    """Account summary: equity, open positions, unrealized P&L."""
-    state = state_of(ctx)
-    exchange = build_for(state, for_write=False)
+    """Account summary: equity, open positions, unrealized P&L, breaker state."""
+    g = state_of(ctx)
+    exchange, state, caps, _tunable = _env(g, for_write=False)
     positions = exchange.get_positions()
     emit(
         {
-            "network": state.network.value,
+            "network": g.network.value,
             "equity": exchange.equity(),
             "open_positions": len(positions),
             "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
-            "breaker": "n/a until Phase 2",
+            "breaker": "tripped" if Breaker(state, caps).tripped() else "clear",
         },
-        as_json=state.json_out, title="exec report",
+        as_json=g.json_out, title="exec report",
     )

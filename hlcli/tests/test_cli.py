@@ -26,18 +26,18 @@ def test_help_works():
     assert "exec" in result.output
 
 
-def test_exec_once_paper_noops():
+def test_exec_once_paper_empty_stream(isolated_caps):
     result = runner.invoke(app, ["exec", "once"])
     assert result.exit_code == 0
-    assert "no-op" in result.output
+    assert "seen" in result.output
 
 
-def test_exec_once_json_is_machine_readable():
+def test_exec_once_json_is_machine_readable(isolated_caps):
     result = runner.invoke(app, ["--json", "exec", "once"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["network"] == "paper"
-    assert payload["fired"] == 0
+    assert payload["seen"] == 0 and payload["fired"] == 0
 
 
 def test_config_show_works():

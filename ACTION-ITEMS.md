@@ -38,17 +38,19 @@ Gate: place + manage a real **testnet** order end-to-end. ⏳ deferred — code 
 ✅ Phase 1 code complete (gate deferred) — verified keyless: full suite + paper + live public reads run with **no** hyperliquid/eth_account installed. Live testnet order pending a funded agent wallet.
 
 ## Phase 2: Executor — deterministic
-Gate: candidates → paper fills; fully deterministic; restart-safe.
+Gate: candidates → paper fills; fully deterministic; restart-safe. ✅ passed
 
-- [ ] 2.1 `state/` SQLite schema: book, idempotency, high-water mark, decision log
-- [ ] 2.2 `executor/intake.py` — intake queue + `exec propose` (single + JSON/file batch); high-water mark
-- [ ] 2.3 `executor/gate.py` — deterministic risk gate pipeline, first-failure wins (schema → kill switch → daily-loss → freshness → allowed-coin → regime → level sanity → R:R floor → one-per-coin → max-concurrent → sizing + caps → conviction clamp)
-- [ ] 2.4 Sizing: fixed-fractional `risk_per_trade_pct × equity ÷ stop_distance`, clamped by notional + leverage caps
-- [ ] 2.5 `executor/execute.py` — execute approved orders (idempotent)
-- [ ] 2.6 `safety/breaker.py` — kill switch, daily-loss-limit, loss limits
-- [ ] 2.7 `exec propose | once | run | breaker` wired (deterministic decision stub, no LLM yet)
-- [ ] 2.8 Restart never double-fires (idempotency + high-water mark)
-- [ ] 2.9 Tests: gate/sizing (highest-risk), idempotency + HWM, breaker, restart-safety
+- [x] 2.1 `state/store.py` — network-scoped SQLite: intake stream, meta (HWM, realized), idempotency, decision_log, paper_positions
+- [x] 2.2 `executor/intake.py` — `make_candidate`/`parse_batch` (side inferred from levels, pair/reason aliases) + `exec propose` single + `--file` batch; HWM via `pull_new`
+- [x] 2.3 `executor/gate.py` — deterministic gate, first-failure wins (decision → breaker → daily-loss → freshness → allowed-coin → regime → level sanity → R:R → one-per-coin → max-concurrent → sizing+caps → conviction clamp)
+- [x] 2.4 Sizing: fixed-fractional `risk_per_trade_pct × equity ÷ stop_distance`, conviction-scaled within [floor,ceil], clamped by notional + leverage caps
+- [x] 2.5 `executor/execute.py` — `fire` records idempotency key **before** placing (crash → skip, not double-fire)
+- [x] 2.6 `safety/breaker.py` — kill switch (persisted) + daily-loss-limit (day-start equity drawdown, resets on date rollover)
+- [x] 2.7 `exec propose | once | run | breaker` wired; deterministic decision stub (`executor/decision.py`, act/now/conv=1.0); `runner.run_once` full pass; dry-run is side-effect-free
+- [x] 2.8 Restart never double-fires — HWM advances per processed candidate + idempotency key; paper book persists across instances
+- [x] 2.9 Tests: gate/sizing (20), state/HWM/idempotency, paper fills + equity, breaker, end-to-end (restart, dry-run, one-per-coin, max-concurrent, breaker) — 86 passing
+
+✅ Phase 2 complete — verified end-to-end on paper: propose (single+batch) → `exec once` fires → persistent book + equity/uPnL; re-run sees nothing (HWM); breaker halts fires. Still keyless-safe.
 
 ## Phase 3: LLM decision
 Gate: shadow runs produce sane, fully-logged decisions on paper/testnet.

@@ -15,6 +15,12 @@ hl config show                 # resolved hard caps + clamped tunable surface
 hl markets prices              # live public marks (paper)
 hl asset book BTC -w           # live order book, -w to watch
 
+# Mode B — deterministic executor on paper (LLM decision lands in Phase 3):
+hl exec propose --coin BTC --entry 60000 --tp 66000 --sl 58000 --reason "breakout"
+hl exec once                   # intake → gate → fire → persistent paper book
+hl exec report                 # equity, positions, unrealized P&L, breaker state
+hl exec breaker --on           # kill switch: halts new fires
+
 # live trading (needs the exchange extra + an approved agent wallet):
 pip install -e ".[exchange]"
 hl --network testnet account add main --address 0xYOURADDR   # prompts for agent key
@@ -43,5 +49,5 @@ real fills) → `mainnet` (real money, **gated**: needs `HL_ENABLE_MAINNET=1` +
 
 ## Status
 
-Current phase: **Phase 1 — Manual trade** ✅ code complete (live testnet order deferred) → next: Phase 2 (deterministic executor)
+Current phase: **Phase 2 — Deterministic executor** ✅ complete → next: Phase 3 (LLM decision)
 Last updated: 2026-06-27

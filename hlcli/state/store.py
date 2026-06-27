@@ -1,0 +1,196 @@
+"""Executor state — SQLite (PLAN.md §5, §12).
+
+One network-scoped db (`state-<network>.db`) holding everything that must survive a
+restart so a crashed executor never double-fires or loses its book:
+
+  - `intake`            the candidate stream (monotonic `seq` = the high-water mark axis)
+  - `meta`              key/value: the intake HWM, paper realized P&L
+  - `idempotency`       fired keys → a restart re-running a candidate is a no-op
+  - `decision_log`      full context + decision + gate + fill (audit + tuner data)
+  - `paper_positions`   the persistent paper book
+
+Pure persistence — fill math lives in the paper exchange, gate math in the gate.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+from hlcli.core.config import Caps
+from hlcli.core.types import Candidate, Network, Side
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS intake (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         TEXT UNIQUE NOT NULL,
+    coin       TEXT NOT NULL,
+    side       TEXT NOT NULL,
+    entry      REAL NOT NULL,
+    tp         REAL NOT NULL,
+    sl         REAL NOT NULL,
+    reasoning  TEXT NOT NULL DEFAULT '',
+    news       TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, order_id TEXT, created_at REAL);
+CREATE TABLE IF NOT EXISTS decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL, candidate_id TEXT NOT NULL,
+    decision TEXT, gate TEXT, fill TEXT, context TEXT
+);
+CREATE TABLE IF NOT EXISTS paper_positions (
+    coin TEXT PRIMARY KEY, side TEXT NOT NULL, size REAL NOT NULL, entry_price REAL NOT NULL
+);
+"""
+
+_HWM_KEY = "intake_hwm"
+_REALIZED_KEY = "paper_realized"
+
+
+class StateStore:
+    def __init__(self, db_path: Path) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(_SCHEMA)
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    # --- intake stream ---
+
+    def enqueue(self, candidate: Candidate) -> bool:
+        """Add a candidate. Returns False if its id is already queued (dedupe)."""
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO intake(id, coin, side, entry, tp, sl, reasoning, news, created_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (candidate.id, candidate.coin, candidate.side.value, candidate.entry, candidate.tp,
+             candidate.sl, candidate.reasoning, candidate.news, candidate.created_at),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def pull_new(self, limit: int | None = None) -> list[tuple[int, Candidate]]:
+        """Candidates past the high-water mark, oldest first — the unprocessed stream."""
+        sql = "SELECT * FROM intake WHERE seq > ? ORDER BY seq"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        rows = self._conn.execute(sql, (self.get_hwm(),)).fetchall()
+        return [(r["seq"], _to_candidate(r)) for r in rows]
+
+    def get_hwm(self) -> int:
+        return int(self._get_meta(_HWM_KEY, "0"))
+
+    def advance_hwm(self, seq: int) -> None:
+        if seq > self.get_hwm():
+            self._set_meta(_HWM_KEY, str(seq))
+
+    def set_status(self, seq: int, status: str) -> None:
+        self._conn.execute("UPDATE intake SET status = ? WHERE seq = ?", (status, seq))
+        self._conn.commit()
+
+    # --- idempotency ---
+
+    def already_fired(self, key: str) -> bool:
+        return self._conn.execute("SELECT 1 FROM idempotency WHERE key = ?", (key,)).fetchone() is not None
+
+    def record_fire(self, key: str, order_id: str | None, when: float) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO idempotency(key, order_id, created_at) VALUES(?, ?, ?)",
+            (key, order_id, when),
+        )
+        self._conn.commit()
+
+    # --- decision log ---
+
+    def log_decision(self, candidate_id: str, ts: float, *, decision=None, gate=None, fill=None, context=None) -> None:
+        self._conn.execute(
+            "INSERT INTO decision_log(ts, candidate_id, decision, gate, fill, context) VALUES(?, ?, ?, ?, ?, ?)",
+            (ts, candidate_id, _dump(decision), _dump(gate), _dump(fill), _dump(context)),
+        )
+        self._conn.commit()
+
+    def recent_decisions(self, limit: int = 20) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM decision_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- paper book ---
+
+    def paper_positions(self) -> dict[str, dict]:
+        return {
+            r["coin"]: {"side": Side(r["side"]), "size": r["size"], "entry_price": r["entry_price"]}
+            for r in self._conn.execute("SELECT * FROM paper_positions").fetchall()
+        }
+
+    def upsert_paper_position(self, coin: str, side: Side, size: float, entry_price: float) -> None:
+        self._conn.execute(
+            "INSERT INTO paper_positions(coin, side, size, entry_price) VALUES(?, ?, ?, ?)"
+            " ON CONFLICT(coin) DO UPDATE SET side=excluded.side, size=excluded.size, entry_price=excluded.entry_price",
+            (coin, side.value, size, entry_price),
+        )
+        self._conn.commit()
+
+    def delete_paper_position(self, coin: str) -> None:
+        self._conn.execute("DELETE FROM paper_positions WHERE coin = ?", (coin,))
+        self._conn.commit()
+
+    def paper_realized(self) -> float:
+        return float(self._get_meta(_REALIZED_KEY, "0"))
+
+    def add_paper_realized(self, delta: float) -> None:
+        self._set_meta(_REALIZED_KEY, str(self.paper_realized() + delta))
+
+    # --- breaker / generic meta (used by safety.breaker) ---
+
+    def breaker_tripped(self) -> bool:
+        return self._get_meta("breaker", "0") == "1"
+
+    def set_breaker(self, on: bool) -> None:
+        self._set_meta("breaker", "1" if on else "0")
+
+    def meta_get(self, key: str, default: str | None = None) -> str | None:
+        row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def meta_set(self, key: str, value: str) -> None:
+        self._set_meta(key, value)
+
+    # --- meta helpers ---
+
+    def _get_meta(self, key: str, default: str) -> str:
+        row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def _set_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
+
+
+def _to_candidate(row: sqlite3.Row) -> Candidate:
+    return Candidate(
+        id=row["id"], coin=row["coin"], side=Side(row["side"]), entry=row["entry"],
+        tp=row["tp"], sl=row["sl"], reasoning=row["reasoning"], news=row["news"],
+        created_at=row["created_at"],
+    )
+
+
+def _dump(value) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    return json.dumps(value, default=str)
+
+
+def open_state(caps: Caps, network: Network) -> StateStore:
+    return StateStore(caps.data_dir / f"state-{network.value}.db")
