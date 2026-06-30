@@ -8,6 +8,7 @@ import pytest
 from hlcli.core.config_schema import (
     ConfigError,
     ConvictionSizing,
+    RegimeGate,
     TunableConfig,
     clamp,
     load_tunable,
@@ -39,6 +40,16 @@ def test_clamp_keeps_floor_below_ceil():
 def test_clamp_is_idempotent():
     once = clamp(TunableConfig(risk_per_trade_pct=999.0))
     assert clamp(once) == once
+
+
+def test_clamp_filters_unknown_regimes():
+    c = clamp(TunableConfig(regime=RegimeGate(allowed_regimes=("trend", "moon", "vibes"))))
+    assert c.regime.allowed_regimes == ("trend",)  # garbage dropped, known kept
+
+
+def test_clamp_empty_regimes_falls_back_to_known_vocabulary():
+    c = clamp(TunableConfig(regime=RegimeGate(allowed_regimes=("nonsense",))))
+    assert c.regime.allowed_regimes == ("trend", "range")
 
 
 def test_missing_file_returns_clamped_defaults():

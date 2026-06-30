@@ -72,7 +72,10 @@ class PaperExchange:
         if fill_price is None:
             return OrderResult(accepted=False, status="error", message=f"no mark for {order.coin}")
         self._apply_fill(order, fill_price)
-        return OrderResult(accepted=True, status="filled", order_id=oid, message=f"@ {fill_price}")
+        return OrderResult(
+            accepted=True, status="filled", order_id=oid, message=f"@ {fill_price}",
+            filled_size=order.size, avg_price=fill_price,
+        )
 
     def cancel(self, coin: str, oid: int) -> OrderResult:
         return OrderResult(accepted=True, status="canceled", message="paper book")

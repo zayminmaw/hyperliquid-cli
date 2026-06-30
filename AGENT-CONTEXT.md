@@ -1,6 +1,6 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-06-30 | Session: Phase 5 (mainnet hardening) code-complete + verified — all 6 phases done
+> Last updated: 2026-06-30 | Session: Phase 5 done + pre-mainnet self-review fixes applied (152 tests) — all phases complete
 
 ---
 
@@ -16,9 +16,9 @@
 
 ## 📍 LAST ACTION
 
-- Did: Built Phase 5 — `executor/protect.py` (native reduce-only SL/TP triggers at entry; runner emergency-closes an unprotectable entry → status `aborted`), `safety/alerts.py` (JSONL+stderr, runner hooks fire/reject/halted/protection_failed), `safety/graduation.py` (readiness vs new caps, surfaced in `exec report`); resolver native-aware (MARKET close on live), key-redaction regression
-- Result: 143 pass / 1 skip; keyless-import invariant re-verified (no anthropic/hyperliquid/eth_account leak); §13 Q6 = hard prereq, triggers on testnet+mainnet (both user-confirmed)
-- File(s) touched: hlcli/{safety/alerts(new),safety/graduation(new),executor/protect(new)}.py, hlcli/core/config.py, hlcli/executor/{resolve,runner}.py, hlcli/cli/commands/exec_.py, tests/{test_protect,test_graduation,test_alerts,test_keys}(new)+test_cli
+- Did: Pre-mainnet self-review + fixed all 7 findings — H1 MARKET entry (accepted⇒filled) + fill reconciliation via `OrderResult.filled_size`/`avg_price`; M3 live exit booked at real fill; M4 `release_fire` on clean reject; L5 edge-triggered halt alert; L6 regime-vocab clamp; L7 non-positive-equity reject
+- Result: 152 pass / 1 skip; keyless-import invariant re-verified; gate now emits MARKET entry (price None)
+- File(s) touched: hlcli/core/{types,config_schema}.py, hlcli/exchange/{paper,hyperliquid}.py, hlcli/executor/{gate,execute,resolve,runner}.py, hlcli/state/store.py, tests/{test_gate,test_executor,test_resolve,test_config_schema,test_alerts,test_protect}
 
 ---
 
@@ -69,6 +69,7 @@
 - Keep no top-level imports of anthropic / hyperliquid / eth_account in hot paths (breaks paper + tests). Verified by `/tmp/hlcore` venv (no exchange extra).
 - Marks/book/reads go through **httpx** `/info` (core dep), NOT SDK `Info` — don't "simplify" onto the SDK or paper stops being keyless. SDK+eth_account are write-only (signing).
 - Tunable values must never reach the order path unclamped.
+- Executor entry is a MARKET order (gate), so a live `accepted` means `filled`; the runner records open_trade + sizes protection from `OrderResult.filled_size`/`avg_price`, NOT the intended order. Paper fixtures have mark==entry so counts/P&L are unchanged. Don't revert to a GTC limit entry — it reintroduces phantom-position tracking (review finding H1).
 - Python 3.12 is at `/opt/homebrew/bin/python3.12` (system default is 3.11; project needs ≥3.12).
 - Executor tests inject `run_once(..., decide_fn=...)` (act_now/drop in _helpers) so the LLM is never hit; real `decide`/tuners tested via FakeClient/FakeTool/FakeText. `exec`/`tune run` (with eligible cohort) need ANTHROPIC_API_KEY; empty stream / gated tuner skip the call.
 - Tuner artifacts live beside `config_path`: proposed_/active_ config.json + prompt.md + promotions.jsonl. Tests MUST pass an isolated `caps(config_path=tmp/...)` or they write into repo `config/`. `tune` uses network-scoped state db for resolved trades.

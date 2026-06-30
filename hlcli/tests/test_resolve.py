@@ -70,6 +70,24 @@ def test_expiry_closes_at_mark(tmp_path):
     assert t["status"] == "expired" and t["exit_price"] == 108.0 and t["realized"] == 8.0
 
 
+def test_native_protected_books_actual_close_fill_not_the_level(tmp_path):
+    # On a live backend the resolver's market close fills with slippage; the ledger
+    # must record that fill (here 88, not the 90 stop) so expectancy stays honest.
+    from hlcli.core.types import Network, OrderType
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 85.0}, fill_price=88.0)
+    _open(state)  # long, entry 100, sl 90
+    n = resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW,
+                            marks={"BTC": 85.0}, native_protected=True)
+    assert n == 1
+    t = state.resolved_trades()[0]
+    assert t["status"] == "lost" and t["exit_price"] == 88.0
+    assert t["realized"] == -12.0  # (88 - 100) * 1.0, not the idealized (90-100)
+    assert ex.placed[0].order_type is OrderType.MARKET and ex.placed[0].reduce_only  # live close
+
+
 def test_runner_opens_then_resolves(tmp_path):
     # Fire on a flat market, then a later pass with price through TP resolves the trade.
     state = StateStore(tmp_path / "state.db")

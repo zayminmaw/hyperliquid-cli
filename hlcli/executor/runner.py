@@ -83,9 +83,8 @@ def run_once(
     daily_loss = breaker.daily_loss_hit(equity)
 
     batch = state.pull_new(limit=tunable.max_candidates_per_pass)
-    if batch and (breaker_tripped or daily_loss):
-        _emit(alerter, "halted", level="critical",
-              reason="kill switch" if breaker_tripped else "daily loss limit", candidates=len(batch))
+    if alerter is not None and not dry_run:
+        _alert_halt(state, alerter, batch, breaker_tripped, daily_loss)
     approved = fired = rejected = dropped = 0
 
     for seq, candidate in batch:
@@ -128,11 +127,18 @@ def run_once(
         else:
             approved += 1
             fill = fire(exchange, state, candidate, outcome.order, now)
+            # Reconcile against what actually filled, not what we intended.
+            filled = fill.filled_size if fill.filled_size is not None else outcome.order.size
+            entry_price = fill.avg_price if fill.avg_price is not None else candidate.entry
             if not fill.accepted:
                 rejected += 1  # duplicate or exchange reject
                 _emit(alerter, "reject", level="warning", coin=candidate.coin,
                       reason=fill.message or fill.status)
-            elif protected and not _secure(exchange, candidate, outcome.order.size, alerter):
+            elif filled <= 0:
+                rejected += 1  # accepted but nothing filled (rested/canceled) — no position opened
+                status = "unfilled"
+                _emit(alerter, "reject", level="warning", coin=candidate.coin, reason="unfilled")
+            elif protected and not _secure(exchange, candidate, filled, alerter):
                 rejected += 1  # entry filled but couldn't be protected → emergency-closed
                 status = "aborted"
             else:
@@ -140,12 +146,12 @@ def run_once(
                 open_coins.add(candidate.coin)
                 status = "fired"
                 state.open_trade(
-                    candidate.id, candidate.coin, candidate.side, candidate.entry,
-                    candidate.sl, candidate.tp, outcome.order.size,
+                    candidate.id, candidate.coin, candidate.side, entry_price,
+                    candidate.sl, candidate.tp, filled,
                     decision.conviction, ctx.regime, now,
                 )
                 _emit(alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
-                      size=outcome.order.size, conviction=decision.conviction, order_id=fill.order_id)
+                      size=filled, conviction=decision.conviction, order_id=fill.order_id)
 
         state.log_decision(
             candidate.id, now, decision=decision, gate=outcome, fill=fill,
@@ -176,6 +182,21 @@ def _secure(exchange: Exchange, candidate, size: float, alerter: Alerter | None)
 def _emit(alerter: Alerter | None, event: str, **fields) -> None:
     if alerter is not None:
         alerter.alert(event, **fields)
+
+
+_HALT_ALERT_KEY = "alert_halt_last"
+
+
+def _alert_halt(state: StateStore, alerter: Alerter, batch, breaker_tripped: bool, daily_loss: bool) -> None:
+    """Alert when the breaker / loss-limit is blocking candidates — but only on a
+    *change* of state, so a tripped breaker doesn't spam the run loop every pass."""
+    reason = "kill switch" if breaker_tripped else "daily loss limit" if daily_loss else ""
+    if reason and batch:
+        if state.meta_get(_HALT_ALERT_KEY) != reason:
+            alerter.alert("halted", level="critical", reason=reason, candidates=len(batch))
+            state.meta_set(_HALT_ALERT_KEY, reason)
+    elif not reason and state.meta_get(_HALT_ALERT_KEY):
+        state.meta_set(_HALT_ALERT_KEY, "")  # cleared — re-arm for the next trip
 
 
 def _note(*, dry_run: bool, fire_enabled: bool) -> str:

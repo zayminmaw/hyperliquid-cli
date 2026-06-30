@@ -45,9 +45,14 @@ def resolve_open_trades(
         if outcome is None:
             continue  # still live
 
-        status, exit_price = outcome
+        status, level_price = outcome
         side = Side(trade["side"])
-        exchange.place_order(_close_order(trade, side, exit_price, native_protected))
+        result = exchange.place_order(_close_order(trade, side, level_price, native_protected))
+        # On a live market close, book the *actual* fill — keeps the ledger (and the
+        # graduation expectancy that gates mainnet) honest about slippage. A native
+        # trigger that beat us to the close reports no fill, so we fall back to the
+        # level; paper fills its LIMIT exactly at the level by construction.
+        exit_price = result.avg_price if native_protected and result.avg_price is not None else level_price
         realized, r_multiple = _pnl(trade, side, exit_price)
         state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now)
         closed += 1

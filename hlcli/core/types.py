@@ -102,3 +102,8 @@ class OrderResult(BaseModel):
     status: str = ""
     order_id: str | None = None
     message: str = ""
+    # Reconciliation: what actually filled, so the executor opens the ledger and
+    # sizes protection against reality — not the intended order. `filled_size` is 0
+    # for an accepted-but-resting order; None when the backend doesn't report fills.
+    filled_size: float | None = None
+    avg_price: float | None = None

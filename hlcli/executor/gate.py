@@ -84,16 +84,21 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
     if ctx.open_count >= ctx.caps.max_concurrent_positions:
         return _reject(f"max concurrent positions ({ctx.caps.max_concurrent_positions}) reached")
 
+    if ctx.equity <= 0:
+        return _reject("equity non-positive")
+
     size, notional = _size(candidate, decision, ctx)
     if size <= 0:
         return _reject("size clamped to zero (conviction below threshold)")
 
+    # A MARKET entry so an accepted order is a *filled* one — a resting GTC limit
+    # would leave the ledger and protective triggers tracking a position that may
+    # never open. The candidate's entry/sl/tp still drive sizing and protection.
     order = Order(
         coin=candidate.coin,
         side=candidate.side,
-        order_type=OrderType.LIMIT,
+        order_type=OrderType.MARKET,
         size=size,
-        price=candidate.entry,
         reduce_only=False,
     )
     return GateOutcome(approved=True, order=order, size=size, notional=notional)

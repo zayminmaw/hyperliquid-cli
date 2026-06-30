@@ -1,6 +1,6 @@
 """End-to-end executor pass: candidates → paper fills, deterministic + restart-safe."""
 
-from hlcli.core.types import Candidate, Order, OrderType, Side
+from hlcli.core.types import Candidate, Order, OrderResult, OrderType, Side
 from hlcli.exchange.paper import PaperExchange
 from hlcli.executor.execute import fire
 from hlcli.executor.runner import run_once
@@ -48,6 +48,27 @@ def test_idempotent_skip_on_reprocess(tmp_path):
     repeat = fire(ex, state, c, order, NOW)  # crash-before-advance simulation
     assert repeat.status == "duplicate"
     assert len(ex.get_positions()) == 1
+
+
+class _RejectingExchange:
+    """Definitively refuses every order (a clean reject, not a transport error)."""
+
+    def place_order(self, order):
+        return OrderResult(accepted=False, status="error", message="insufficient margin")
+
+
+def test_clean_reject_releases_idempotency_key(tmp_path):
+    # A definitive reject means nothing reached the book, so the key store must not
+    # claim the candidate fired — otherwise a re-enqueue would be wrongly skipped.
+    _ex, state = _setup(tmp_path)
+    c = _cand("a")
+    result = fire(_RejectingExchange(), state, c, _cand_order(), NOW)
+    assert not result.accepted
+    assert not state.already_fired("a")  # released — free to retry
+
+
+def _cand_order() -> Order:
+    return Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=1.0)
 
 
 def test_dry_run_is_side_effect_free(tmp_path):

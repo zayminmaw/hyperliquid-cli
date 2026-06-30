@@ -112,6 +112,19 @@ def test_rejects_zero_size_below_conviction():
     assert not out.approved and "size clamped to zero" in out.reason
 
 
+def test_rejects_non_positive_equity():
+    # A blown account rejects explicitly, not via a misleading "size clamped" reason.
+    out = evaluate(_candidate(), _decision(), _ctx(equity=0.0))
+    assert not out.approved and out.reason == "equity non-positive"
+
+
+def test_approved_entry_is_marketable():
+    # An accepted entry must be a filled one — a MARKET order, never a resting limit.
+    from hlcli.core.types import OrderType
+    out = evaluate(_candidate(), _decision(), _ctx())
+    assert out.approved and out.order.order_type is OrderType.MARKET
+
+
 # --- first-failure ordering ---
 
 def test_breaker_beats_staleness():

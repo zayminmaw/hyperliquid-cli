@@ -155,14 +155,26 @@ def _parse_order_response(resp) -> OrderResult:
     if "error" in status:
         return OrderResult(accepted=False, status="error", message=str(status["error"]))
     if "resting" in status:
-        return OrderResult(accepted=True, status="resting", order_id=str(status["resting"]["oid"]))
+        # Accepted but not filled — a live GTC limit can rest. filled_size=0 so the
+        # executor treats it as "no position yet", never a phantom open.
+        return OrderResult(
+            accepted=True, status="resting", order_id=str(status["resting"]["oid"]), filled_size=0.0,
+        )
     if "filled" in status:
         f = status["filled"]
         return OrderResult(
             accepted=True, status="filled", order_id=str(f.get("oid")),
             message=f"{f.get('totalSz')} @ {f.get('avgPx')}",
+            filled_size=_as_float(f.get("totalSz")), avg_price=_as_float(f.get("avgPx")),
         )
     return OrderResult(accepted=True, status="ok", message=str(status))
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_simple(resp, ok_status: str) -> OrderResult:

@@ -18,10 +18,13 @@ NOW = 1_000_000.0
 class FakeLiveExchange:
     """A live-network backend stand-in: fills entries, optionally rejects triggers."""
 
-    def __init__(self, network=Network.TESTNET, marks=None, *, fail_triggers=False):
+    def __init__(self, network=Network.TESTNET, marks=None, *, fail_triggers=False,
+                 fill_size=None, fill_price=None):
         self.network = network
         self._marks = marks or {"BTC": 100.0}
         self.fail_triggers = fail_triggers
+        self.fill_size = fill_size  # None = fill the whole order
+        self.fill_price = fill_price
         self.placed = []
 
     def get_marks(self):
@@ -44,7 +47,14 @@ class FakeLiveExchange:
         is_trigger = order.order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT)
         if self.fail_triggers and is_trigger:
             return OrderResult(accepted=False, status="error", message="trigger rejected")
-        return OrderResult(accepted=True, status="filled", order_id="x")
+        mark = self._marks.get(order.coin)
+        price = self.fill_price if self.fill_price is not None else mark
+        if is_trigger or order.reduce_only:
+            return OrderResult(accepted=True, status="filled", order_id="x",
+                               filled_size=order.size, avg_price=price)
+        filled = order.size if self.fill_size is None else self.fill_size
+        return OrderResult(accepted=True, status="filled" if filled > 0 else "resting", order_id="x",
+                           filled_size=filled, avg_price=price if filled > 0 else None)
 
     def cancel(self, *a, **k):
         return OrderResult(accepted=True, status="canceled")
@@ -109,9 +119,36 @@ def test_protected_fire_places_entry_plus_two_triggers(tmp_path):
 
     assert (s.fired, s.rejected) == (1, 0)
     kinds = [o.order_type for o in ex.placed]
-    assert kinds == [OrderType.LIMIT, OrderType.STOP_LOSS, OrderType.TAKE_PROFIT]
+    assert kinds == [OrderType.MARKET, OrderType.STOP_LOSS, OrderType.TAKE_PROFIT]  # marketable entry
     assert len(state.open_trades()) == 1
     assert [e["event"] for e in alerter.events] == ["fire"]
+
+
+def test_open_trade_and_protection_use_the_actual_filled_size(tmp_path):
+    # A partial fill at a slipped price: ledger + protective triggers track reality,
+    # not the intended order size/price.
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, fill_size=0.5, fill_price=101.0)
+    state.enqueue(_cand())
+    run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW)
+
+    trade = state.open_trades()[0]
+    assert trade["size"] == 0.5 and trade["entry"] == 101.0
+    triggers = [o for o in ex.placed if o.order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT)]
+    assert triggers and all(o.size == 0.5 for o in triggers)
+
+
+def test_accepted_but_unfilled_entry_opens_no_trade(tmp_path):
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, fill_size=0.0)
+    state.enqueue(_cand())
+    alerter = CapturingAlerter()
+    s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
+
+    assert (s.fired, s.rejected) == (0, 1)
+    assert state.open_trades() == []
+    assert [o.order_type for o in ex.placed] == [OrderType.MARKET]  # no protection on a non-position
+    assert any(e["event"] == "reject" and e["reason"] == "unfilled" for e in alerter.events)
 
 
 def test_unprotectable_entry_is_emergency_closed_not_left_naked(tmp_path):

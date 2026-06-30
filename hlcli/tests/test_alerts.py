@@ -72,6 +72,18 @@ def test_breaker_emits_halted_and_reject(tmp_path):
     assert reject["reason"] == "breaker tripped"
 
 
+def test_halted_alert_is_edge_triggered_not_per_pass(tmp_path):
+    # A persistently-tripped breaker must not spam a "halted" alert every pass.
+    state = StateStore(tmp_path / "state.db")
+    state.set_breaker(True)
+    alerter = CapturingAlerter()
+    for i in range(3):
+        state.enqueue(_cand(id=f"c{i}"))
+        ex = PaperExchange(10_000.0, marks=FakeMarks(), state=state)
+        run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
+    assert sum(e["event"] == "halted" for e in alerter.events) == 1  # once, not three times
+
+
 def test_no_alerter_is_a_silent_noop(tmp_path):
     state = StateStore(tmp_path / "state.db")
     ex = PaperExchange(10_000.0, marks=FakeMarks(), state=state)

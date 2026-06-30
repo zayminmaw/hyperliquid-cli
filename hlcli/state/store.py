@@ -115,6 +115,12 @@ class StateStore:
         )
         self._conn.commit()
 
+    def release_fire(self, key: str) -> None:
+        """Undo a recorded intent after a *definitive* reject (the order did not fill),
+        so the key store reflects only orders that actually reached the book."""
+        self._conn.execute("DELETE FROM idempotency WHERE key = ?", (key,))
+        self._conn.commit()
+
     # --- decision log ---
 
     def log_decision(self, candidate_id: str, ts: float, *, decision=None, gate=None, fill=None, context=None) -> None:

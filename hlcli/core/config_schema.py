@@ -23,6 +23,7 @@ from hlcli.core.config import get_caps
 _RISK_PCT_MAX = 5.0
 _MAX_CANDIDATES_CEILING = 50
 _MAX_HOLD_CEILING = 10_080  # one week in minutes; an upper sanity bound on auto-expiry
+_KNOWN_REGIMES = ("trend", "range")  # the gate's vocabulary; a tuner can't invent regimes
 
 
 class RegimeGate(BaseModel):
@@ -65,6 +66,8 @@ def clamp(cfg: TunableConfig) -> TunableConfig:
     ceil = _bound(s.ceil_fraction, 0.0, 1.0)
     floor = min(floor, ceil)  # floor can never exceed ceil
 
+    regimes = tuple(r for r in cfg.regime.allowed_regimes if r in _KNOWN_REGIMES) or _KNOWN_REGIMES
+
     return cfg.model_copy(
         update={
             "risk_per_trade_pct": _bound(cfg.risk_per_trade_pct, 0.0, _RISK_PCT_MAX),
@@ -73,6 +76,7 @@ def clamp(cfg: TunableConfig) -> TunableConfig:
             ),
             "decision_temperature": _bound(cfg.decision_temperature, 0.0, 1.0),
             "max_hold_minutes": int(_bound(cfg.max_hold_minutes, 0, _MAX_HOLD_CEILING)),
+            "regime": cfg.regime.model_copy(update={"allowed_regimes": regimes}),
             "sizing": s.model_copy(
                 update={
                     "min_conviction": _bound(s.min_conviction, 0.0, 1.0),
