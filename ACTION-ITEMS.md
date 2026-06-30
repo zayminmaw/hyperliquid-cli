@@ -55,12 +55,14 @@ Gate: candidates → paper fills; fully deterministic; restart-safe. ✅ passed
 ## Phase 3: LLM decision
 Gate: shadow runs produce sane, fully-logged decisions on paper/testnet.
 
-- [ ] 3.1 `executor/enrich.py` — marks, portfolio + equity + P&L, regime signal, rolling recent resolved outcomes, tunable config
-- [ ] 3.2 `executor/decision.py` — LLM decision (lazy `anthropic`), claude-sonnet-4-6, structured JSON, low temp
-- [ ] 3.3 LLM-output validator + clamp; failed schema → drop + tally, never guess
-- [ ] 3.4 Decision log with full input context + fill + outcome
-- [ ] 3.5 `exec shadow` — decide + log, fire nothing
-- [ ] 3.6 Tests: validator/clamp with mocked LLM (deterministic fixtures)
+- [x] 3.1 `executor/enrich.py` — marks, portfolio + equity + P&L, recent decisions, tunable surface. `regime=None` (no price-history feed yet; gate skips when None — chosen over fabricating a signal)
+- [x] 3.2 `executor/decision.py` — LLM decision (lazy `anthropic`), claude-sonnet-4-6, forced strict tool `submit_decision`, `decision_temperature`
+- [x] 3.3 `validate_decision` validator + clamp; bad enum/missing/non-numeric → drop+tally, out-of-range conviction → clamp; never guesses
+- [x] 3.4 Decision log carries enriched context + decision + gate + fill (resolved-outcome cohorting is Phase 4.1 — this is its substrate)
+- [x] 3.5 `exec shadow` — `run_once(fire_enabled=False)`: decide + gate + log, fire nothing
+- [x] 3.6 Tests: `test_decision.py` validator/clamp + mocked client; executor mechanics inject a deterministic `decide_fn` (LLM never hit in tests)
+
+Gate verification (real LLM call on paper/testnet shadow) is deferred pending an `ANTHROPIC_API_KEY`, mirroring Phase 1's deferred live testnet order. Pipeline is code-complete + fully covered by mocked tests (104 pass).
 
 ## Phase 4: Self-tuning (out-of-path, propose→approve)
 Gate: tuner proposes from logged outcomes; `promote` works; clamps hold.

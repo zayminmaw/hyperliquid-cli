@@ -1,9 +1,30 @@
-"""Shared test helpers — fake marks + caps/tunable factories (no env, no network)."""
+"""Shared test helpers — fake marks + caps/tunable factories + deterministic deciders.
+
+The deciders stand in for the LLM so executor-mechanics tests run with no key and
+no `anthropic` install; the real `decide` call is exercised separately in
+test_decision.py against a fake client.
+"""
 
 from __future__ import annotations
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig, clamp
+from hlcli.core.types import Action, Decision, Timing
+from hlcli.executor.decision import DecisionResult
+
+
+def act_now(ctx, caps, tunable) -> DecisionResult:
+    """Deterministic 'act now, full conviction' — the Phase-2 stub, as an injectable decider."""
+    return DecisionResult(
+        Decision(candidate_id=ctx.candidate.id, action=Action.ACT, timing=Timing.NOW, conviction=1.0),
+        raw={"action": "act", "timing": "now", "conviction": 1.0},
+        note="ok",
+    )
+
+
+def drop(ctx, caps, tunable) -> DecisionResult:
+    """A decider whose output failed schema validation — drop + tally, never fire."""
+    return DecisionResult(None, raw=None, note="schema_invalid")
 
 
 class FakeMarks:

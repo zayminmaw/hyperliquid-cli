@@ -1,14 +1,24 @@
 """The executor pass (PLAN.md §5).
 
 One pass: resolve positions/equity → pull new candidates past the high-water mark
-→ deterministic decision → risk gate → fire approved (idempotent) → log → advance
-the HWM. `dry_run` computes everything but mutates no state (a side-effect-free
-preview). LLM enrich/decision arrive in Phase 3; the gate is unchanged by them.
+→ enrich → LLM decision → risk gate → fire approved (idempotent) → log → advance
+the HWM. The judgment/mechanics split means the gate is identical whether the
+decision came from the LLM or a deterministic stub.
+
+Three knobs shape a pass:
+  - `dry_run`     compute everything, mutate nothing (a side-effect-free preview).
+  - `fire_enabled=False`  shadow mode — decide, gate, and log, but fire nothing.
+  - `decide_fn`   injected so tests exercise the mechanics with a deterministic
+                  decider (the real LLM call is mocked, never hit in tests).
+
+A *schema-invalid* decision is dropped, tallied, and logged — never fired, never
+guessed at. An API failure propagates out of the pass for the caller to handle.
 """
 
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from pydantic import BaseModel
 
@@ -16,11 +26,14 @@ from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Network
 from hlcli.exchange.base import Exchange
-from hlcli.executor.decision import decide
+from hlcli.executor.decision import DecisionResult, decide
+from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
 from hlcli.executor.gate import GateContext, evaluate
 from hlcli.safety.breaker import Breaker
 from hlcli.state.store import StateStore
+
+DecideFn = Callable[..., DecisionResult]
 
 
 class PassSummary(BaseModel):
@@ -29,6 +42,7 @@ class PassSummary(BaseModel):
     approved: int
     fired: int
     rejected: int
+    dropped: int
     note: str
 
 
@@ -39,27 +53,48 @@ def run_once(
     tunable: TunableConfig,
     *,
     dry_run: bool = False,
+    fire_enabled: bool = True,
+    decide_fn: DecideFn = decide,
     now: float | None = None,
 ) -> PassSummary:
     now = now if now is not None else time.time()
     breaker = Breaker(state, caps)
 
     equity = exchange.equity()
-    open_coins = {p.coin for p in exchange.get_positions()}
+    positions = exchange.get_positions()
+    open_coins = {p.coin for p in positions}
+    marks = exchange.get_marks()
+    realized = state.paper_realized() if exchange.network is Network.PAPER else None
+    recent = state.recent_decisions(limit=10)
     breaker_tripped = breaker.tripped()
     daily_loss = breaker.daily_loss_hit(equity)
 
     batch = state.pull_new(limit=tunable.max_candidates_per_pass)
-    approved = fired = rejected = 0
+    approved = fired = rejected = dropped = 0
 
     for seq, candidate in batch:
-        decision = decide(candidate)
-        ctx = GateContext(
+        ctx = enrich(
+            candidate, marks=marks, equity=equity, positions=positions,
+            realized=realized, recent=recent, tunable=tunable,
+        )
+        result = decide_fn(ctx, caps, tunable)
+
+        if result.dropped:
+            dropped += 1
+            if not dry_run:
+                state.log_decision(candidate.id, now, context={"dropped": result.note, "raw": result.raw})
+                state.set_status(seq, "dropped")
+                state.advance_hwm(seq)
+            continue
+
+        decision = result.decision
+        gate_ctx = GateContext(
             caps=caps, tunable=tunable, equity=equity,
             open_coins=set(open_coins), open_count=len(open_coins),
             now=now, breaker_tripped=breaker_tripped, daily_loss_hit=daily_loss,
+            regime=ctx.regime,
         )
-        outcome = evaluate(candidate, decision, ctx)
+        outcome = evaluate(candidate, decision, gate_ctx)
 
         if dry_run:
             approved += int(outcome.approved)
@@ -70,25 +105,36 @@ def run_once(
         status = "rejected"
         if outcome.approved:
             approved += 1
-            fill = fire(exchange, state, candidate, outcome.order, now)
-            if fill.accepted:
-                fired += 1
-                open_coins.add(candidate.coin)
-                status = "fired"
+            if fire_enabled:
+                fill = fire(exchange, state, candidate, outcome.order, now)
+                if fill.accepted:
+                    fired += 1
+                    open_coins.add(candidate.coin)
+                    status = "fired"
+                else:
+                    rejected += 1  # duplicate or exchange reject
             else:
-                rejected += 1  # duplicate or exchange reject
+                status = "shadow"  # approved but deliberately not fired
         else:
             rejected += 1
 
         state.log_decision(
             candidate.id, now, decision=decision, gate=outcome, fill=fill,
-            context={"equity": equity, "open_coins": sorted(open_coins)},
+            context={"equity": equity, "open_coins": sorted(open_coins), "regime": ctx.regime},
         )
         state.set_status(seq, status)
         state.advance_hwm(seq)
 
     return PassSummary(
         network=exchange.network, seen=len(batch), approved=approved,
-        fired=fired, rejected=rejected,
-        note="dry-run (no state changes)" if dry_run else "ok",
+        fired=fired, rejected=rejected, dropped=dropped,
+        note=_note(dry_run=dry_run, fire_enabled=fire_enabled),
     )
+
+
+def _note(*, dry_run: bool, fire_enabled: bool) -> str:
+    if dry_run:
+        return "dry-run (no state changes)"
+    if not fire_enabled:
+        return "shadow (logged, fired nothing)"
+    return "ok"

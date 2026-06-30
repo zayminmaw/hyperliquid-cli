@@ -11,7 +11,6 @@ import typer
 
 from hlcli.cli.context import GlobalState, build_for, state_of
 from hlcli.cli.output import emit, emit_rows, note
-from hlcli.cli.stubs import stub_command
 from hlcli.cli.watch import watch_rows
 from hlcli.core.config import Caps, get_caps
 from hlcli.core.config_schema import TunableConfig, load_tunable
@@ -25,9 +24,6 @@ from hlcli.safety.breaker import Breaker
 from hlcli.state.store import StateStore, open_state
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
-
-# The LLM decision + shadow mode arrive in Phase 3.
-app.command(name="shadow")(stub_command("exec", "shadow", 3))
 
 
 def _env(g: GlobalState, *, for_write: bool) -> tuple[Exchange, StateStore, Caps, TunableConfig]:
@@ -78,11 +74,20 @@ def propose(
 
 @app.command("once")
 def once(ctx: typer.Context) -> None:
-    """One full executor pass (intake → decision → gate → fire → log)."""
+    """One full executor pass (intake → enrich → LLM decision → gate → fire → log)."""
     g = state_of(ctx)
     exchange, state, caps, tunable = _env(g, for_write=True)
     summary = run_once(exchange, state, caps, tunable, dry_run=g.dry_run)
     emit(summary.model_dump(), as_json=g.json_out, title="exec once")
+
+
+@app.command("shadow")
+def shadow(ctx: typer.Context) -> None:
+    """Decide + gate + log a full pass but fire nothing (pre-mainnet confidence + tuner data)."""
+    g = state_of(ctx)
+    exchange, state, caps, tunable = _env(g, for_write=False)
+    summary = run_once(exchange, state, caps, tunable, fire_enabled=False, dry_run=g.dry_run)
+    emit(summary.model_dump(), as_json=g.json_out, title="exec shadow")
 
 
 @app.command("run")
@@ -93,8 +98,12 @@ def run(ctx: typer.Context, interval: float = typer.Option(5.0, "--interval", he
     note(f"executor running every {interval}s on {g.network.value} — ctrl-c to stop")
     try:
         while True:
-            s = run_once(exchange, state, caps, tunable, dry_run=g.dry_run)
-            note(f"[dim]{time.strftime('%H:%M:%S')}[/dim] seen={s.seen} fired={s.fired} rejected={s.rejected}")
+            try:
+                s = run_once(exchange, state, caps, tunable, dry_run=g.dry_run)
+                note(f"[dim]{time.strftime('%H:%M:%S')}[/dim] seen={s.seen} fired={s.fired} "
+                     f"rejected={s.rejected} dropped={s.dropped}")
+            except Exception as exc:  # keep the loop alive across transient LLM/network faults
+                note(f"[yellow]{time.strftime('%H:%M:%S')} pass failed: {exc}[/yellow]")
             time.sleep(interval)
     except KeyboardInterrupt:
         note("stopped")
