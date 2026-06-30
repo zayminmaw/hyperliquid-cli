@@ -80,9 +80,11 @@ Gate: tuner proposes from logged outcomes; `promote` works; clamps hold.
 ## Phase 5: Mainnet hardening
 Gate: testnet/shadow expectancy clears → controlled mainnet at tiny caps.
 
-- [ ] 5.1 Native exchange-side SL/TP trigger orders placed at entry time (reuse trade trigger path)
-- [ ] 5.2 Mainnet env gate + typed confirmation (HL_ENABLE_MAINNET=1 + --network mainnet + confirm; -y skips prompt but still needs env flag)
-- [ ] 5.3 Graduation checklist (N days / N resolved trades positive expectancy, surfaced in report)
-- [ ] 5.4 Key handling review — agent wallets default, no keys in logs or decision context
-- [ ] 5.5 Alerting on fires, rejects, breaker trips, loss-limit hits
-- [ ] 5.6 Tests: mainnet gate (all three conditions required)
+- [x] 5.1 `executor/protect.py` — native exchange-side SL/TP reduce-only triggers placed at entry (reuses the live backend's trigger path). `requires_native_protection()` = True for testnet+mainnet (§13 Q6 confirmed: hard prereq). Runner places entry → protection; on a live backend the resolver now closes via reduce-only MARKET (`native_protected`), paper unchanged.
+- [x] 5.2 Mainnet prereq has teeth: a live entry that can't be protected is emergency market-closed (never left naked), no ledger entry, status `aborted` — idempotency key already spent so it won't re-fire. Mainnet env gate + typed confirm already shipped (Phase 0/1).
+- [x] 5.3 `safety/graduation.py` — N resolved trades / N days / positive expectancy vs new hard caps (`GRADUATION_MIN_TRADES=20`, `_DAYS=7`, `_EXPECTANCY=0.0`); surfaced in `exec report`.
+- [x] 5.4 Key handling review — keys live only in `HyperliquidExchange._agent_key` (signing); `EnrichedContext`/decision-log context are keyless by construction. Regression test asserts no key-ish field + log context ⊆ {equity, open_coins, regime}. Keystore 0600 already tested.
+- [x] 5.5 `safety/alerts.py` — structured JSONL (`alerts-<network>.log`) + stderr (§ confirmed: log+stderr, no deps/keys). Runner hooks: fire, reject, halted (breaker/loss-limit), protection_failed. Injected into `exec once`/`run`; None in shadow/tests = silent.
+- [x] 5.6 Tests: protection (builder/place/abort), graduation thresholds, alert emission, key redaction, report CLI. 143 pass, 1 skip; keyless-import invariant re-verified.
+
+§13 Q6 = native SL/TP is a hard mainnet prerequisite (user-confirmed). Native triggers scoped to testnet+mainnet so the safety path is exercised before real money (user-confirmed over mainnet-only). Live testnet/mainnet runs + real graduation deferred pending keys (as with Phase 1/3/4).

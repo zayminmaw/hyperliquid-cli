@@ -40,6 +40,13 @@ def test_exec_once_json_is_machine_readable(isolated_caps):
     assert payload["seen"] == 0 and payload["fired"] == 0
 
 
+def test_exec_report_surfaces_graduation(isolated_caps):
+    result = runner.invoke(app, ["--json", "exec", "report"])
+    assert result.exit_code == 0
+    grad = json.loads(result.output)["graduation"]
+    assert grad["ready"] is False and grad["n"] == 0  # empty ledger isn't mainnet-ready
+
+
 def test_config_show_works():
     result = runner.invoke(app, ["config", "show"])
     assert result.exit_code == 0

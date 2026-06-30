@@ -20,7 +20,9 @@ from hlcli.exchange.paper import PaperExchange
 from hlcli.executor.intake import make_candidate, parse_batch
 from hlcli.executor.monitor import position_health
 from hlcli.executor.runner import run_once
+from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
+from hlcli.safety.graduation import assess
 from hlcli.state.store import StateStore, open_state
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
@@ -36,6 +38,11 @@ def _env(g: GlobalState, *, for_write: bool) -> tuple[Exchange, StateStore, Caps
     else:
         exchange = build_for(g, for_write=for_write)
     return exchange, state, caps, tunable
+
+
+def _alerter(caps: Caps, network: Network) -> Alerter:
+    """Network-scoped alert sink: JSONL log beside the data dir + stderr."""
+    return Alerter(caps.data_dir / f"alerts-{network.value}.log")
 
 
 @app.command("propose")
@@ -77,7 +84,7 @@ def once(ctx: typer.Context) -> None:
     """One full executor pass (intake → enrich → LLM decision → gate → fire → log)."""
     g = state_of(ctx)
     exchange, state, caps, tunable = _env(g, for_write=True)
-    summary = run_once(exchange, state, caps, tunable, dry_run=g.dry_run)
+    summary = run_once(exchange, state, caps, tunable, dry_run=g.dry_run, alerter=_alerter(caps, g.network))
     emit(summary.model_dump(), as_json=g.json_out, title="exec once")
 
 
@@ -95,11 +102,12 @@ def run(ctx: typer.Context, interval: float = typer.Option(5.0, "--interval", he
     """Continuous executor loop (ctrl-c to stop)."""
     g = state_of(ctx)
     exchange, state, caps, tunable = _env(g, for_write=True)
+    alerter = _alerter(caps, g.network)
     note(f"executor running every {interval}s on {g.network.value} — ctrl-c to stop")
     try:
         while True:
             try:
-                s = run_once(exchange, state, caps, tunable, dry_run=g.dry_run)
+                s = run_once(exchange, state, caps, tunable, dry_run=g.dry_run, alerter=alerter)
                 note(f"[dim]{time.strftime('%H:%M:%S')}[/dim] seen={s.seen} fired={s.fired} "
                      f"resolved={s.resolved} rejected={s.rejected} dropped={s.dropped}")
             except Exception as exc:  # keep the loop alive across transient LLM/network faults
@@ -143,7 +151,7 @@ def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch"
 
 @app.command("report")
 def report(ctx: typer.Context) -> None:
-    """Account summary: equity, open positions, unrealized P&L, breaker state."""
+    """Account summary: equity, open positions, unrealized P&L, breaker + graduation readiness."""
     g = state_of(ctx)
     exchange, state, caps, _tunable = _env(g, for_write=False)
     positions = exchange.get_positions()
@@ -154,6 +162,7 @@ def report(ctx: typer.Context) -> None:
             "open_positions": len(positions),
             "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
             "breaker": "tripped" if Breaker(state, caps).tripped() else "clear",
+            "graduation": assess(state.resolved_trades(), caps),
         },
         as_json=g.json_out, title="exec report",
     )

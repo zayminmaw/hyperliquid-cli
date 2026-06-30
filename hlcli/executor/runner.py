@@ -30,7 +30,9 @@ from hlcli.executor.decision import DecisionResult, decide
 from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
 from hlcli.executor.gate import GateContext, evaluate
+from hlcli.executor.protect import emergency_close, place_protection, requires_native_protection
 from hlcli.executor.resolve import resolve_open_trades
+from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.state.store import StateStore
 
@@ -57,16 +59,18 @@ def run_once(
     dry_run: bool = False,
     fire_enabled: bool = True,
     decide_fn: DecideFn = decide,
+    alerter: Alerter | None = None,
     now: float | None = None,
 ) -> PassSummary:
     now = now if now is not None else time.time()
     breaker = Breaker(state, caps)
+    protected = requires_native_protection(exchange.network)
 
     marks = exchange.get_marks()
     # Monitor step: close any open trade whose SL/TP/expiry has triggered, recording
     # its outcome. Skipped for shadow/dry-run (no live book to manage).
     resolved = (
-        resolve_open_trades(exchange, state, caps, tunable, now, marks=marks)
+        resolve_open_trades(exchange, state, caps, tunable, now, marks=marks, native_protected=protected)
         if fire_enabled and not dry_run else 0
     )
 
@@ -79,6 +83,9 @@ def run_once(
     daily_loss = breaker.daily_loss_hit(equity)
 
     batch = state.pull_new(limit=tunable.max_candidates_per_pass)
+    if batch and (breaker_tripped or daily_loss):
+        _emit(alerter, "halted", level="critical",
+              reason="kill switch" if breaker_tripped else "daily loss limit", candidates=len(batch))
     approved = fired = rejected = dropped = 0
 
     for seq, candidate in batch:
@@ -112,25 +119,33 @@ def run_once(
 
         fill = None
         status = "rejected"
-        if outcome.approved:
-            approved += 1
-            if fire_enabled:
-                fill = fire(exchange, state, candidate, outcome.order, now)
-                if fill.accepted:
-                    fired += 1
-                    open_coins.add(candidate.coin)
-                    status = "fired"
-                    state.open_trade(
-                        candidate.id, candidate.coin, candidate.side, candidate.entry,
-                        candidate.sl, candidate.tp, outcome.order.size,
-                        decision.conviction, ctx.regime, now,
-                    )
-                else:
-                    rejected += 1  # duplicate or exchange reject
-            else:
-                status = "shadow"  # approved but deliberately not fired
-        else:
+        if not outcome.approved:
             rejected += 1
+            _emit(alerter, "reject", level="warning", coin=candidate.coin, reason=outcome.reason)
+        elif not fire_enabled:
+            approved += 1
+            status = "shadow"  # approved but deliberately not fired
+        else:
+            approved += 1
+            fill = fire(exchange, state, candidate, outcome.order, now)
+            if not fill.accepted:
+                rejected += 1  # duplicate or exchange reject
+                _emit(alerter, "reject", level="warning", coin=candidate.coin,
+                      reason=fill.message or fill.status)
+            elif protected and not _secure(exchange, candidate, outcome.order.size, alerter):
+                rejected += 1  # entry filled but couldn't be protected → emergency-closed
+                status = "aborted"
+            else:
+                fired += 1
+                open_coins.add(candidate.coin)
+                status = "fired"
+                state.open_trade(
+                    candidate.id, candidate.coin, candidate.side, candidate.entry,
+                    candidate.sl, candidate.tp, outcome.order.size,
+                    decision.conviction, ctx.regime, now,
+                )
+                _emit(alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
+                      size=outcome.order.size, conviction=decision.conviction, order_id=fill.order_id)
 
         state.log_decision(
             candidate.id, now, decision=decision, gate=outcome, fill=fill,
@@ -144,6 +159,23 @@ def run_once(
         fired=fired, rejected=rejected, dropped=dropped, resolved=resolved,
         note=_note(dry_run=dry_run, fire_enabled=fire_enabled),
     )
+
+
+def _secure(exchange: Exchange, candidate, size: float, alerter: Alerter | None) -> bool:
+    """Place native protective triggers; if that fails, flatten the position rather than
+    leave it naked. Returns True only when the position is protected."""
+    protection = place_protection(exchange, candidate, size)
+    if protection.ok:
+        return True
+    closed = emergency_close(exchange, candidate, size)
+    _emit(alerter, "protection_failed", level="critical", coin=candidate.coin,
+          reason=protection.failed, emergency_closed=closed.accepted)
+    return False
+
+
+def _emit(alerter: Alerter | None, event: str, **fields) -> None:
+    if alerter is not None:
+        alerter.alert(event, **fields)
 
 
 def _note(*, dry_run: bool, fire_enabled: bool) -> str:

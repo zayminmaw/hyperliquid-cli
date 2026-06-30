@@ -1,0 +1,80 @@
+"""Alerting (PLAN.md §7): structured JSONL to a log + stderr, and the runner's
+fire / reject / halted hooks."""
+
+import io
+import json
+
+from hlcli.core.types import Candidate, Side
+from hlcli.exchange.paper import PaperExchange
+from hlcli.executor.runner import run_once
+from hlcli.safety.alerts import Alerter
+from hlcli.state.store import StateStore
+from hlcli.tests._helpers import FakeMarks, act_now, caps, tunable
+
+NOW = 1_000_000.0
+
+
+def _cand(id="a", coin="BTC") -> Candidate:
+    return Candidate(id=id, coin=coin, side=Side.LONG, entry=100, tp=120, sl=90, created_at=NOW)
+
+
+def test_alerter_writes_jsonl_and_stream(tmp_path):
+    stream = io.StringIO()
+    path = tmp_path / "alerts.log"
+    alerter = Alerter(path, stream=stream)
+    record = alerter.alert("fire", level="info", coin="BTC", size=1.0)
+
+    assert record["event"] == "fire" and record["coin"] == "BTC" and "ts" in record
+    assert "fire" in stream.getvalue()
+    logged = json.loads(path.read_text().splitlines()[0])
+    assert logged["event"] == "fire" and logged["level"] == "info"
+
+
+def test_alerter_append_accumulates(tmp_path):
+    path = tmp_path / "alerts.log"
+    a = Alerter(path, stream=None)
+    a.alert("fire")
+    a.alert("reject", level="warning")
+    assert len(path.read_text().splitlines()) == 2
+
+
+class CapturingAlerter:
+    def __init__(self):
+        self.events = []
+
+    def alert(self, event, *, level="info", **fields):
+        self.events.append({"event": event, "level": level, **fields})
+
+
+def _run(tmp_path, *, breaker=False, marks=None):
+    state = StateStore(tmp_path / "state.db")
+    if breaker:
+        state.set_breaker(True)
+    ex = PaperExchange(10_000.0, marks=FakeMarks(marks), state=state)
+    state.enqueue(_cand())
+    alerter = CapturingAlerter()
+    run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
+    return alerter
+
+
+def test_fire_emits_one_fire_alert(tmp_path):
+    alerter = _run(tmp_path)
+    assert [e["event"] for e in alerter.events] == ["fire"]
+
+
+def test_breaker_emits_halted_and_reject(tmp_path):
+    alerter = _run(tmp_path, breaker=True)
+    events = {e["event"] for e in alerter.events}
+    assert events == {"halted", "reject"}
+    halted = next(e for e in alerter.events if e["event"] == "halted")
+    assert halted["level"] == "critical" and halted["reason"] == "kill switch"
+    reject = next(e for e in alerter.events if e["event"] == "reject")
+    assert reject["reason"] == "breaker tripped"
+
+
+def test_no_alerter_is_a_silent_noop(tmp_path):
+    state = StateStore(tmp_path / "state.db")
+    ex = PaperExchange(10_000.0, marks=FakeMarks(), state=state)
+    state.enqueue(_cand())
+    s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW)  # alerter defaults None
+    assert s.fired == 1

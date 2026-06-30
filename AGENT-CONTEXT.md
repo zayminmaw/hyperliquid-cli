@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-06-30 | Session: Phase 4 (resolution + self-tuning) code-complete + verified; Phase 5 next
+> Last updated: 2026-06-30 | Session: Phase 5 (mainnet hardening) code-complete + verified — all 6 phases done
 
 ---
 
 ## 🎯 CURRENT TASK
 
-- Task: Phase 5 — Mainnet hardening
-- Goal: native exchange-side SL/TP trigger orders at entry (reuse trade trigger path), mainnet env gate + typed confirm, graduation checklist (N days / N resolved trades positive expectancy → surfaced in report), key-handling review, alerting on fires/rejects/breaker/loss-limit
-- Status: not started (Phase 4 ✅ code-complete)
-- Next action: confirm §13 Q6 (native SL/TP as a hard mainnet prerequisite — strongly recommended); inspect `trade` trigger path (stop-loss/take-profit) to reuse for native triggers; the executor-side resolver (Phase 4) stays for paper/testnet
-- Blocked by: none. (Phase 1 live testnet order, Phase 3 shadow, Phase 4 config-tuner LLM runs all deferred pending keys.)
+- Task: Phase 5 — Mainnet hardening ✅ code-complete
+- Goal: native exchange-side SL/TP at entry, runtime prereq enforcement, graduation checklist in report, key review, alerting
+- Status: done (143 tests pass, 1 skip). Build plan fully implemented through all phases.
+- Next action: none coding-side. Remaining is operational — supply agent keys, run testnet/shadow to accumulate resolved trades, let graduation clear, then tiny mainnet caps. Optional follow-ups: webhook/email alert channel tailing alerts-<net>.log; live testnet validation of native-trigger reconciliation (slippage/partial fills).
+- Blocked by: none. (Phase 1 live testnet order, Phase 3 shadow, Phase 4 config-tuner LLM, Phase 5 real graduation — all deferred pending keys.)
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: Built Phase 4 — `executor/resolve.py` (SL/TP/expiry close-out → `trades` ledger) wired into runner; tuner stack (`stats` cohorts, `config_tuner` opus-4-8 strict tool, `prompt_tuner` text, `promote`/diff/history); `tune` CLI; decision.py loads `active_prompt.md`; lazy anthropic centralized in `core/llm.py`
-- Result: 123 tests pass; tune run no-ops keyless when gated (verified); clamps hold on proposed + promoted config; anthropic stays out of import path. §13 Q4 = propose→approve everywhere
-- File(s) touched: hlcli/core/{config_schema,llm(new)}.py, hlcli/state/store.py, hlcli/executor/{resolve(new),runner,decision}.py, hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py(new), hlcli/cli/{app.py,commands/tune.py(new)}, tests/{test_resolve,test_tuner}(new)+test_cli
+- Did: Built Phase 5 — `executor/protect.py` (native reduce-only SL/TP triggers at entry; runner emergency-closes an unprotectable entry → status `aborted`), `safety/alerts.py` (JSONL+stderr, runner hooks fire/reject/halted/protection_failed), `safety/graduation.py` (readiness vs new caps, surfaced in `exec report`); resolver native-aware (MARKET close on live), key-redaction regression
+- Result: 143 pass / 1 skip; keyless-import invariant re-verified (no anthropic/hyperliquid/eth_account leak); §13 Q6 = hard prereq, triggers on testnet+mainnet (both user-confirmed)
+- File(s) touched: hlcli/{safety/alerts(new),safety/graduation(new),executor/protect(new)}.py, hlcli/core/config.py, hlcli/executor/{resolve,runner}.py, hlcli/cli/commands/exec_.py, tests/{test_protect,test_graduation,test_alerts,test_keys}(new)+test_cli
 
 ---
 
@@ -41,9 +41,9 @@
 | `hlcli/state/store.py` | sqlite: intake/HWM/idempotency/decision_log/**trades**/paper_positions; `open_state` |
 | `hlcli/executor/gate.py` | `evaluate` (first-failure gate) + `_size` (fixed-fractional) + `infer_side` |
 | `hlcli/executor/{enrich,decision}.py` | `EnrichedContext` (regime=None) · `decide`(sonnet-4-6, strict tool)+`validate_decision`+`load_decision_prompt` |
-| `hlcli/executor/{intake,execute,runner,resolve,monitor}.py` | propose · fire · `run_once`(decide_fn/fire_enabled) · SL/TP/expiry close-out → trades · health |
+| `hlcli/executor/{intake,execute,runner,resolve,monitor,protect}.py` | propose · fire · `run_once`(decide_fn/fire_enabled/alerter) · close-out→trades (native_protected on live) · health · native SL/TP + emergency-close |
 | `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts(sample-gated) · opus-4-8 config(strict)+prompt tuners · proposed→active+diff/history |
-| `hlcli/safety/breaker.py` | kill switch + daily-loss-limit |
+| `hlcli/safety/{breaker,alerts,graduation}.py` | kill switch+loss-limit · JSONL+stderr alert sink · mainnet-readiness verdict (in `exec report`) |
 
 ---
 
@@ -58,7 +58,8 @@
 - [2026-06-27] Candidate side inferred from level geometry (long: sl<entry<tp); incoherent → rejected at intake + gate
 - [2026-06-27] Paper book persists in state-<network>.db; manual paper (no state) stays in-memory
 - [2026-06-30] Decision: out-of-range conviction is CLAMPED; bad enum / missing / non-numeric is DROPPED (never guessed). regime left None (no price-history feed); shadow=`fire_enabled=False` (logs+advances HWM) vs dry_run (mutates nothing)
-- [2026-06-30] Phase 4: executor-side resolver writes trade outcomes (SL/TP at trigger price, expiry at mark) — native exchange triggers stay Phase 5. Tuners clamp on propose+promote+load, sample-gated (no cohort ⇒ no model call); propose→approve everywhere (§13 Q4)
+- [2026-06-30] Phase 4: executor-side resolver writes trade outcomes (SL/TP at trigger price, expiry at mark). Tuners clamp on propose+promote+load, sample-gated (no cohort ⇒ no model call); propose→approve everywhere (§13 Q4)
+- [2026-06-30] Phase 5 (§13 Q6): native SL/TP is a HARD mainnet prereq — enforced at runtime (unprotectable live entry → emergency MARKET close, status `aborted`, no ledger, key already spent so no re-fire). Triggers scoped to testnet+mainnet (resolver closes via reduce-only MARKET there; paper keeps LIMIT-at-level). Graduation thresholds are hard caps. Alerts = JSONL+stderr (no deps/keys), None in shadow.
 
 ---
 

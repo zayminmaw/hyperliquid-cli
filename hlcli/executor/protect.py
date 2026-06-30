@@ -1,0 +1,68 @@
+"""Native exchange-side SL/TP — the mainnet prerequisite (PLAN.md §7).
+
+On a live backend the executor must not be the *only* thing between an open
+position and a runaway loss: a crashed process would leave the position naked. So
+at entry time we place protective reduce-only trigger orders **on the exchange** —
+a stop-loss and a take-profit at the candidate's levels — which the exchange
+honours even if this process dies. This reuses the Mode-A `stop-loss`/`take-profit`
+trigger path the live backend already exposes.
+
+Paper has no real book to protect, so there the Phase-4 resolver stays the monitor.
+The split is `requires_native_protection(network)`: True for testnet + mainnet.
+
+The hard prerequisite has teeth in the runner: if protection cannot be placed after
+an entry fills, the position is emergency-closed rather than left unprotected.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from hlcli.core.types import Candidate, Network, Order, OrderResult, OrderType, Side
+from hlcli.exchange.base import Exchange
+
+
+def requires_native_protection(network: Network) -> bool:
+    """Live backends place native triggers; paper relies on the executor-side resolver."""
+    return network is not Network.PAPER
+
+
+def _closing_side(side: Side) -> Side:
+    return Side.SHORT if side is Side.LONG else Side.LONG
+
+
+def protective_orders(candidate: Candidate, size: float) -> list[Order]:
+    """The reduce-only stop-loss + take-profit that protect a filled entry."""
+    closing = _closing_side(candidate.side)
+    return [
+        Order(coin=candidate.coin, side=closing, order_type=OrderType.STOP_LOSS,
+              size=size, trigger_price=candidate.sl, reduce_only=True),
+        Order(coin=candidate.coin, side=closing, order_type=OrderType.TAKE_PROFIT,
+              size=size, trigger_price=candidate.tp, reduce_only=True),
+    ]
+
+
+@dataclass
+class ProtectionResult:
+    ok: bool  # True only if BOTH protective triggers were accepted
+    placed: list[OrderResult] = field(default_factory=list)
+    failed: str = ""  # first failure message, when not ok
+
+
+def place_protection(exchange: Exchange, candidate: Candidate, size: float) -> ProtectionResult:
+    """Place both protective triggers; stop at the first rejection so we don't half-protect."""
+    placed: list[OrderResult] = []
+    for order in protective_orders(candidate, size):
+        result = exchange.place_order(order)
+        placed.append(result)
+        if not result.accepted:
+            return ProtectionResult(ok=False, placed=placed, failed=result.message or result.status)
+    return ProtectionResult(ok=True, placed=placed)
+
+
+def emergency_close(exchange: Exchange, candidate: Candidate, size: float) -> OrderResult:
+    """Flatten a just-opened position whose protection could not be placed."""
+    return exchange.place_order(Order(
+        coin=candidate.coin, side=_closing_side(candidate.side),
+        order_type=OrderType.MARKET, size=size, reduce_only=True,
+    ))

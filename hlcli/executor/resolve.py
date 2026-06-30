@@ -6,10 +6,11 @@ position is closed and the outcome — won/lost/expired, realized P&L, R-multipl
 is written to the `trades` ledger. That ledger is what the Phase 4 tuner reads, so
 without this step there are no resolved outcomes to learn from.
 
-The close is a `reduce_only` limit order *at the trigger price*, so the paper book
-realizes exactly the P&L we record. This is the executor-side monitor; native
-exchange-side trigger orders (which protect a crashed process) are a Phase 5
-mainnet prerequisite, not built here.
+On paper the close is a `reduce_only` limit order *at the trigger price*, so the
+book realizes exactly the P&L we record. On a live backend (`native_protected`),
+native exchange-side triggers (Phase 5) are the real protection — there the
+resolver stays the ledger's source of truth and the close is a `reduce_only`
+*market* flatten, harmless if a native trigger already closed the position.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ def resolve_open_trades(
     now: float,
     *,
     marks: dict[str, float] | None = None,
+    native_protected: bool = False,
 ) -> int:
     """Close every open trade whose SL/TP/expiry has triggered. Returns the count closed."""
     marks = marks if marks is not None else exchange.get_marks()
@@ -45,15 +47,26 @@ def resolve_open_trades(
 
         status, exit_price = outcome
         side = Side(trade["side"])
-        exchange.place_order(Order(
-            coin=trade["coin"], side=_opposite(side), order_type=OrderType.LIMIT,
-            size=trade["size"], price=exit_price, reduce_only=True,
-        ))
+        exchange.place_order(_close_order(trade, side, exit_price, native_protected))
         realized, r_multiple = _pnl(trade, side, exit_price)
         state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now)
         closed += 1
 
     return closed
+
+
+def _close_order(trade: dict, side: Side, exit_price: float, native_protected: bool) -> Order:
+    """Paper: a LIMIT at the level the book realizes exactly. Live: a reduce-only MARKET
+    flatten — a no-op if a native trigger already closed the position."""
+    if native_protected:
+        return Order(
+            coin=trade["coin"], side=_opposite(side), order_type=OrderType.MARKET,
+            size=trade["size"], reduce_only=True,
+        )
+    return Order(
+        coin=trade["coin"], side=_opposite(side), order_type=OrderType.LIMIT,
+        size=trade["size"], price=exit_price, reduce_only=True,
+    )
 
 
 def _classify(trade: dict, mark: float, now: float, tunable: TunableConfig) -> tuple[str, float] | None:

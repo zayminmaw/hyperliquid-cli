@@ -51,6 +51,11 @@ class Caps(BaseSettings):
     # comma-separated in env (HL_ALLOWED_COINS="BTC,ETH,SOL"); use `.coins`
     allowed_coins: str = "BTC,ETH,SOL"
 
+    # --- graduation checklist (mainnet readiness; risk policy, off-limits to the tuner) ---
+    graduation_min_trades: int = 20
+    graduation_min_days: int = 7
+    graduation_min_expectancy: float = 0.0  # mean R-multiple must clear this
+
     # --- models + token budgets (configurable, but a hard cap on spend/choice) ---
     decision_model: str = "claude-sonnet-4-6"
     decision_max_tokens: int = 1024
