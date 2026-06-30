@@ -1,0 +1,32 @@
+# Key Decisions & Why
+
+The load-bearing choices, with what was on the table and why this won. `PLAN.md` is
+the source of truth; this records decisions made (and refined) during the build.
+
+| Decision | Alternatives | Why this |
+|----------|--------------|----------|
+| **LLM owns judgment; code owns mechanics + safety.** The LLM *is* the executor, but only inside a box the gate draws. | Keep the LLM out of the order path entirely (the older ThirdEye executor's rule). | We want the LLM's judgment on *which* setup and *when* — but never on *how much* or *whether it's safe*. The gate, not the model, is the safety authority. |
+| **LLM output is an input to the gate, never a bypass.** Validated + clamped before anything reaches the exchange. Schema-invalid → dropped + tallied, **never guessed**. | Trust structured output; retry/repair a bad payload. | A guessed-at decision is an unaudited trade. Dropping is safe and observable; the tally feeds the tuners. |
+| **Out-of-range conviction is clamped; bad enum / missing / non-numeric is dropped.** | Clamp everything, or drop everything. | Conviction is a magnitude — clamping into `[0,1]` is well-defined and harmless. A bad *action* or *timing* enum has no safe coercion, so it's dropped. |
+| **Hard caps in `.env` (off-limits to the LLM/tuner); tunable surface in `active_config.json`, clamped on load.** | One config file; let the tuner edit caps too. | This split is what makes self-tuning safe. A tunable value is always clamped against the hard caps before it can size an order — a bad/maliciously-tuned value can't reach the exchange. |
+| **`paper` is the default network everywhere; `mainnet` is gated, not blocked.** | Default to testnet; block mainnet behind a build flag. | Paper needs no keys and runs the full pipeline against live marks — the right default for dev + tests. Mainnet stays reachable but requires `HL_ENABLE_MAINNET=1` **and** `--network mainnet` **and** a typed confirm. |
+| **`anthropic` + live-exchange deps are lazy-imported.** | Top-level imports; require all deps always. | Paper mode and the entire test suite must run with **no keys or signing libs present**. Lazy imports (`core/llm.make_client`, the SDK inside `hyperliquid.py`) keep the hot import path clean. Verified by a no-extras venv. |
+| **Reads go over httpx `/info`, not the SDK `Info`.** | Use the SDK for everything. | Keeps marks/book/positions keyless and SDK-free so paper stays dependency-light. The SDK + `eth_account` are write-only (signing). Don't "simplify" reads onto the SDK — it breaks the keyless invariant. |
+| **Order-path model = `claude-sonnet-4-6`; daily tuner = `claude-opus-4-8`.** | One large model for both. | The gate is the real safety authority, so the hot loop needn't be the largest model. The tuner runs once a day, out of path — deeper reasoning is worth the cost there. |
+| **Idempotency key recorded *before* the order is placed.** | Record after a confirmed fill. | A crash between placing and confirming must skip (a missed trade), never double-fire. The key is released only on a *definitive* reject; transport errors keep the key and re-raise. |
+| **Executor entry is a MARKET order.** | A resting GTC limit at the candidate's entry. | A resting limit may never fill, leaving the ledger and protective triggers tracking a phantom position. A MARKET entry means *accepted ⇒ filled*; the runner then reconciles the trade + sizes protection from `OrderResult.filled_size`/`avg_price`, not the intended order. (Pre-mainnet review finding H1.) |
+| **Candidate side is inferred from level geometry** (`sl<entry<tp` = long). | Require an explicit side field. | The levels already encode direction; an explicit side that contradicts them is a bug surface. Incoherent levels are rejected at intake *and* at the gate. |
+| **Native exchange-side SL/TP is a hard mainnet prerequisite** (§13 Q6, user-confirmed). Scoped to testnet+mainnet. | Manage SL/TP in-process; mainnet-only triggers. | A crashed executor must not leave a position unprotected. A live entry that can't be protected is emergency market-closed (status `aborted`, no ledger entry, key already spent so no re-fire). Scoping to testnet too exercises the safety path before real money. |
+| **Self-tuning is out-of-path and propose→approve** (§13 Q4, default kept). | Auto-apply tuned values. | A human approves before anything goes live, never auto-applied to mainnet. Cohorts are sample-gated (`<5` ⇒ no model call); config is clamped on propose, on promote, and on load. |
+| **Resolution is executor-side** (write trade outcomes from SL/TP/expiry). | Defer resolution / rely on exchange fills only. | The tuners need resolved-outcome cohorts and the graduation verdict needs realized R-multiples — both require a trades ledger the executor maintains each pass. |
+| **Alerts = JSONL + stderr, no deps/keys.** | A webhook/email channel. | Keeps the safety path dependency-free and keyless. A webhook tailing `alerts-<network>.log` is a clean optional follow-up. `None` alerter in shadow/tests = silent. |
+| **Halt alert is edge-triggered.** | Alert every pass while halted. | A tripped breaker/loss-limit shouldn't spam the run loop. The alert fires on a *change* of halt state (tracked in `meta`). (Review finding L5.) |
+
+## Deviations from the original plan (recorded)
+
+- **Reads use httpx, not the SDK `Info`** — so paper stays keyless; `httpx` moved into core deps. (Action item 1.4.)
+- **Watch modes are poll-based `rich.Live`**, not native websockets — call sites are unchanged so an `Info.subscribe` upgrade is a later refinement. (Action item 1.9.)
+- **`regime` is `None`** — no price-history feed yet, so the gate's regime check is skipped when regime is unknown rather than fabricating a signal. (Action item 3.1.)
+
+See [handover.md](./handover.md) for what's deferred (live runs pending keys) and the
+open questions still carrying their default answers.

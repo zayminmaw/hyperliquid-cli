@@ -44,10 +44,18 @@ real fills) → `mainnet` (real money, **gated**: needs `HL_ENABLE_MAINNET=1` +
 
 - [Plan](./PLAN.md) — goals, phases, architecture (source of truth)
 - [Action Items](./ACTION-ITEMS.md) — phase-by-phase progress checklist
+- [Architecture](./docs/architecture.md) — system overview, executor pass, the gate
+- [CLI Reference](./docs/cli.md) — every command, argument & option
+- [Setup](./docs/setup.md) — install, config (hard caps vs tunable), running, tests
+- [Modules](./docs/modules.md) — per-package reference
+- [Decisions](./docs/decisions.md) — key technical decisions & why
+- [Handover](./docs/handover.md) — full handover doc
 - [Agent Context](./AGENT-CONTEXT.md) — agent working memory
 - [Claude guidance](./CLAUDE.md) — how to work in this repo
 
 ## Status
 
-Current phase: **Phase 2 — Deterministic executor** ✅ complete → next: Phase 3 (LLM decision)
-Last updated: 2026-06-27
+All five phases (0–5) **code-complete**; 153 tests pass, keyless.
+Remaining work is operational: supply agent keys → run testnet/shadow → clear the
+graduation checklist → mainnet at tiny caps. See [handover](./docs/handover.md).
+Last updated: 2026-06-30
