@@ -21,12 +21,14 @@ the source of truth; this records decisions made (and refined) during the build.
 | **Resolution is executor-side** (write trade outcomes from SL/TP/expiry). | Defer resolution / rely on exchange fills only. | The tuners need resolved-outcome cohorts and the graduation verdict needs realized R-multiples — both require a trades ledger the executor maintains each pass. |
 | **Alerts = JSONL + stderr, no deps/keys.** | A webhook/email channel. | Keeps the safety path dependency-free and keyless. A webhook tailing `alerts-<network>.log` is a clean optional follow-up. `None` alerter in shadow/tests = silent. |
 | **Halt alert is edge-triggered.** | Alert every pass while halted. | A tripped breaker/loss-limit shouldn't spam the run loop. The alert fires on a *change* of halt state (tracked in `meta`). (Review finding L5.) |
+| **Regime is computed in code (Kaufman ER), not by the LLM.** Fed to the gate + a 12-bar OHLC tail handed to the model. | Ask the LLM to label the regime; skip regime entirely. | Regime gates *whether* a setup is allowed — a safety-relevant judgment, so it must be deterministic and auditable, not a model opinion. The candle fetch is keyless/best-effort (15m×48, once per coin per pass); a feed hiccup degrades to `None` and the gate skips the check rather than fabricating a signal. |
+| **An `act + wait` decision is deferred, not rejected.** Parked in a `deferred` table and re-checked with fresh data, intercepted *before* the gate. | Reject WAIT outright (lose the setup); let the gate handle WAIT. | A good setup that's simply early shouldn't be thrown away. Intercepting before the gate keeps the gate a pure act-now decision. Re-checks stay *within* the freshness window, are capped (`HL_FOLLOWUP_MAX_ATTEMPTS`), use fresh enrich/candles/regime each time, and freeze while the breaker is tripped — so deferral can never outlive a candidate's validity or bypass the kill switch. |
 
 ## Deviations from the original plan (recorded)
 
 - **Reads use httpx, not the SDK `Info`** — so paper stays keyless; `httpx` moved into core deps. (Action item 1.4.)
 - **Watch modes are poll-based `rich.Live`**, not native websockets — call sites are unchanged so an `Info.subscribe` upgrade is a later refinement. (Action item 1.9.)
-- **`regime` is `None`** — no price-history feed yet, so the gate's regime check is skipped when regime is unknown rather than fabricating a signal. (Action item 3.1.)
+- **Regime is a single coarse signal** (Kaufman efficiency-ratio, 15m×48) rather than a multi-timeframe model — deliberately simple for now; the gate skips its regime check when the feed yields too few bars (`None`) rather than fabricating a signal. (Action items 3.1, 3.7.)
 
 See [handover.md](./handover.md) for what's deferred (live runs pending keys) and the
 open questions still carrying their default answers.

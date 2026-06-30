@@ -55,14 +55,16 @@ Gate: candidates → paper fills; fully deterministic; restart-safe. ✅ passed
 ## Phase 3: LLM decision
 Gate: shadow runs produce sane, fully-logged decisions on paper/testnet.
 
-- [x] 3.1 `executor/enrich.py` — marks, portfolio + equity + P&L, recent decisions, tunable surface. `regime=None` (no price-history feed yet; gate skips when None — chosen over fabricating a signal)
+- [x] 3.1 `executor/enrich.py` — marks, portfolio + equity + P&L, recent decisions, tunable surface, plus a candle tail + regime label (see 3.7)
 - [x] 3.2 `executor/decision.py` — LLM decision (lazy `anthropic`), claude-sonnet-4-6, forced strict tool `submit_decision`, `decision_temperature`
 - [x] 3.3 `validate_decision` validator + clamp; bad enum/missing/non-numeric → drop+tally, out-of-range conviction → clamp; never guesses
 - [x] 3.4 Decision log carries enriched context + decision + gate + fill (resolved-outcome cohorting is Phase 4.1 — this is its substrate)
 - [x] 3.5 `exec shadow` — `run_once(fire_enabled=False)`: decide + gate + log, fire nothing
 - [x] 3.6 Tests: `test_decision.py` validator/clamp + mocked client; executor mechanics inject a deterministic `decide_fn` (LLM never hit in tests)
+- [x] 3.7 Candle feed + deterministic regime (commit `fa803d6`): `MarksFeed.candles` + `Exchange.get_candles` on both backends (keyless `/info candleSnapshot`, 15m × 48-bar window, once per coin per pass, best-effort — feed failure degrades to `None`). New `executor/regime.py`: Kaufman efficiency-ratio `classify()` → trend/range/None (<20 bars ⇒ None; threshold 0.35) + a 12-bar OHLC `summarize()` for the model. Runner gathers per-coin context once and feeds `enrich(candles=, regime=)`; **regime now reaches the gate** (no longer always `None`). Prompt hardening: rationale-first tool order, temperature sent only to models that accept it, conviction anchor + execution-trader persona.
+- [x] 3.8 WAIT → follow-up re-check loop (commits `5b691f0`, `71f2698`): decision tool gains `recheck_in_minutes` (validator clamps to [0,1440]; missing ⇒ None) + `Decision.recheck_in_minutes`. New hard cap `HL_FOLLOWUP_MAX_ATTEMPTS` (default 3, 0=disabled). New `deferred` table + `DeferredCandidate` + `defer_candidate`/`due_deferred`/`drop_deferred`/`deferred_count`. Runner refactored (`_evaluate` + `_fire_and_reconcile` shared by intake + re-check loops): an `act+wait` candidate is **deferred, not rejected** — intercepted BEFORE the gate (gate stays pure), parked, HWM still advances. Re-check scheduled WITHIN `max_signal_age` (clamped; no room/attempts ⇒ terminal reject); each re-check uses FRESH enrich/candles/regime. Due deferrals processed before new intake; skipped in `dry_run` AND while the breaker is tripped (frozen, attempts intact). `PassSummary` gains `rechecked`/`deferred`; `exec report.deferred` + an `exec status` note surface the parked count.
 
-Gate verification (real LLM call on paper/testnet shadow) is deferred pending an `ANTHROPIC_API_KEY`, mirroring Phase 1's deferred live testnet order. Pipeline is code-complete + fully covered by mocked tests (104 pass).
+Gate verification (real LLM call on paper/testnet shadow) is deferred pending an `ANTHROPIC_API_KEY`, mirroring Phase 1's deferred live testnet order. Pipeline is code-complete + fully covered by mocked tests (177 pass).
 
 ## Phase 4: Self-tuning (out-of-path, propose→approve)
 Gate: tuner proposes from logged outcomes; `promote` works; clamps hold.

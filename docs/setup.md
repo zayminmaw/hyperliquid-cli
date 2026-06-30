@@ -45,6 +45,7 @@ Copy `.env.example` to `.env` and adjust. Every var is `HL_`-prefixed.
 | `HL_MAX_LEVERAGE` | `3` | hard leverage ceiling |
 | `HL_RR_FLOOR` | `1.5` | minimum reward:risk to accept a candidate |
 | `HL_MAX_SIGNAL_AGE_MINUTES` | `30` | freshness cutoff for a candidate |
+| `HL_FOLLOWUP_MAX_ATTEMPTS` | `3` | max WAIT re-checks before a deferred candidate is dropped (`0` disables deferral) |
 | `HL_ALLOWED_COINS` | `BTC,ETH,SOL` | the only tradable coins |
 | `HL_GRADUATION_MIN_TRADES` / `_DAYS` / `_EXPECTANCY` | `20` / `7` / `0.0` | mainnet-readiness thresholds |
 | `HL_DECISION_MODEL` / `_MAX_TOKENS` | `claude-sonnet-4-6` / `1024` | order-path model |
@@ -120,7 +121,7 @@ hl tune history    # promotion audit log
 ## Tests
 
 ```bash
-.venv/bin/pytest -q          # 153 passing, ~2s, fully keyless (no anthropic/hyperliquid/eth_account needed)
+.venv/bin/pytest -q          # 177 passing, ~3s, fully keyless (no anthropic/hyperliquid/eth_account needed)
 ```
 
 The LLM call is mocked in every test (deterministic fixtures / injected `decide_fn`);

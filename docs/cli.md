@@ -202,9 +202,11 @@ hl exec propose --file setups.json
 ```
 
 ### `exec once`
-One full pass: resolve open trades → intake → enrich → LLM decision → gate → fire →
-log. Honors the global `--dry-run` (computes, mutates nothing). Writes, so the
-mainnet gate applies. Emits a `PassSummary` (`seen/approved/fired/rejected/dropped/resolved`).
+One full pass: resolve open trades → re-check due WAIT deferrals → intake → enrich
+→ LLM decision → gate → fire → log. An `act + wait` decision is deferred for a later
+re-check rather than fired. Honors the global `--dry-run` (computes, mutates nothing;
+deferrals are skipped). Writes, so the mainnet gate applies. Emits a `PassSummary`
+(`seen/rechecked/approved/fired/rejected/dropped/deferred/resolved`).
 
 ### `exec shadow`
 A full pass that **decides, gates, and logs but fires nothing** — the pre-mainnet
@@ -227,11 +229,13 @@ hl exec breaker --off      # clear
 ```
 
 ### `exec status`
-Live position-health view for the executor's book. `-w`/`--watch` for live refresh.
+Live position-health view for the executor's book, with a note of how many WAIT
+candidates are parked for re-check. `-w`/`--watch` for live refresh.
 
 ### `exec report`
-Account summary: equity, open positions, unrealized P&L, breaker state, and the
-**graduation** (mainnet-readiness) verdict from resolved trades.
+Account summary: equity, open positions, unrealized P&L, breaker state, the count of
+`deferred` (WAIT) candidates awaiting re-check, and the **graduation**
+(mainnet-readiness) verdict from resolved trades.
 
 ---
 

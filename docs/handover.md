@@ -1,8 +1,8 @@
 # Handover: hyperliquid-cli (`hl`)
 
-**Date:** 2026-06-30
+**Date:** 2026-07-01
 **Author:** zayminmaw (built with Claude Code)
-**Status:** Code-complete through all five planned phases (Phase 0–5). 153 tests pass.
+**Status:** Code-complete through all five planned phases (Phase 0–5). 177 tests pass.
 Remaining work is **operational**, not coding: supply agent keys, run testnet/shadow
 to accumulate resolved trades, let the graduation checklist clear, then go to mainnet
 at tiny caps.
@@ -44,7 +44,7 @@ hl --help
 hl exec propose --coin BTC --entry 60000 --tp 66000 --sl 58000 --reason "breakout"
 hl exec once                   # one full executor pass on the paper book
 hl exec report                 # equity, positions, P&L, breaker, graduation verdict
-.venv/bin/pytest -q            # 153 passing
+.venv/bin/pytest -q            # 177 passing
 ```
 
 ### Running (production / live)
@@ -70,7 +70,7 @@ hlcli/
 ├── core/       # config (hard caps) · config_schema (tunable+clamp) · types · network gate · llm client
 ├── exchange/   # Exchange protocol · paper book · hyperliquid live · marks feed · factory
 ├── accounts/   # sqlite account store + 0600 keystore
-├── executor/   # intake → enrich → decision(LLM) → gate → execute → protect → resolve → runner
+├── executor/   # intake → enrich(+candles/regime) → decision(LLM) → gate → execute → protect → resolve → runner
 ├── tuner/      # stats cohorts · config_tuner · prompt_tuner · promote (propose→approve)
 ├── state/      # sqlite: intake stream, HWM, idempotency, decision log, trades, paper book
 └── safety/     # breaker (kill switch + loss limit) · alerts · graduation
@@ -93,12 +93,14 @@ hlcli/
 
 ### Data Flow
 
-A Mode B pass: resolve open trades (SL/TP/expiry → trades ledger) → pull candidates
-past the high-water mark → enrich (marks, equity, positions, recent decisions) →
-LLM decide → deterministic gate (first-failure wins) → fire approved as a MARKET
-order (idempotency key recorded *before* placing) → reconcile to the actual fill →
-place native SL/TP triggers (testnet/mainnet; emergency-close if that fails) →
-log the full decision + fill → advance the HWM. See the diagram in
+A Mode B pass: resolve open trades (SL/TP/expiry → trades ledger) → re-check any
+due WAIT deferrals with fresh data → pull candidates past the high-water mark →
+enrich (marks, equity, positions, recent decisions, a candle tail + regime label) →
+LLM decide → if the decision is *act + wait*, defer it for a later re-check (HWM
+still advances); otherwise → deterministic gate (first-failure wins) → fire approved
+as a MARKET order (idempotency key recorded *before* placing) → reconcile to the
+actual fill → place native SL/TP triggers (testnet/mainnet; emergency-close if that
+fails) → log the full decision + fill → advance the HWM. See the diagram in
 [architecture.md](./architecture.md).
 
 ---
@@ -119,9 +121,11 @@ The full table is in [decisions.md](./decisions.md). The five that matter most:
 
 ## Known Issues & Limitations
 
-- **`regime` is always `None`** — there's no price-history/regime feed yet, so the
-  gate's regime-sanity check is skipped (skipped, not faked). Wiring a regime signal
-  is the natural next enrichment.
+- **Regime is a coarse, single-signal classifier** — a Kaufman efficiency-ratio over
+  a 15m/48-bar window (trend/range, `None` below 20 bars). It's deliberately simple;
+  a richer multi-timeframe regime model is a natural future enrichment. The candle
+  fetch is best-effort, so a feed hiccup degrades the pass to `regime=None` (the
+  gate's regime check is then skipped, not faked).
 - **Watch modes (`-w`) poll** via `rich.Live` rather than using a native websocket.
   Call sites are unchanged, so an `Info.subscribe` upgrade is drop-in later.
 - **No CI / lint / type-check tooling** is configured — only `pytest` under
@@ -179,8 +183,8 @@ has none of the extras installed.
    fully-logged real decisions) and let it accumulate tuner training data.
 3. **Let trades resolve** → once `exec report` shows the graduation verdict passing
    (`GRADUATION_MIN_TRADES`/`_DAYS`/`_EXPECTANCY`), go mainnet at tiny caps.
-4. **Optional:** a webhook/email channel tailing `alerts-<network>.log`; a regime
-   feed to light up the gate's regime check; CI.
+4. **Optional:** a webhook/email channel tailing `alerts-<network>.log`; a richer
+   multi-timeframe regime model; live native-trigger reconciliation; CI.
 
 ## Contacts & Related
 

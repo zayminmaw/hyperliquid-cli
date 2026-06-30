@@ -15,9 +15,9 @@ hl config show                 # resolved hard caps + clamped tunable surface
 hl markets prices              # live public marks (paper)
 hl asset book BTC -w           # live order book, -w to watch
 
-# Mode B — deterministic executor on paper (LLM decision lands in Phase 3):
+# Mode B — LLM executor on paper (decision is mocked without ANTHROPIC_API_KEY):
 hl exec propose --coin BTC --entry 60000 --tp 66000 --sl 58000 --reason "breakout"
-hl exec once                   # intake → gate → fire → persistent paper book
+hl exec once                   # intake → enrich → decide → gate → fire → persistent paper book
 hl exec report                 # equity, positions, unrealized P&L, breaker state
 hl exec breaker --on           # kill switch: halts new fires
 
@@ -55,7 +55,9 @@ real fills) → `mainnet` (real money, **gated**: needs `HL_ENABLE_MAINNET=1` +
 
 ## Status
 
-All five phases (0–5) **code-complete**; 153 tests pass, keyless.
+All five phases (0–5) **code-complete**; 177 tests pass, keyless. The order-path
+decision layer is built out: candle-feed + deterministic regime context, the
+rationale-first decision tool, and a WAIT→follow-up re-check loop.
 Remaining work is operational: supply agent keys → run testnet/shadow → clear the
 graduation checklist → mainnet at tiny caps. See [handover](./docs/handover.md).
-Last updated: 2026-06-30
+Last updated: 2026-07-01

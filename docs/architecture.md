@@ -21,7 +21,7 @@ hlcli/
 ├── core/       # config (hard caps) · config_schema (tunable+clamp) · types · network gate · llm client
 ├── exchange/   # Exchange protocol · paper book · hyperliquid (testnet/mainnet) · marks feed · factory
 ├── accounts/   # sqlite account store + 0600 keystore
-├── executor/   # intake → enrich → decision(LLM) → gate → execute → protect → resolve → runner
+├── executor/   # intake → enrich(+candles/regime) → decision(LLM) → gate → execute → protect → resolve → runner
 ├── tuner/      # stats cohorts · config_tuner · prompt_tuner · promote (propose→approve)
 ├── state/      # sqlite: intake stream, HWM, idempotency, decision log, trades, paper book
 └── safety/     # breaker (kill switch + loss limit) · alerts (JSONL+stderr) · graduation
@@ -47,18 +47,20 @@ hlcli/
 One `run_once` pass (`hlcli/executor/runner.py`) is the heart of Mode B:
 
 ```
-                         ┌─────────────────────────────────────────────┐
-                         │  resolve open trades (SL/TP/expiry → ledger) │  ← monitor step
-                         └───────────────────────┬─────────────────────┘
+                ┌──────────────────────────────────────────────────────────┐
+                │  resolve open trades (SL/TP/expiry → ledger)             │  ← monitor step
+                │  then re-check any due WAIT deferrals with fresh data    │
+                └───────────────────────────┬──────────────────────────────┘
                                                  ▼
    intake stream ──pull_new(>HWM)──►  for each candidate:
    (exec propose)                          │
                                            ▼
-                                   enrich  (marks, equity, positions, recent decisions, tunable)
-                                           │   regime = None (no price-history feed yet)
+                                   enrich  (marks, equity, positions, recent decisions, tunable,
+                                           │   candle tail + regime via Kaufman ER — None if no feed)
                                            ▼
                                    decide  (LLM: claude-sonnet-4-6, strict tool, low temp)
                                            │   schema-invalid → DROP + tally + log (never guessed)
+                                           │   act + wait → DEFER (park for re-check, advance HWM)
                                            ▼
                                    gate    (deterministic, first-failure wins)
                                            │
@@ -94,6 +96,18 @@ Three knobs shape a pass:
 - `dry_run` — compute everything, **mutate nothing** (side-effect-free preview).
 - `fire_enabled=False` — **shadow** mode: decide, gate, log, but fire nothing. The pre-mainnet confidence builder and tuner training-data source.
 - `decide_fn` — injected so tests drive the mechanics with a deterministic decider; the real LLM call is mocked, never hit in tests.
+
+### The WAIT → follow-up loop
+
+When the LLM returns *act + wait* with a `recheck_in_minutes`, the candidate isn't
+rejected — it's **deferred**. The runner intercepts this *before* the gate (so the
+gate stays a pure act-now decision), parks the candidate in the `deferred` table, and
+advances the HWM. Each pass re-checks any due deferrals first, with **fresh**
+enrich/candles/regime. Re-checks are scheduled *within* the candidate's freshness
+window and capped at `HL_FOLLOWUP_MAX_ATTEMPTS` (no room or attempts left ⇒ terminal
+reject). A tripped breaker **freezes** re-checks (attempts preserved); `dry_run`
+skips them. `PassSummary` reports `rechecked` and `deferred`; `exec report` and
+`exec status` surface the parked count.
 
 ### The risk gate order (first-failure wins)
 
