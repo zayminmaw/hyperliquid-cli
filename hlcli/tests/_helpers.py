@@ -42,6 +42,9 @@ class FakeMarks:
     def book(self, coin: str) -> dict:
         return {"coin": coin, "levels": [[], []]}
 
+    def candles(self, coin: str, *, interval: str = "15m", lookback: int = 48) -> list:
+        return []  # no synthetic history → regime stays None, gate behaviour unchanged
+
 
 def caps(**kw) -> Caps:
     base = dict(

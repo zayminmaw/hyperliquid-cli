@@ -31,6 +31,7 @@ from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
 from hlcli.executor.gate import GateContext, evaluate
 from hlcli.executor.protect import emergency_close, place_protection, requires_native_protection
+from hlcli.executor.regime import classify, summarize
 from hlcli.executor.resolve import resolve_open_trades
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
@@ -85,12 +86,15 @@ def run_once(
     batch = state.pull_new(limit=tunable.max_candidates_per_pass)
     if alerter is not None and not dry_run:
         _alert_halt(state, alerter, batch, breaker_tripped, daily_loss)
+    market = _market_context(exchange, {c.coin for _, c in batch})
     approved = fired = rejected = dropped = 0
 
     for seq, candidate in batch:
+        candles, regime = market.get(candidate.coin, (None, None))
         ctx = enrich(
             candidate, marks=marks, equity=equity, positions=positions,
             realized=realized, recent=recent, tunable=tunable,
+            candles=candles, regime=regime,
         )
         result = decide_fn(ctx, caps, tunable)
 
@@ -165,6 +169,26 @@ def run_once(
         fired=fired, rejected=rejected, dropped=dropped, resolved=resolved,
         note=_note(dry_run=dry_run, fire_enabled=fire_enabled),
     )
+
+
+def _market_context(exchange: Exchange, coins: set[str]) -> dict[str, tuple]:
+    """coin → (compact candle summary, regime), fetched once per coin for this pass."""
+    return {coin: _coin_context(exchange, coin) for coin in coins}
+
+
+def _coin_context(exchange: Exchange, coin: str) -> tuple:
+    bars = _fetch_candles(exchange, coin)
+    return summarize(bars), classify(bars)
+
+
+def _fetch_candles(exchange: Exchange, coin: str):
+    # Best-effort: candles are decision *context*, not a safety input, so a feed hiccup
+    # degrades this coin to "no context" rather than aborting a pass that already has
+    # valid marks. (A marks failure still aborts — that read is load-bearing.)
+    try:
+        return exchange.get_candles(coin)
+    except Exception:
+        return []
 
 
 def _secure(exchange: Exchange, candidate, size: float, alerter: Alerter | None) -> bool:

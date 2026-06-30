@@ -11,13 +11,20 @@ import time
 
 import httpx
 
-from hlcli.core.types import Network
+from hlcli.core.types import Candle, Network
 
 # Public REST endpoints (mirrors the SDK's constants, without importing it).
 _API_URLS = {
     Network.PAPER: "https://api.hyperliquid.xyz",  # paper rides public mainnet marks
     Network.MAINNET: "https://api.hyperliquid.xyz",
     Network.TESTNET: "https://api.hyperliquid-testnet.xyz",
+}
+
+# candleSnapshot wants a [startTime, endTime] window in ms, so we derive the
+# window from `lookback × interval` rather than asking for a bar count directly.
+_INTERVAL_MS = {
+    "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+    "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
 }
 
 
@@ -49,3 +56,16 @@ class MarksFeed:
 
     def book(self, coin: str) -> dict | None:
         return self._info({"type": "l2Book", "coin": coin})
+
+    def candles(self, coin: str, *, interval: str = "15m", lookback: int = 48) -> list[Candle]:
+        """The last `lookback` OHLCV bars for `coin` at `interval` (uncached; the
+        executor pulls these once per coin per pass). Empty list if the feed has none."""
+        end = int(time.time() * 1000)
+        start = end - lookback * _INTERVAL_MS[interval]
+        raw = self._info(
+            {"type": "candleSnapshot", "req": {"coin": coin, "interval": interval, "startTime": start, "endTime": end}}
+        )
+        return [
+            Candle(t=int(c["t"]), o=float(c["o"]), h=float(c["h"]), l=float(c["l"]), c=float(c["c"]), v=float(c["v"]))
+            for c in (raw or [])
+        ]

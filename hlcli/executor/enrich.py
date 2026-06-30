@@ -2,14 +2,14 @@
 
 Assembles the *decision context* the LLM judges a candidate against: the current
 mark, portfolio state (equity + open positions + realized/unrealized P&L), a
-rolling window of recent decisions, and the tunable strategy surface. Pure
-assembly — no exchange calls, no LLM, no keys; the runner gathers the per-pass
-inputs once and feeds them here per candidate.
+rolling window of recent decisions, a short tail of recent price candles, the
+code-computed market regime, and the tunable strategy surface. Pure assembly —
+no exchange calls, no LLM, no keys; the runner gathers the per-pass inputs once
+(candles + regime per coin) and feeds them here per candidate.
 
-`regime` is carried but left `None`: a real trend/range signal needs a
-price-history feed we don't have yet, and the gate already treats `None` as
-"unknown, skip the regime check". Fabricating a regime from a single mark
-snapshot would be guessing — so we don't.
+`regime` is computed deterministically from candles by `executor/regime.py` and
+passed in; it is `None` when there isn't enough price history to judge, and the
+gate treats `None` as "unknown, skip the regime check" — never a guess.
 """
 
 from __future__ import annotations
@@ -31,7 +31,8 @@ class EnrichedContext(BaseModel):
     realized_pnl: float | None = None
     unrealized_pnl: float
     open_positions: list[dict]
-    regime: str | None = None  # None = unknown (no price-history feed yet); gate skips the check
+    regime: str | None = None  # code-computed (trend/range); None = unknown, gate skips the check
+    candles: list[dict] | None = None  # compact recent OHLC tail; None when no price history
     recent_outcomes: list[dict]
     tunable: dict
 
@@ -45,6 +46,8 @@ def enrich(
     realized: float | None,
     recent: list[dict],
     tunable: TunableConfig,
+    candles: list[dict] | None = None,
+    regime: str | None = None,
 ) -> EnrichedContext:
     return EnrichedContext(
         candidate=candidate,
@@ -52,6 +55,8 @@ def enrich(
         equity=round(equity, 4),
         realized_pnl=round(realized, 4) if realized is not None else None,
         unrealized_pnl=round(sum(p.unrealized_pnl for p in positions), 4),
+        regime=regime,
+        candles=candles,
         open_positions=[
             {
                 "coin": p.coin,

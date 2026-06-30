@@ -40,6 +40,9 @@ class PaperExchange:
     def get_book(self, coin: str) -> dict | None:
         return self._marks.book(coin)
 
+    def get_candles(self, coin: str, *, interval: str = "15m", lookback: int = 48):
+        return self._marks.candles(coin, interval=interval, lookback=lookback)
+
     def get_positions(self) -> list[Position]:
         if self._state is None:
             return list(self._mem)

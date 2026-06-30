@@ -62,6 +62,9 @@ class HyperliquidExchange:
     def get_book(self, coin: str) -> dict | None:
         return self._marks.book(coin)
 
+    def get_candles(self, coin: str, *, interval: str = "15m", lookback: int = 48):
+        return self._marks.candles(coin, interval=interval, lookback=lookback)
+
     def equity(self) -> float:
         state = self._info_client().user_state(self._account_address)
         return float(state["marginSummary"]["accountValue"])

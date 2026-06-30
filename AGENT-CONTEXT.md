@@ -9,16 +9,16 @@
 - Task: Phase 5 — Mainnet hardening ✅ code-complete
 - Goal: native exchange-side SL/TP at entry, runtime prereq enforcement, graduation checklist in report, key review, alerting
 - Status: done (143 tests pass, 1 skip). Build plan fully implemented through all phases.
-- Next action: none coding-side. Remaining is operational — supply agent keys, run testnet/shadow to accumulate resolved trades, let graduation clear, then tiny mainnet caps. Optional follow-ups: webhook/email alert channel tailing alerts-<net>.log; live testnet validation of native-trigger reconciliation (slippage/partial fills).
+- Next action: none coding-side. Remaining is operational — supply agent keys, run testnet/shadow to accumulate resolved trades, let graduation clear, then tiny mainnet caps. Designed-but-unbuilt (user-approved): wait→follow-up re-check loop — tool gains `recheck_in_minutes`, code clamps it WITHIN max_signal_age (decided), attempts from new `HL_FOLLOWUP_MAX_ATTEMPTS` cap (default 3), `deferred_candidates` table, runner drains due deferrals before pull_new, gate stays pure. (Candle feed + deterministic regime: DONE.) Optional: webhook/email alert tailing alerts-<net>.log; live testnet native-trigger reconciliation.
 - Blocked by: none. (Phase 1 live testnet order, Phase 3 shadow, Phase 4 config-tuner LLM, Phase 5 real graduation — all deferred pending keys.)
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: Pre-mainnet self-review + fixed all 7 findings — H1 MARKET entry (accepted⇒filled) + fill reconciliation via `OrderResult.filled_size`/`avg_price`; M3 live exit booked at real fill; M4 `release_fire` on clean reject; L5 edge-triggered halt alert; L6 regime-vocab clamp; L7 non-positive-equity reject
-- Result: 152 pass / 1 skip; keyless-import invariant re-verified; gate now emits MARKET entry (price None)
-- File(s) touched: hlcli/core/{types,config_schema}.py, hlcli/exchange/{paper,hyperliquid}.py, hlcli/executor/{gate,execute,resolve,runner}.py, hlcli/state/store.py, tests/{test_gate,test_executor,test_resolve,test_config_schema,test_alerts,test_protect}
+- Did: built the candle feed + deterministic regime. `MarksFeed.candles` (keyless /info candleSnapshot, lookback×interval window) + `Exchange.get_candles` on both backends; new `executor/regime.py` (Kaufman efficiency-ratio classify→trend/range/None at <20 bars; compact 12-bar `summarize`); runner gathers per-coin context once (best-effort `_fetch_candles`, degrades on feed failure), feeds `enrich(candles=, regime=)`; regime now reaches the gate. (Prior: decision.py P1 rationale-first tool order, P2 temperature-by-model guard, P3 conviction anchor + execution-trader persona.)
+- Result: 162 pass; keyless-import invariant re-verified in /tmp/hlcore
+- File(s) touched: hlcli/core/types.py, hlcli/exchange/{marks,base,paper,hyperliquid}.py, hlcli/executor/{regime(new),enrich,runner,decision}.py, tests/{_helpers,test_regime(new),test_marks,test_executor}
 
 ---
 
@@ -40,7 +40,7 @@
 | `hlcli/exchange/{base,paper,factory}.py` | protocol · paper (state-backed book + fills) · factory |
 | `hlcli/state/store.py` | sqlite: intake/HWM/idempotency/decision_log/**trades**/paper_positions; `open_state` |
 | `hlcli/executor/gate.py` | `evaluate` (first-failure gate) + `_size` (fixed-fractional) + `infer_side` |
-| `hlcli/executor/{enrich,decision}.py` | `EnrichedContext` (regime=None) · `decide`(sonnet-4-6, strict tool)+`validate_decision`+`load_decision_prompt` |
+| `hlcli/executor/{enrich,decision,regime}.py` | `EnrichedContext`(carries candles+regime) · `decide`(sonnet-4-6, rationale-first strict tool)+`validate_decision`+`load_decision_prompt` · `regime.classify`(ER trend/range)+`summarize` |
 | `hlcli/executor/{intake,execute,runner,resolve,monitor,protect}.py` | propose · fire · `run_once`(decide_fn/fire_enabled/alerter) · close-out→trades (native_protected on live) · health · native SL/TP + emergency-close |
 | `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts(sample-gated) · opus-4-8 config(strict)+prompt tuners · proposed→active+diff/history |
 | `hlcli/safety/{breaker,alerts,graduation}.py` | kill switch+loss-limit · JSONL+stderr alert sink · mainnet-readiness verdict (in `exec report`) |
@@ -59,6 +59,7 @@
 - [2026-06-27] Paper book persists in state-<network>.db; manual paper (no state) stays in-memory
 - [2026-06-30] Decision: out-of-range conviction is CLAMPED; bad enum / missing / non-numeric is DROPPED (never guessed). regime left None (no price-history feed); shadow=`fire_enabled=False` (logs+advances HWM) vs dry_run (mutates nothing)
 - [2026-06-30] Phase 4: executor-side resolver writes trade outcomes (SL/TP at trigger price, expiry at mark). Tuners clamp on propose+promote+load, sample-gated (no cohort ⇒ no model call); propose→approve everywhere (§13 Q4)
+- [2026-06-30] Candles: keyless /info candleSnapshot (15m, lookback 48, once per coin per pass, uncached, best-effort). Regime computed in CODE (Kaufman ER, threshold 0.35, <20 bars⇒None) not by the LLM — feeds the gate + a 12-bar OHLC tail to the model. Decision tool reordered rationale-first; temperature sent only to models that accept it.
 - [2026-06-30] Phase 5 (§13 Q6): native SL/TP is a HARD mainnet prereq — enforced at runtime (unprotectable live entry → emergency MARKET close, status `aborted`, no ledger, key already spent so no re-fire). Triggers scoped to testnet+mainnet (resolver closes via reduce-only MARKET there; paper keeps LIMIT-at-level). Graduation thresholds are hard caps. Alerts = JSONL+stderr (no deps/keys), None in shadow.
 
 ---

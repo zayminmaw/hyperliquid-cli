@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from hlcli.core.types import Network, OpenOrder, Order, OrderResult, Position
+from hlcli.core.types import Candle, Network, OpenOrder, Order, OrderResult, Position
 
 
 @runtime_checkable
@@ -24,6 +24,10 @@ class Exchange(Protocol):
 
     def get_book(self, coin: str) -> dict | None:
         """L2 order book snapshot for a coin, or None if unavailable."""
+        ...
+
+    def get_candles(self, coin: str, *, interval: str = "15m", lookback: int = 48) -> list[Candle]:
+        """Recent OHLCV bars for a coin (may be empty)."""
         ...
 
     def equity(self) -> float:

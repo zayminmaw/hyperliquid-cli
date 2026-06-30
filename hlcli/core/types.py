@@ -85,6 +85,17 @@ class Position(BaseModel):
     unrealized_pnl: float = 0.0
 
 
+class Candle(BaseModel):
+    """One OHLCV bar from the public candleSnapshot feed."""
+
+    t: int  # open time, ms since epoch
+    o: float
+    h: float
+    l: float
+    c: float
+    v: float
+
+
 class OpenOrder(BaseModel):
     coin: str
     oid: int

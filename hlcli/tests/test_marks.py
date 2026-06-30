@@ -43,3 +43,30 @@ def test_book_posts_l2_request():
     feed = _feed(handler)
     feed.book("BTC")
     assert seen == {"type": "l2Book", "coin": "BTC"}
+
+
+def test_candles_parses_ohlcv():
+    sample = [
+        {"t": 1000, "T": 1900, "s": "BTC", "i": "15m", "o": "100.5", "h": "101", "l": "100", "c": "100.8", "v": "12.3", "n": 5},
+        {"t": 2000, "T": 2900, "s": "BTC", "i": "15m", "o": "100.8", "h": "102", "l": "100.5", "c": "101.5", "v": "8.0", "n": 3},
+    ]
+    feed = _feed(lambda req: httpx.Response(200, json=sample))
+    bars = feed.candles("BTC", interval="15m", lookback=2)
+    assert len(bars) == 2
+    assert (bars[0].o, bars[0].c) == (100.5, 100.8)
+    assert bars[-1].h == 102.0
+
+
+def test_candles_posts_candle_snapshot_request_with_derived_window():
+    seen = {}
+
+    def handler(req):
+        import json
+        seen.update(json.loads(req.content))
+        return httpx.Response(200, json=[])
+
+    feed = _feed(handler)
+    feed.candles("ETH", interval="15m", lookback=10)
+    assert seen["type"] == "candleSnapshot"
+    assert (seen["req"]["coin"], seen["req"]["interval"]) == ("ETH", "15m")
+    assert seen["req"]["endTime"] - seen["req"]["startTime"] == 10 * 900_000  # lookback × 15m

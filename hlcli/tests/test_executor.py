@@ -1,6 +1,7 @@
 """End-to-end executor pass: candidates → paper fills, deterministic + restart-safe."""
 
-from hlcli.core.types import Candidate, Order, OrderResult, OrderType, Side
+from hlcli.core.config_schema import RegimeGate, TunableConfig, clamp
+from hlcli.core.types import Candidate, Candle, Order, OrderResult, OrderType, Side
 from hlcli.exchange.paper import PaperExchange
 from hlcli.executor.execute import fire
 from hlcli.executor.runner import run_once
@@ -103,3 +104,19 @@ def test_breaker_blocks_fire(tmp_path):
     state.enqueue(_cand("a"))
     s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW)
     assert (s.fired, s.rejected) == (0, 1)
+
+
+class _TrendingMarks(FakeMarks):
+    """FakeMarks that also serves a clean uptrend, so the runner computes regime='trend'."""
+
+    def candles(self, coin, *, interval="15m", lookback=48):
+        return [Candle(t=i, o=100 + i, h=100 + i, l=100 + i, c=100 + i, v=1.0) for i in range(24)]
+
+
+def test_candle_regime_reaches_the_gate(tmp_path):
+    state = StateStore(tmp_path / "state.db")
+    ex = PaperExchange(10_000.0, marks=_TrendingMarks(), state=state)
+    state.enqueue(_cand("a"))  # would fire on its own merits
+    tun = clamp(TunableConfig(regime=RegimeGate(enabled=True, allowed_regimes=("range",))))
+    s = run_once(ex, state, caps(), tun, decide_fn=act_now, now=NOW)
+    assert (s.fired, s.rejected) == (0, 1)  # computed regime 'trend' not allowed → gate rejects
