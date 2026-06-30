@@ -22,6 +22,7 @@ from hlcli.core.config import get_caps
 # the hard notional/leverage caps; these bounds stop absurd inputs at load time.
 _RISK_PCT_MAX = 5.0
 _MAX_CANDIDATES_CEILING = 50
+_MAX_HOLD_CEILING = 10_080  # one week in minutes; an upper sanity bound on auto-expiry
 
 
 class RegimeGate(BaseModel):
@@ -46,6 +47,7 @@ class TunableConfig(BaseModel):
     sizing: ConvictionSizing = Field(default_factory=ConvictionSizing)
     max_candidates_per_pass: int = 5
     decision_temperature: float = 0.2  # low temp for the hot decision loop
+    max_hold_minutes: int = 0  # auto-expire an open trade after this long; 0 disables
 
 
 class ConfigError(RuntimeError):
@@ -70,6 +72,7 @@ def clamp(cfg: TunableConfig) -> TunableConfig:
                 _bound(cfg.max_candidates_per_pass, 1, _MAX_CANDIDATES_CEILING)
             ),
             "decision_temperature": _bound(cfg.decision_temperature, 0.0, 1.0),
+            "max_hold_minutes": int(_bound(cfg.max_hold_minutes, 0, _MAX_HOLD_CEILING)),
             "sizing": s.model_copy(
                 update={
                     "min_conviction": _bound(s.min_conviction, 0.0, 1.0),

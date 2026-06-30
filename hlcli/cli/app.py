@@ -13,9 +13,8 @@ from typing import Optional
 
 import typer
 
-from hlcli.cli.commands import account, asset, config, exec_, markets, trade
+from hlcli.cli.commands import account, asset, config, exec_, markets, trade, tune
 from hlcli.cli.context import GlobalState
-from hlcli.cli.stubs import stub_group
 from hlcli.core.config import get_caps
 from hlcli.core.network import resolve_network
 
@@ -49,9 +48,4 @@ app.add_typer(asset.app, name="asset")
 app.add_typer(trade.app, name="trade")
 app.add_typer(exec_.app, name="exec")
 app.add_typer(config.app, name="config")
-app.add_typer(
-    stub_group("tune", "Self-tuning: propose → approve (Phase 4).", {
-        "run": 4, "diff": 4, "promote": 4, "history": 4,
-    }),
-    name="tune",
-)
+app.add_typer(tune.app, name="tune")

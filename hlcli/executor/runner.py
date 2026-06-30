@@ -30,6 +30,7 @@ from hlcli.executor.decision import DecisionResult, decide
 from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
 from hlcli.executor.gate import GateContext, evaluate
+from hlcli.executor.resolve import resolve_open_trades
 from hlcli.safety.breaker import Breaker
 from hlcli.state.store import StateStore
 
@@ -43,6 +44,7 @@ class PassSummary(BaseModel):
     fired: int
     rejected: int
     dropped: int
+    resolved: int
     note: str
 
 
@@ -60,10 +62,17 @@ def run_once(
     now = now if now is not None else time.time()
     breaker = Breaker(state, caps)
 
+    marks = exchange.get_marks()
+    # Monitor step: close any open trade whose SL/TP/expiry has triggered, recording
+    # its outcome. Skipped for shadow/dry-run (no live book to manage).
+    resolved = (
+        resolve_open_trades(exchange, state, caps, tunable, now, marks=marks)
+        if fire_enabled and not dry_run else 0
+    )
+
     equity = exchange.equity()
     positions = exchange.get_positions()
     open_coins = {p.coin for p in positions}
-    marks = exchange.get_marks()
     realized = state.paper_realized() if exchange.network is Network.PAPER else None
     recent = state.recent_decisions(limit=10)
     breaker_tripped = breaker.tripped()
@@ -111,6 +120,11 @@ def run_once(
                     fired += 1
                     open_coins.add(candidate.coin)
                     status = "fired"
+                    state.open_trade(
+                        candidate.id, candidate.coin, candidate.side, candidate.entry,
+                        candidate.sl, candidate.tp, outcome.order.size,
+                        decision.conviction, ctx.regime, now,
+                    )
                 else:
                     rejected += 1  # duplicate or exchange reject
             else:
@@ -127,7 +141,7 @@ def run_once(
 
     return PassSummary(
         network=exchange.network, seen=len(batch), approved=approved,
-        fired=fired, rejected=rejected, dropped=dropped,
+        fired=fired, rejected=rejected, dropped=dropped, resolved=resolved,
         note=_note(dry_run=dry_run, fire_enabled=fire_enabled),
     )
 

@@ -46,9 +46,19 @@ def test_config_show_works():
 
 
 def test_unbuilt_verb_is_a_clear_stub():
-    result = runner.invoke(app, ["tune", "run"])
+    result = runner.invoke(app, ["config", "set"])
     assert result.exit_code == 1
     assert "Phase 4" in result.output
+
+
+def test_tune_run_no_ops_on_empty_record(isolated_caps):
+    # No resolved trades → both tuners are sample-gated, no model is called, nothing written.
+    result = runner.invoke(app, ["--json", "tune", "run"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["config"] == "no_eligible_cohort"
+    assert payload["prompt"] == "insufficient_data"
+    assert payload["written"] == []
 
 
 def test_account_add_and_list(isolated_caps):

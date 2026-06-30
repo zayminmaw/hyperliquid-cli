@@ -7,6 +7,7 @@ restart so a crashed executor never double-fires or loses its book:
   - `meta`              key/value: the intake HWM, paper realized P&L
   - `idempotency`       fired keys → a restart re-running a candidate is a no-op
   - `decision_log`      full context + decision + gate + fill (audit + tuner data)
+  - `trades`            opened positions and their resolved outcomes (the tuner's cohort source)
   - `paper_positions`   the persistent paper book
 
 Pure persistence — fill math lives in the paper exchange, gate math in the gate.
@@ -41,6 +42,14 @@ CREATE TABLE IF NOT EXISTS decision_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL, candidate_id TEXT NOT NULL,
     decision TEXT, gate TEXT, fill TEXT, context TEXT
+);
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id TEXT NOT NULL, coin TEXT NOT NULL, side TEXT NOT NULL,
+    entry REAL NOT NULL, sl REAL NOT NULL, tp REAL NOT NULL, size REAL NOT NULL,
+    conviction REAL NOT NULL, regime TEXT, opened_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',   -- open | won | lost | expired
+    exit_price REAL, realized REAL, r_multiple REAL, closed_at REAL
 );
 CREATE TABLE IF NOT EXISTS paper_positions (
     coin TEXT PRIMARY KEY, side TEXT NOT NULL, size REAL NOT NULL, entry_price REAL NOT NULL
@@ -120,6 +129,41 @@ class StateStore:
             "SELECT * FROM decision_log ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # --- trades (open → resolved; the tuner's cohort source) ---
+
+    def open_trade(
+        self, candidate_id: str, coin: str, side: Side, entry: float, sl: float, tp: float,
+        size: float, conviction: float, regime: str | None, opened_at: float,
+    ) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO trades(candidate_id, coin, side, entry, sl, tp, size, conviction,"
+            " regime, opened_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (candidate_id, coin, side.value, entry, sl, tp, size, conviction, regime, opened_at),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def open_trades(self) -> list[dict]:
+        rows = self._conn.execute("SELECT * FROM trades WHERE status = 'open' ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_trade(
+        self, trade_id: int, status: str, exit_price: float, realized: float,
+        r_multiple: float, closed_at: float,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE trades SET status=?, exit_price=?, realized=?, r_multiple=?, closed_at=?"
+            " WHERE id=?",
+            (status, exit_price, realized, r_multiple, closed_at, trade_id),
+        )
+        self._conn.commit()
+
+    def resolved_trades(self, limit: int | None = None) -> list[dict]:
+        sql = "SELECT * FROM trades WHERE status != 'open' ORDER BY closed_at"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        return [dict(r) for r in self._conn.execute(sql).fetchall()]
 
     # --- paper book ---
 

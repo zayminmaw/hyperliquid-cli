@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
+from hlcli.core.llm import make_client
 from hlcli.core.types import Action, Decision, Timing
 from hlcli.executor.enrich import EnrichedContext
 
@@ -105,12 +106,12 @@ def decide(
     pass; a missing or malformed *output* is returned as a dropped result, never
     raised and never guessed.
     """
-    client = client or _make_client(caps)
+    client = client or make_client()
     response = client.messages.create(
         model=caps.decision_model,
         max_tokens=caps.decision_max_tokens,
         temperature=tunable.decision_temperature,
-        system=SYSTEM_PROMPT,
+        system=load_decision_prompt(caps),
         tools=[DECISION_TOOL],
         tool_choice={"type": "tool", "name": "submit_decision"},
         messages=[{"role": "user", "content": ctx.model_dump_json(indent=2)}],
@@ -124,16 +125,15 @@ def decide(
     return DecisionResult(decision, payload, "ok")
 
 
+def load_decision_prompt(caps: Caps) -> str:
+    """The active decision prompt (promoted by the prompt tuner), or the built-in default."""
+    path = caps.config_path.with_name("active_prompt.md")
+    return path.read_text() if path.exists() else SYSTEM_PROMPT
+
+
 def _tool_payload(response) -> dict | None:
     """The `submit_decision` tool input from a response, or None if the model didn't call it."""
     for block in getattr(response, "content", []):
         if getattr(block, "type", None) == "tool_use" and block.name == "submit_decision":
             return block.input
     return None
-
-
-def _make_client(caps: Caps):
-    """Lazily build the Anthropic client — kept out of the top-level import path."""
-    import anthropic  # noqa: PLC0415 — lazy by design (paper + tests run without it)
-
-    return anthropic.Anthropic()

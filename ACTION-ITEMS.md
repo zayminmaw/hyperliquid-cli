@@ -67,12 +67,15 @@ Gate verification (real LLM call on paper/testnet shadow) is deferred pending an
 ## Phase 4: Self-tuning (out-of-path, propose→approve)
 Gate: tuner proposes from logged outcomes; `promote` works; clamps hold.
 
-- [ ] 4.1 `tuner/stats.py` — resolved-trade cohorts; sample-gated (no cohort ⇒ model not called)
-- [ ] 4.2 `tuner/config_tuner.py` — propose tunable-surface edits (claude-opus-4-8) → `proposed_config.json`
-- [ ] 4.3 `tuner/prompt_tuner.py` — propose decision-prompt refinements → `proposed_prompt.md`
-- [ ] 4.4 `tuner/promote.py` — proposed → active; promotion history/audit trail
-- [ ] 4.5 `tune run | diff | promote | history`
-- [ ] 4.6 Tests: cohort gating, promote flow, clamps hold on promoted config
+- [x] 4.0 Trade resolution (prerequisite): `executor/resolve.py` closes open trades on SL/TP/expiry → `trades` ledger (won/lost/expired, realized, R-multiple); wired into `run_once` (opens on fill, resolves at pass start). `max_hold_minutes` added to tunable surface.
+- [x] 4.1 `tuner/stats.py` — cohorts (coin×side×conviction-bucket), win-rate + avg-R; sample-gated (`MIN_COHORT_SAMPLES=5`; no eligible cohort ⇒ empty ⇒ model not called)
+- [x] 4.2 `tuner/config_tuner.py` — propose tunable-surface edits (claude-opus-4-8, forced strict `submit_config`), clamped on propose + on load → `proposed_config.json`
+- [x] 4.3 `tuner/prompt_tuner.py` — refine decision prompt from decisions-vs-outcomes (claude-opus-4-8, text) → `proposed_prompt.md`; decision.py now loads `active_prompt.md` (fallback to built-in)
+- [x] 4.4 `tuner/promote.py` — proposed → active (re-clamps config), `promotions.jsonl` audit, `diff`
+- [x] 4.5 `tune run | diff | promote | history` (run no-ops keyless when gated; verified)
+- [x] 4.6 Tests: cohort gating, model-not-called gate (Boom client), config clamp holds, promote flow + re-clamp, prompt tuner — all mocked. 123 pass.
+
+§13 Q4 kept at default (propose→approve everywhere). Resolution chosen over deferral (Q from this session). Config tuner real-LLM run deferred pending a key; pipeline fully mocked-tested.
 
 ## Phase 5: Mainnet hardening
 Gate: testnet/shadow expectancy clears → controlled mainnet at tiny caps.
