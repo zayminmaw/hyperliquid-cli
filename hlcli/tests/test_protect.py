@@ -33,6 +33,9 @@ class FakeLiveExchange:
     def get_book(self, coin):
         return None
 
+    def get_candles(self, coin, *, interval="15m", lookback=48):
+        return []
+
     def equity(self):
         return 10_000.0
 

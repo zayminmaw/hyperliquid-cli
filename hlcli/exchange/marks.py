@@ -60,8 +60,11 @@ class MarksFeed:
     def candles(self, coin: str, *, interval: str = "15m", lookback: int = 48) -> list[Candle]:
         """The last `lookback` OHLCV bars for `coin` at `interval` (uncached; the
         executor pulls these once per coin per pass). Empty list if the feed has none."""
+        interval_ms = _INTERVAL_MS.get(interval)
+        if interval_ms is None:
+            raise ValueError(f"unsupported candle interval {interval!r}; expected one of {', '.join(_INTERVAL_MS)}")
         end = int(time.time() * 1000)
-        start = end - lookback * _INTERVAL_MS[interval]
+        start = end - lookback * interval_ms
         raw = self._info(
             {"type": "candleSnapshot", "req": {"coin": coin, "interval": interval, "startTime": start, "endTime": end}}
         )

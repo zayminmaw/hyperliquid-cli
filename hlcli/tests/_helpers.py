@@ -39,6 +39,17 @@ def act_wait(minutes: float = 1.0):
     return _decide
 
 
+def skip_wait(ctx, caps, tunable) -> DecisionResult:
+    """A 'skip' verdict that also carries WAIT timing — the runner must NOT defer it
+    (a skip is terminal regardless of timing); the gate rejects it on the action check."""
+    return DecisionResult(
+        Decision(candidate_id=ctx.candidate.id, action=Action.SKIP, timing=Timing.WAIT,
+                 conviction=0.1, recheck_in_minutes=5.0),
+        raw={"action": "skip", "timing": "wait", "conviction": 0.1, "recheck_in_minutes": 5.0},
+        note="ok",
+    )
+
+
 class FakeMarks:
     """Stand-in for MarksFeed with fixed prices — keeps paper fills network-free."""
 

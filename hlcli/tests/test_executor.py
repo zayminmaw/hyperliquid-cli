@@ -6,7 +6,7 @@ from hlcli.exchange.paper import PaperExchange
 from hlcli.executor.execute import fire
 from hlcli.executor.runner import run_once
 from hlcli.state.store import StateStore
-from hlcli.tests._helpers import FakeMarks, act_now, act_wait, caps, tunable
+from hlcli.tests._helpers import FakeMarks, act_now, act_wait, caps, skip_wait, tunable
 
 NOW = 1_000_000.0
 
@@ -194,4 +194,55 @@ def test_breaker_freezes_recheck(tmp_path):
     state.set_breaker(False)
     thawed = run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW + 180)
     assert (thawed.rechecked, thawed.fired) == (1, 1)  # cleared → re-checked and fires
+    assert state.deferred_count() == 0
+
+
+def test_dry_run_wait_counts_deferred_without_persisting(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    s = run_once(ex, state, caps(), tunable(), decide_fn=act_wait(), dry_run=True, now=NOW)
+    assert (s.deferred, s.rejected, s.fired) == (1, 0, 0)  # WAIT counts as deferred in the preview
+    assert state.deferred_count() == 0  # preview only — nothing actually parked
+
+
+def test_deferred_survives_restart(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), decide_fn=act_wait(minutes=1), now=NOW)
+    assert state.deferred_count() == 1
+
+    reopened = StateStore(tmp_path / "state.db")  # crash + restart — same db file
+    due = reopened.due_deferred(NOW + 10**9)
+    assert len(due) == 1
+    assert due[0].candidate.id == "a"
+    assert due[0].attempts_remaining == caps().followup_max_attempts
+
+
+def test_shadow_recheck_does_not_fire(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), fire_enabled=False, decide_fn=act_wait(minutes=1), now=NOW)
+    assert state.deferred_count() == 1  # shadow still parks WAITs (training data)
+    s = run_once(ex, state, caps(), tunable(), fire_enabled=False, decide_fn=act_now, now=NOW + 120)
+    assert (s.rechecked, s.approved, s.fired) == (1, 1, 0)  # re-checked, approved, never fired
+    assert ex.get_positions() == []
+    assert state.deferred_count() == 0  # terminal verdict → dropped from the park
+
+
+def test_recheck_takes_concurrency_slot_before_fresh(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))  # BTC → deferred
+    run_once(ex, state, caps(), tunable(), decide_fn=act_wait(minutes=1), now=NOW)
+    state.enqueue(_cand("b", coin="ETH"))  # fresh candidate, different coin
+    s = run_once(ex, state, caps(max_concurrent_positions=1), tunable(), decide_fn=act_now, now=NOW + 120)
+    # the due re-check claims the single slot first; the fresh candidate is then maxed out
+    assert (s.rechecked, s.fired, s.rejected) == (1, 1, 1)
+    assert [p.coin for p in ex.get_positions()] == ["BTC"]
+
+
+def test_skip_with_wait_timing_is_not_deferred(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    s = run_once(ex, state, caps(), tunable(), decide_fn=skip_wait, now=NOW)
+    assert (s.deferred, s.rejected) == (0, 1)  # a skip is terminal — WAIT timing is ignored
     assert state.deferred_count() == 0

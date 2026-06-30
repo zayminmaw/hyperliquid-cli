@@ -1,6 +1,7 @@
 """MarksFeed parses the public /info endpoint and caches within its TTL."""
 
 import httpx
+import pytest
 
 from hlcli.exchange.marks import MarksFeed
 
@@ -70,3 +71,9 @@ def test_candles_posts_candle_snapshot_request_with_derived_window():
     assert seen["type"] == "candleSnapshot"
     assert (seen["req"]["coin"], seen["req"]["interval"]) == ("ETH", "15m")
     assert seen["req"]["endTime"] - seen["req"]["startTime"] == 10 * 900_000  # lookback × 15m
+
+
+def test_candles_rejects_unknown_interval():
+    feed = _feed(lambda req: httpx.Response(200, json=[]))
+    with pytest.raises(ValueError):
+        feed.candles("BTC", interval="7m")  # not in _INTERVAL_MS → clear error, not a raw KeyError

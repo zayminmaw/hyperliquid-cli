@@ -26,11 +26,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import httpx
 from pydantic import BaseModel
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
-from hlcli.core.types import Action, Candidate, Network, OrderResult, Timing
+from hlcli.core.types import Action, Candidate, Network, OrderResult, Position, Timing
 from hlcli.exchange.base import Exchange
 from hlcli.executor.decision import DecisionResult, decide
 from hlcli.executor.enrich import enrich
@@ -152,13 +153,13 @@ class _PassContext:
     caps: Caps
     tunable: TunableConfig
     decide_fn: DecideFn
-    marks: dict
-    market: dict
+    marks: dict[str, float]
+    market: dict[str, tuple]  # coin → (candle summary, regime); see _market_context
     equity: float
-    positions: list
+    positions: list[Position]
     realized: float | None
-    recent: list
-    open_coins: set
+    recent: list[dict]
+    open_coins: set[str]
     now: float
     breaker_tripped: bool
     daily_loss: bool
@@ -192,7 +193,7 @@ def _process_deferred(exchange: Exchange, state: StateStore, d: DeferredCandidat
 def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, common: _PassContext, *, attempts_left: int) -> _Step:
     """enrich → decide → (drop | WAIT-defer | gate → fire) → log, tallying as it goes.
     Returns a `_Step` describing the outcome; the caller owns intake/deferred persistence."""
-    candles, regime = common.market.get(candidate.coin, (None, None))
+    candles, regime = common.market[candidate.coin]  # built from this pass's batch ∪ due coins
     ctx = enrich(
         candidate, marks=common.marks, equity=common.equity, positions=common.positions,
         realized=common.realized, recent=common.recent, tunable=common.tunable,
@@ -293,7 +294,11 @@ def _wait(state: StateStore, candidate: Candidate, decision, regime, common: _Pa
 
 def _schedule_recheck(candidate: Candidate, recheck_minutes: float | None, now: float, caps: Caps) -> float | None:
     """When to next look at this candidate, clamped to land inside its freshness window.
-    None when there's no room left for a meaningful re-check before it goes stale."""
+    None when there's no room left for a meaningful re-check before it goes stale.
+
+    Stage 2 of the two-stage recheck clamp: `decision._clamp_recheck` first bounds the
+    model's raw value to [0, _RECHECK_CEILING_MIN]; here we bound the scheduled *time*
+    to [now + _MIN_RECHECK_SECONDS, freshness boundary]."""
     latest = candidate.created_at + caps.max_signal_age_minutes * 60
     if latest - now < _MIN_RECHECK_SECONDS:
         return None
@@ -315,9 +320,12 @@ def _fetch_candles(exchange: Exchange, coin: str):
     # Best-effort: candles are decision *context*, not a safety input, so a feed hiccup
     # degrades this coin to "no context" rather than aborting a pass that already has
     # valid marks. (A marks failure still aborts — that read is load-bearing.)
+    # Catch only genuine feed failures — network/HTTP errors and a malformed or
+    # unexpected response shape; an unexpected bug (e.g. a programming error) still
+    # surfaces rather than masquerading as "no candles".
     try:
         return exchange.get_candles(coin)
-    except Exception:
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
         return []
 
 

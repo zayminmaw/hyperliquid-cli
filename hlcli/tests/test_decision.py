@@ -99,6 +99,14 @@ def test_decide_uses_order_path_model_and_low_temp():
     assert client.kwargs["tool_choice"]["name"] == "submit_decision"
 
 
+def test_decide_omits_temperature_for_no_sampling_models():
+    # Opus 4.7+/Fable reject sampling params with a 400, so the order-path call must
+    # drop `temperature` when the model is overridden to one of those families.
+    client = FakeClient(_good())
+    decide(_ctx(), caps(decision_model="claude-opus-4-8"), tunable(), client=client)
+    assert "temperature" not in client.kwargs
+
+
 # --- runner: shadow + dropped paths ---
 
 def _setup(tmp_path):
