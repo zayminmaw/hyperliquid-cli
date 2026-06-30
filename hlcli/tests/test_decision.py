@@ -47,6 +47,12 @@ def test_invalid_payload_is_dropped(payload):
     assert validate_decision(payload, "c1") is None  # dropped, never guessed
 
 
+def test_recheck_is_parsed_and_clamped():
+    assert validate_decision(_good(timing="wait", recheck_in_minutes=5000), "c1").recheck_in_minutes == 1440.0
+    assert validate_decision(_good(recheck_in_minutes=-3), "c1").recheck_in_minutes == 0.0
+    assert validate_decision(_good(), "c1").recheck_in_minutes is None  # missing → code default later
+
+
 # --- decide: mocked client ---
 
 class FakeClient:

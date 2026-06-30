@@ -27,6 +27,18 @@ def drop(ctx, caps, tunable) -> DecisionResult:
     return DecisionResult(None, raw=None, note="schema_invalid")
 
 
+def act_wait(minutes: float = 1.0):
+    """Factory for a decider that says 'act, but WAIT' with a fixed recheck delay."""
+    def _decide(ctx, caps, tunable) -> DecisionResult:
+        return DecisionResult(
+            Decision(candidate_id=ctx.candidate.id, action=Action.ACT, timing=Timing.WAIT,
+                     conviction=0.8, recheck_in_minutes=minutes),
+            raw={"action": "act", "timing": "wait", "conviction": 0.8, "recheck_in_minutes": minutes},
+            note="ok",
+        )
+    return _decide
+
+
 class FakeMarks:
     """Stand-in for MarksFeed with fixed prices — keeps paper fills network-free."""
 

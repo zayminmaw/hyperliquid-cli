@@ -37,9 +37,10 @@ DECISION_TOOL = {
             "rationale": {"type": "string", "description": "One short sentence: your read of the setup at the current mark, the reasoning behind the verdict below."},
             "conviction": {"type": "number", "description": "Genuine edge in the setup as a decimal, 0.0 (none) to 1.0 (high)."},
             "timing": {"type": "string", "enum": ["now", "wait"], "description": "Enter now, or wait for a better moment."},
+            "recheck_in_minutes": {"type": "number", "description": "When timing is 'wait', minutes until the setup should be re-checked with fresh data; the system re-checks a few times before it expires. Use 0 when acting now."},
             "action": {"type": "string", "enum": ["act", "skip"], "description": "Take this setup, or pass."},
         },
-        "required": ["rationale", "conviction", "timing", "action"],
+        "required": ["rationale", "conviction", "timing", "recheck_in_minutes", "action"],
         "additionalProperties": False,
     },
 }
@@ -58,7 +59,9 @@ SYSTEM_PROMPT = (
     "the current mark? Stand aside when the picture is unclear: incoherent or contradictory levels, a "
     "regime that doesn't support the trade, or a mark that has already run past the entry. Capital "
     "preservation and consistency beat being right once.\n\n"
-    "Decide only: action (act/skip), timing (now/wait), conviction, and a one-sentence rationale. "
+    "Decide only: action (act/skip), timing (now/wait), conviction, recheck_in_minutes, and a "
+    "one-sentence rationale. When you choose to WAIT, set recheck_in_minutes to when the setup is "
+    "worth another look; the system re-checks it with fresh data a few times before it expires. "
     "Conviction is a decimal in [0,1] reflecting genuine edge, not enthusiasm: it scales position "
     "size within fixed risk caps, so ~0.5 is a setup you'd take at half size and 0.8+ is reserved for "
     "high-edge setups. You do NOT size positions, place stops, pick coins, or override any limit — "
@@ -103,7 +106,23 @@ def validate_decision(payload: object, candidate_id: str) -> Decision | None:
         timing=timing,
         conviction=max(0.0, min(1.0, conviction)),
         rationale=str(payload.get("rationale", ""))[:500],
+        recheck_in_minutes=_clamp_recheck(payload.get("recheck_in_minutes")),
     )
+
+
+# Raw sanity bound on recheck (a safety clamp, not a guess). The runner additionally
+# clamps the scheduled time into the candidate's freshness window. A missing or
+# non-numeric value → None ("use the code default") rather than dropping the verdict:
+# the recheck time is mechanics the code owns, unlike action/timing/conviction.
+_RECHECK_CEILING_MIN = 1440.0  # 24h
+
+
+def _clamp_recheck(value: object) -> float | None:
+    try:
+        minutes = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(_RECHECK_CEILING_MIN, minutes))
 
 
 def decide(

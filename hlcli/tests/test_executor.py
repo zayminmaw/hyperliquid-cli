@@ -6,7 +6,7 @@ from hlcli.exchange.paper import PaperExchange
 from hlcli.executor.execute import fire
 from hlcli.executor.runner import run_once
 from hlcli.state.store import StateStore
-from hlcli.tests._helpers import FakeMarks, act_now, caps, tunable
+from hlcli.tests._helpers import FakeMarks, act_now, act_wait, caps, tunable
 
 NOW = 1_000_000.0
 
@@ -120,3 +120,78 @@ def test_candle_regime_reaches_the_gate(tmp_path):
     tun = clamp(TunableConfig(regime=RegimeGate(enabled=True, allowed_regimes=("range",))))
     s = run_once(ex, state, caps(), tun, decide_fn=act_now, now=NOW)
     assert (s.fired, s.rejected) == (0, 1)  # computed regime 'trend' not allowed → gate rejects
+
+
+# --- wait → follow-up loop ---
+
+def test_wait_defers_instead_of_rejecting(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    s = run_once(ex, state, caps(), tunable(), decide_fn=act_wait(), now=NOW)
+    assert (s.fired, s.rejected, s.deferred) == (0, 0, 1)
+    assert state.deferred_count() == 1
+    assert ex.get_positions() == []  # nothing fired — parked for a later look
+
+
+def test_due_deferral_fires_on_recheck(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), decide_fn=act_wait(minutes=1), now=NOW)  # → deferred
+    s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW + 120)    # re-check says now
+    assert (s.seen, s.rechecked, s.fired) == (0, 1, 1)
+    assert state.deferred_count() == 0
+    assert [p.coin for p in ex.get_positions()] == ["BTC"]
+
+
+def test_recheck_attempts_exhaust(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    cap2 = caps(followup_max_attempts=2)
+    run_once(ex, state, cap2, tunable(), decide_fn=act_wait(minutes=1), now=NOW)  # park, attempts=2
+    s1 = run_once(ex, state, cap2, tunable(), decide_fn=act_wait(minutes=1), now=NOW + 120)
+    assert (s1.rechecked, s1.deferred) == (1, 1) and state.deferred_count() == 1  # re-parked, attempts=1
+    s2 = run_once(ex, state, cap2, tunable(), decide_fn=act_wait(minutes=1), now=NOW + 240)
+    assert (s2.rechecked, s2.deferred, s2.rejected) == (1, 0, 1)  # budget spent → terminal reject
+    assert state.deferred_count() == 0
+
+
+def test_recheck_clamped_within_freshness(tmp_path):
+    ex, state = _setup(tmp_path)
+    c = _cand("a")
+    state.enqueue(c)
+    run_once(ex, state, caps(max_signal_age_minutes=30), tunable(), decide_fn=act_wait(minutes=1000), now=NOW)
+    due = state.due_deferred(NOW + 10**9)  # fetch the parked row irrespective of time
+    assert len(due) == 1
+    assert due[0].next_check_at == c.created_at + 30 * 60  # clamped to the freshness boundary
+
+
+def test_wait_rejected_when_no_freshness_room(tmp_path):
+    ex, state = _setup(tmp_path)
+    c = _cand("a")
+    state.enqueue(c)
+    near_stale = c.created_at + 30 * 60 - 30  # 30s before stale — under the min re-check gap
+    s = run_once(ex, state, caps(max_signal_age_minutes=30), tunable(), decide_fn=act_wait(minutes=1), now=near_stale)
+    assert (s.deferred, s.rejected) == (0, 1)
+    assert state.deferred_count() == 0
+
+
+def test_wait_with_followups_disabled_rejects(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    s = run_once(ex, state, caps(followup_max_attempts=0), tunable(), decide_fn=act_wait(), now=NOW)
+    assert (s.deferred, s.rejected) == (0, 1)  # feature off → wait is a terminal reject
+    assert state.deferred_count() == 0
+
+
+def test_breaker_freezes_recheck(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), decide_fn=act_wait(minutes=1), now=NOW)  # parked
+    state.set_breaker(True)
+    frozen = run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW + 120)
+    assert (frozen.rechecked, frozen.fired) == (0, 0)  # kill switch → no re-check
+    assert state.deferred_count() == 1  # still parked, attempt not consumed
+    state.set_breaker(False)
+    thawed = run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW + 180)
+    assert (thawed.rechecked, thawed.fired) == (1, 1)  # cleared → re-checked and fires
+    assert state.deferred_count() == 0

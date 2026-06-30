@@ -63,6 +63,9 @@ class Decision(BaseModel):
     timing: Timing
     conviction: float = Field(ge=0.0, le=1.0)
     rationale: str = ""
+    # Minutes to wait before re-checking, when timing is WAIT. The code clamps this
+    # into the freshness window; None means "use the code default". Ignored when NOW.
+    recheck_in_minutes: float | None = None
 
 
 class Order(BaseModel):

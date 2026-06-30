@@ -109,6 +109,7 @@ def run(ctx: typer.Context, interval: float = typer.Option(5.0, "--interval", he
             try:
                 s = run_once(exchange, state, caps, tunable, dry_run=g.dry_run, alerter=alerter)
                 note(f"[dim]{time.strftime('%H:%M:%S')}[/dim] seen={s.seen} fired={s.fired} "
+                     f"deferred={s.deferred} rechecked={s.rechecked} "
                      f"resolved={s.resolved} rejected={s.rejected} dropped={s.dropped}")
             except Exception as exc:  # keep the loop alive across transient LLM/network faults
                 note(f"[yellow]{time.strftime('%H:%M:%S')} pass failed: {exc}[/yellow]")
@@ -138,7 +139,7 @@ def breaker(
 def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch")) -> None:
     """Live position health for the executor's book."""
     g = state_of(ctx)
-    exchange, _state, _caps, _tunable = _env(g, for_write=False)
+    exchange, state, _caps, _tunable = _env(g, for_write=False)
 
     def rows() -> list[dict]:
         return position_health(exchange)
@@ -147,6 +148,8 @@ def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch"
         watch_rows(rows, title="exec status")
         return
     emit_rows(rows(), as_json=g.json_out, title="exec status")
+    if not g.json_out:
+        note(f"deferred (awaiting re-check): {state.deferred_count()}")
 
 
 @app.command("report")
@@ -162,6 +165,7 @@ def report(ctx: typer.Context) -> None:
             "open_positions": len(positions),
             "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
             "breaker": "tripped" if Breaker(state, caps).tripped() else "clear",
+            "deferred": state.deferred_count(),  # WAIT candidates parked for re-check
             "graduation": assess(state.resolved_trades(), caps),
         },
         as_json=g.json_out, title="exec report",

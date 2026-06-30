@@ -47,6 +47,9 @@ class Caps(BaseSettings):
     max_leverage: float = 3.0
     rr_floor: float = 1.5
     max_signal_age_minutes: int = 30
+    # How many times the executor re-checks a candidate the LLM said to WAIT on before
+    # giving up. 0 disables follow-ups (a `wait` becomes a terminal reject, as before).
+    followup_max_attempts: int = 3
 
     # comma-separated in env (HL_ALLOWED_COINS="BTC,ETH,SOL"); use `.coins`
     allowed_coins: str = "BTC,ETH,SOL"

@@ -9,14 +9,18 @@
 - Task: Phase 5 — Mainnet hardening ✅ code-complete
 - Goal: native exchange-side SL/TP at entry, runtime prereq enforcement, graduation checklist in report, key review, alerting
 - Status: done (143 tests pass, 1 skip). Build plan fully implemented through all phases.
-- Next action: none coding-side. Remaining is operational — supply agent keys, run testnet/shadow to accumulate resolved trades, let graduation clear, then tiny mainnet caps. Designed-but-unbuilt (user-approved): wait→follow-up re-check loop — tool gains `recheck_in_minutes`, code clamps it WITHIN max_signal_age (decided), attempts from new `HL_FOLLOWUP_MAX_ATTEMPTS` cap (default 3), `deferred_candidates` table, runner drains due deferrals before pull_new, gate stays pure. (Candle feed + deterministic regime: DONE.) Optional: webhook/email alert tailing alerts-<net>.log; live testnet native-trigger reconciliation.
+- Next action: none coding-side. Remaining is operational — supply agent keys, run testnet/shadow to accumulate resolved trades, let graduation clear, then tiny mainnet caps. (Candle feed + regime: DONE. Wait→follow-up loop: DONE.) Optional follow-ups: webhook/email alert tailing alerts-<net>.log; live testnet native-trigger reconciliation.
 - Blocked by: none. (Phase 1 live testnet order, Phase 3 shadow, Phase 4 config-tuner LLM, Phase 5 real graduation — all deferred pending keys.)
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: built the candle feed + deterministic regime. `MarksFeed.candles` (keyless /info candleSnapshot, lookback×interval window) + `Exchange.get_candles` on both backends; new `executor/regime.py` (Kaufman efficiency-ratio classify→trend/range/None at <20 bars; compact 12-bar `summarize`); runner gathers per-coin context once (best-effort `_fetch_candles`, degrades on feed failure), feeds `enrich(candles=, regime=)`; regime now reaches the gate. (Prior: decision.py P1 rationale-first tool order, P2 temperature-by-model guard, P3 conviction anchor + execution-trader persona.)
+- Did: follow-ups to the wait loop — a tripped breaker now FREEZES re-checks (`due=[]` when breaker_tripped; parked candidates keep attempts until it clears); `exec report` surfaces `deferred` count, `exec status` notes it (human view). 170 pass.
+- Then (prior): built the wait→follow-up loop. Decision tool gains `recheck_in_minutes` (validator clamps to [0,1440]; missing→None); `Decision.recheck_in_minutes`; new `HL_FOLLOWUP_MAX_ATTEMPTS` cap (default 3, 0=disabled). New `deferred` table + `defer_candidate`/`due_deferred`/`drop_deferred`/`deferred_count` + `DeferredCandidate`. Runner refactored: extracted `_evaluate`+`_fire_and_reconcile` (shared by intake + deferral re-check loops), `_wait` intercepts act+wait BEFORE the gate to park (HWM still advances; gate stays pure), `_schedule_recheck` clamps next-check WITHIN freshness (None⇒terminal reject when no room/attempts). PassSummary +`rechecked`/`deferred`. Due deferrals re-checked first each pass with fresh data; skipped in dry_run.
+- Result: 169 pass; keyless invariant re-verified
+- File(s) touched: hlcli/core/{config,types}.py, hlcli/executor/{decision,runner}.py, hlcli/state/store.py, hlcli/cli/commands/exec_.py, tests/{_helpers,test_executor,test_decision}
+- Prior: candle feed + deterministic regime (MarksFeed.candles, executor/regime.py, enrich/runner wiring). `MarksFeed.candles` (keyless /info candleSnapshot, lookback×interval window) + `Exchange.get_candles` on both backends; new `executor/regime.py` (Kaufman efficiency-ratio classify→trend/range/None at <20 bars; compact 12-bar `summarize`); runner gathers per-coin context once (best-effort `_fetch_candles`, degrades on feed failure), feeds `enrich(candles=, regime=)`; regime now reaches the gate. (Prior: decision.py P1 rationale-first tool order, P2 temperature-by-model guard, P3 conviction anchor + execution-trader persona.)
 - Result: 162 pass; keyless-import invariant re-verified in /tmp/hlcore
 - File(s) touched: hlcli/core/types.py, hlcli/exchange/{marks,base,paper,hyperliquid}.py, hlcli/executor/{regime(new),enrich,runner,decision}.py, tests/{_helpers,test_regime(new),test_marks,test_executor}
 
@@ -38,7 +42,7 @@
 | `hlcli/exchange/marks.py` | public `/info` reads over **httpx** (keyless); `api_url` |
 | `hlcli/exchange/hyperliquid.py` | live backend (SDK+eth_account lazy); reads keyless, writes need key |
 | `hlcli/exchange/{base,paper,factory}.py` | protocol · paper (state-backed book + fills) · factory |
-| `hlcli/state/store.py` | sqlite: intake/HWM/idempotency/decision_log/**trades**/paper_positions; `open_state` |
+| `hlcli/state/store.py` | sqlite: intake/HWM/idempotency/decision_log/**trades**/**deferred**(WAIT re-checks)/paper_positions; `DeferredCandidate`; `open_state` |
 | `hlcli/executor/gate.py` | `evaluate` (first-failure gate) + `_size` (fixed-fractional) + `infer_side` |
 | `hlcli/executor/{enrich,decision,regime}.py` | `EnrichedContext`(carries candles+regime) · `decide`(sonnet-4-6, rationale-first strict tool)+`validate_decision`+`load_decision_prompt` · `regime.classify`(ER trend/range)+`summarize` |
 | `hlcli/executor/{intake,execute,runner,resolve,monitor,protect}.py` | propose · fire · `run_once`(decide_fn/fire_enabled/alerter) · close-out→trades (native_protected on live) · health · native SL/TP + emergency-close |
@@ -50,7 +54,7 @@
 ## 🧠 DECISIONS
 
 - [2026-06-27] LLM owns judgment, code owns mechanics + safety; LLM output is gate input, never a bypass
-- [2026-06-27] paper is default network everywhere; mainnet gated (env flag + flag + confirm)
+- [2026-07-01] wait→follow-up: act+wait is DEFERRED not rejected — runner intercepts WAIT before the gate (gate stays pure), parks in `deferred` table, HWM still advances. Re-check scheduled WITHIN max_signal_age (clamped; no room⇒terminal reject). attempts = HL_FOLLOWUP_MAX_ATTEMPTS re-checks (default 3); each re-check uses FRESH enrich/candles/regime. Due deferrals processed before new intake; skipped in dry_run AND while breaker tripped (frozen, attempts intact). `exec report.deferred` + `exec status` note surface the parked count.
 - [2026-06-27] hard caps in .env (off-limits to LLM/tuner); tunable surface in config/active_config.json, clamped on load
 - [2026-06-27] anthropic + live-exchange deps lazy-imported so paper + tests run without keys/signing libs
 - [2026-06-27] Order-path model claude-sonnet-4-6; daily tuner claude-opus-4-8

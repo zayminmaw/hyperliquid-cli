@@ -8,6 +8,7 @@ restart so a crashed executor never double-fires or loses its book:
   - `idempotency`       fired keys → a restart re-running a candidate is a no-op
   - `decision_log`      full context + decision + gate + fill (audit + tuner data)
   - `trades`            opened positions and their resolved outcomes (the tuner's cohort source)
+  - `deferred`          candidates the LLM said WAIT on, parked for a fresh re-check later
   - `paper_positions`   the persistent paper book
 
 Pure persistence — fill math lives in the paper exchange, gate math in the gate.
@@ -17,10 +18,20 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from hlcli.core.config import Caps
 from hlcli.core.types import Candidate, Network, Side
+
+
+@dataclass
+class DeferredCandidate:
+    """A parked WAIT candidate due for a re-check: the candidate plus its follow-up state."""
+
+    candidate: Candidate
+    next_check_at: float
+    attempts_remaining: int
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS intake (
@@ -50,6 +61,12 @@ CREATE TABLE IF NOT EXISTS trades (
     conviction REAL NOT NULL, regime TEXT, opened_at REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',   -- open | won | lost | expired
     exit_price REAL, realized REAL, r_multiple REAL, closed_at REAL
+);
+CREATE TABLE IF NOT EXISTS deferred (
+    id                 TEXT PRIMARY KEY,
+    candidate          TEXT NOT NULL,      -- full Candidate JSON, to re-enrich/re-decide
+    next_check_at      REAL NOT NULL,
+    attempts_remaining INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS paper_positions (
     coin TEXT PRIMARY KEY, side TEXT NOT NULL, size REAL NOT NULL, entry_price REAL NOT NULL
@@ -170,6 +187,40 @@ class StateStore:
         if limit is not None:
             sql += f" LIMIT {int(limit)}"
         return [dict(r) for r in self._conn.execute(sql).fetchall()]
+
+    # --- deferred follow-ups (LLM said WAIT; re-checked later with fresh data) ---
+
+    def defer_candidate(self, candidate: Candidate, next_check_at: float, attempts_remaining: int) -> None:
+        """Park (or re-park) a candidate for a later re-check. Keyed by candidate id."""
+        self._conn.execute(
+            "INSERT INTO deferred(id, candidate, next_check_at, attempts_remaining) VALUES(?, ?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET next_check_at=excluded.next_check_at,"
+            " attempts_remaining=excluded.attempts_remaining, candidate=excluded.candidate",
+            (candidate.id, candidate.model_dump_json(), next_check_at, attempts_remaining),
+        )
+        self._conn.commit()
+
+    def due_deferred(self, now: float) -> list[DeferredCandidate]:
+        """Parked candidates whose re-check time has arrived, oldest-due first."""
+        rows = self._conn.execute(
+            "SELECT * FROM deferred WHERE next_check_at <= ? ORDER BY next_check_at", (now,)
+        ).fetchall()
+        return [
+            DeferredCandidate(
+                candidate=Candidate.model_validate_json(r["candidate"]),
+                next_check_at=r["next_check_at"],
+                attempts_remaining=r["attempts_remaining"],
+            )
+            for r in rows
+        ]
+
+    def drop_deferred(self, candidate_id: str) -> None:
+        """Remove a parked candidate — it reached a terminal verdict (fired/skipped/expired)."""
+        self._conn.execute("DELETE FROM deferred WHERE id = ?", (candidate_id,))
+        self._conn.commit()
+
+    def deferred_count(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM deferred").fetchone()[0]
 
     # --- paper book ---
 
