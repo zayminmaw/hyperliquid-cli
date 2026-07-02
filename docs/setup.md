@@ -56,7 +56,9 @@ configurable. A **relative** `HL_CONFIG_PATH` resolves against `HL_DATA_DIR`
 (default: `~/.hyperliquid-cli/config/active_config.json`), so `hl` behaves the
 same from any working directory; set an absolute path to opt out.
 
-The LLM decision call and the tuners read `ANTHROPIC_API_KEY` from the environment.
+The LLM decision call and the tuners read `ANTHROPIC_API_KEY` from the shell
+environment or `.env` (shell wins). It is kept off the caps object; `hl config show`
+displays it masked (first 4 + last 4 chars).
 
 ### 2. `active_config.json` — the tunable surface (clamped on load)
 

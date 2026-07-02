@@ -1,6 +1,6 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-02 | Session: senior-SWE end-to-end review → fixed ALL findings (8 bugs + 12 improvements); 235 tests pass; docs synced
+> Last updated: 2026-07-02 | Session: ANTHROPIC_API_KEY via .env + masked in `config show`; 241 tests pass; next = operational testnet/paper runs (user supplying key + testnet wallet)
 
 ---
 
@@ -16,9 +16,9 @@
 
 ## 📍 LAST ACTION
 
-- Did: implemented all review fixes in 8 workstreams: (1) NaN-proof clamps — non-finite conviction/recheck dropped, non-finite tunables → field defaults; (2) gate mark-sanity block + sizing/caps priced at the mark; (3) exchange layer — per-asset szDecimals wire rounding (new `exchange/rounding.py`, keyless `/info meta` via `MarksFeed.sz_decimals`), `frontendOpenOrders` (triggers visible to cancel-all), marks `raise_for_status` + cache copies, paper rejects triggers + flips overfills (never on reduce-only); (4) lifecycle — ledger-first fills (abort → resolved `aborted` row), failed protection cancels placed triggers, resolver reconciles vanished live positions (candle extremes → won/lost, else `closed`@mark) + cancels surviving triggers, unmanaged-position alert (edge-triggered), dry-run fully pure, disjoint PassSummary counters (+`failed`); (5) shadow trades — `trades.shadow` column (migration), hypothetical book resolved orderlessly, feeds tuner+graduation, honors one-per-coin; shadow passes never touch real trades; (6) enrich — real resolved outcomes + `followup` block on WAIT re-checks; (7) accounts — resolve rejects wrong-network alias, add = row-then-key (no silent rebind), keystore refuses loose perms; (8) promote consumes proposals + audit records content, exec run reloads tunable/pass + failure backoff+alert, config_path anchored to data_dir, content-hash ids for batch intake.
-- Result: 235 pass (was 177); keyless import verified in a fresh core-only venv
-- File(s) touched: hlcli/{core/{config,config_schema},executor/{gate,runner,decision,resolve,protect,enrich,intake},exchange/{marks,hyperliquid,paper,rounding(new)},state/store,safety/breaker,accounts/{store,keystore},cli/commands/{account,exec_},tuner/promote}.py; tests/{_helpers,test_decision,test_config_schema,test_gate,test_marks,test_hyperliquid_reads,test_paper_fill,test_rounding(new),test_protect,test_resolve,test_alerts,test_executor,test_accounts,test_tuner,test_intake(new)}.py; CLAUDE.md, README.md, docs/{architecture,modules,decisions,setup,cli}.md
+- Did: ANTHROPIC_API_KEY now readable from `.env` (shell env wins) via `_LLMEnv` in core/llm.py, passed explicitly to `anthropic.Anthropic(api_key=…)`; kept OFF the Caps object; `hl config show` displays it masked (first4…last4, `…` if ≤8 chars, "not set" if absent)
+- Result: 241 pass (was 235); verified live: set → `sk-a…TAIL`, unset → `not set`
+- File(s) touched: hlcli/core/llm.py, hlcli/cli/commands/config.py, hlcli/tests/test_llm.py (new), .env.example, docs/setup.md
 
 ---
 
@@ -30,7 +30,7 @@
 | `ACTION-ITEMS.md` | Phase-by-phase status (source of truth) |
 | `hlcli/core/config.py` | Hard caps (`HL_*` env); `get_caps()`; relative `config_path` anchors to `data_dir` |
 | `hlcli/core/config_schema.py` | Tunable surface + `clamp()` (non-finite ⇒ field default) + `load_tunable()` |
-| `hlcli/core/{network,types,llm}.py` | network gate · domain types (`OpenOrder.is_trigger`) · `make_client()` (the ONE lazy anthropic import) |
+| `hlcli/core/{network,types,llm}.py` | network gate · domain types (`OpenOrder.is_trigger`) · llm: the ONE lazy anthropic import; key from shell env or `.env`, never on Caps; `masked_api_key()` |
 | `hlcli/cli/context.py` | `GlobalState`, `build_for(state, for_write)` — account/key resolution, mainnet gate |
 | `hlcli/cli/commands/` | account/trade/markets/asset/exec_/config/tune · exec run has failure backoff + per-pass tunable reload |
 | `hlcli/accounts/{store,keystore}.py` | SQLite metadata (resolve is network-checked; alias globally unique) · `0600` keys (perms enforced on load too) |

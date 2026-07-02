@@ -9,6 +9,7 @@ from hlcli.cli.output import emit
 from hlcli.cli.stubs import stub_command
 from hlcli.core.config import get_caps
 from hlcli.core.config_schema import load_tunable
+from hlcli.core.llm import masked_api_key
 
 app = typer.Typer(no_args_is_help=True, help="Configuration.")
 
@@ -36,6 +37,7 @@ def show(ctx: typer.Context) -> None:
             "allowed_coins": ",".join(caps.coins),
             "decision_model": caps.decision_model,
             "tuner_model": caps.tuner_model,
+            "anthropic_api_key": masked_api_key() or "not set",
             "risk_per_trade_pct": tunable.risk_per_trade_pct,
             "regime_enabled": tunable.regime.enabled,
             "conviction_min": tunable.sizing.min_conviction,

@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/secrets/**)",
+      "Read(**/secrets.*)",
+      "Read(**/credentials.*)",
+      "Read(**/credentials.json)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/*.pfx)",
+      "Read(**/*.p12)",
+      "Read(**/*.jks)",
+      "Read(**/*.keystore)",
+      "Read(**/id_rsa)",
+      "Read(**/id_ed25519)",
+      "Read(**/.ssh/**)",
+      "Read(**/.aws/**)",
+      "Read(**/.kube/config)",
+      "Read(**/.docker/config.json)",
+      "Read(**/.npmrc)",
+      "Read(**/.pypirc)",
+      "Read(**/.netrc)",
+      "Read(**/.git-credentials)",
+      "Read(**/*.tfstate)",
+      "Read(**/*.tfstate.*)",
+      "Read(**/*.tfvars)"
+    ]
+  }
+}
