@@ -15,7 +15,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from hlcli.core.types import Network
@@ -37,7 +37,15 @@ class Caps(BaseSettings):
 
     # --- paths ---
     data_dir: Path = Path.home() / ".hyperliquid-cli"
+    # Relative paths resolve against data_dir (see below), so `hl` behaves the same
+    # from any working directory; set an absolute HL_CONFIG_PATH to opt out.
     config_path: Path = Path("config/active_config.json")
+
+    @model_validator(mode="after")
+    def _anchor_config_path(self) -> "Caps":
+        if not self.config_path.is_absolute():
+            self.config_path = self.data_dir / self.config_path
+        return self
 
     # --- risk ceilings (the order path can never exceed these) ---
     starting_equity: float = 10_000.0

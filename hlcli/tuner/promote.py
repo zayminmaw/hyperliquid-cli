@@ -10,11 +10,17 @@ them. All artifacts live beside the active config:
 `promote` re-clamps a config proposal before it becomes active — defence in depth,
 even though `load_tunable` clamps again on every read — so a hand-edited proposal
 can never widen the box.
+
+Promotion *consumes* the proposal file: a proposal can go live exactly once, so a
+stale one from weeks ago can't be silently re-promoted after newer `tune run`s
+produced nothing. Each audit entry records what went live (the full config / the
+prompt's hash+size), not just that something did.
 """
 
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -68,11 +74,17 @@ def promote(caps: Caps, *, kinds: tuple[str, ...] = ("config", "prompt"), now: f
         cfg = clamp(TunableConfig.model_validate_json(p.proposed_config.read_text()))
         p.active_config.parent.mkdir(parents=True, exist_ok=True)
         p.active_config.write_text(cfg.model_dump_json(indent=2))
-        promoted.append(_record(p.promotions, {"ts": now, "kind": "config"}))
+        p.proposed_config.unlink()  # consumed — promotable exactly once
+        promoted.append(_record(p.promotions, {"ts": now, "kind": "config", "config": cfg.model_dump()}))
 
     if "prompt" in kinds and p.proposed_prompt.exists():
-        p.active_prompt.write_text(p.proposed_prompt.read_text())
-        promoted.append(_record(p.promotions, {"ts": now, "kind": "prompt"}))
+        text = p.proposed_prompt.read_text()
+        p.active_prompt.write_text(text)
+        p.proposed_prompt.unlink()  # consumed
+        promoted.append(_record(p.promotions, {
+            "ts": now, "kind": "prompt",
+            "sha256": hashlib.sha256(text.encode()).hexdigest(), "chars": len(text),
+        }))
 
     return promoted
 

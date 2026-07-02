@@ -66,3 +66,24 @@ def emergency_close(exchange: Exchange, candidate: Candidate, size: float) -> Or
         coin=candidate.coin, side=_closing_side(candidate.side),
         order_type=OrderType.MARKET, size=size, reduce_only=True,
     ))
+
+
+def cancel_placed(exchange: Exchange, coin: str, placed: list[OrderResult]) -> int:
+    """Cancel triggers that DID place during a failed protection attempt — a stray
+    reduce-only trigger left resting can close the *next* position in this coin.
+    Best-effort: a cancel that fails is not worth failing the abort path over."""
+    canceled = 0
+    for result in placed:
+        if result.accepted and result.order_id and result.order_id.isdigit():
+            canceled += int(exchange.cancel(coin, int(result.order_id)).accepted)
+    return canceled
+
+
+def cancel_coin_triggers(exchange: Exchange, coin: str) -> int:
+    """Cancel every resting reduce-only trigger for `coin` — called after a position
+    closes so the surviving half of an SL/TP pair can't ambush a future position."""
+    canceled = 0
+    for order in exchange.get_open_orders():
+        if order.coin == coin and order.is_trigger and order.reduce_only:
+            canceled += int(exchange.cancel(coin, order.oid).accepted)
+    return canceled

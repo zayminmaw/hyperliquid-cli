@@ -32,6 +32,31 @@ def test_clamp_bounds_every_field():
     assert 0.0 <= c.sizing.ceil_fraction <= 1.0
 
 
+def test_clamp_replaces_non_finite_values_with_defaults():
+    # NaN slides through a min/max clamp as the UPPER bound — a NaN risk pct would
+    # silently become the 5% maximum. Non-finite values must fall back to defaults.
+    nan, inf = float("nan"), float("inf")
+    c = clamp(TunableConfig(
+        risk_per_trade_pct=nan,
+        decision_temperature=inf,
+        sizing=ConvictionSizing(min_conviction=nan, floor_fraction=nan, ceil_fraction=nan),
+    ))
+    d = TunableConfig()
+    assert c.risk_per_trade_pct == d.risk_per_trade_pct
+    assert c.decision_temperature == d.decision_temperature
+    assert c.sizing.min_conviction == d.sizing.min_conviction
+    assert c.sizing.floor_fraction == d.sizing.floor_fraction
+    assert c.sizing.ceil_fraction == d.sizing.ceil_fraction
+
+
+def test_nan_in_config_file_loads_as_defaults(tmp_path: Path):
+    # json.loads accepts bare NaN — a corrupt/malicious active_config.json must not
+    # reach the order path with NaN-widened values.
+    p = tmp_path / "active_config.json"
+    p.write_text('{"risk_per_trade_pct": NaN}')
+    assert load_tunable(p).risk_per_trade_pct == TunableConfig().risk_per_trade_pct
+
+
 def test_clamp_keeps_floor_below_ceil():
     c = clamp(TunableConfig(sizing=ConvictionSizing(floor_fraction=0.9, ceil_fraction=0.1)))
     assert c.sizing.floor_fraction <= c.sizing.ceil_fraction

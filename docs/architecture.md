@@ -94,7 +94,7 @@ One `run_once` pass (`hlcli/executor/runner.py`) is the heart of Mode B:
 Three knobs shape a pass:
 
 - `dry_run` — compute everything, **mutate nothing** (side-effect-free preview).
-- `fire_enabled=False` — **shadow** mode: decide, gate, log, but fire nothing. The pre-mainnet confidence builder and tuner training-data source.
+- `fire_enabled=False` — **shadow** mode: decide, gate, log, but fire nothing. Gate-approved decisions are booked as **hypothetical trades** (`trades.shadow = 1`, entered at the mark) and resolved orderlessly at their SL/TP/expiry by later shadow passes — that resolved record is what feeds the tuner and the graduation checklist before any real money moves. The hypothetical book also honors one-per-coin/max-concurrent, and a shadow pass never touches real trades (it may hold a read-only exchange).
 - `decide_fn` — injected so tests drive the mechanics with a deterministic decider; the real LLM call is mocked, never hit in tests.
 
 ### The WAIT → follow-up loop
@@ -116,14 +116,24 @@ skips them. `PassSummary` reports `rechecked` and `deferred`; `exec report` and
 ```
 schema-valid decision → kill switch → daily-loss-limit → freshness
   → allowed-coin → regime sanity → level sanity (entry/sl/tp coherent)
-  → R:R floor → one-per-coin → max-concurrent → equity>0
+  → R:R floor → mark sanity (mark present, inside sl/tp, R:R at mark ≥ floor)
+  → one-per-coin → max-concurrent → equity>0
   → sizing + notional cap + leverage cap → conviction→size clamp
 ```
 
-**Sizing** is fixed-fractional: `risk_per_trade_pct × equity ÷ stop_distance`, then
-scaled by a conviction fraction, then clamped by `max_notional_per_trade` and
-`max_leverage`. Conviction only scales size *within* the hard caps — it can never
-raise the ceiling. One-per-coin makes the per-trade cap the total per-coin cap.
+**Mark sanity** exists because the entry is a MARKET order: the mark — not the
+proposed entry — is what the fill will pay. A missing mark, a mark outside the
+sl/tp band, or an entry that has run far enough that reward:risk *measured from
+the mark* no longer clears the floor is rejected in code, regardless of what the
+LLM thought of the timing.
+
+**Sizing** is fixed-fractional and priced at the mark: `risk_per_trade_pct ×
+equity ÷ |mark − sl|`, then scaled by a conviction fraction, then clamped by
+`max_notional_per_trade` and `max_leverage` (both computed at the mark).
+Conviction only scales size *within* the hard caps — it can never raise the
+ceiling. One-per-coin makes the per-trade cap the total per-coin cap. The
+leverage ceiling is per-order; aggregate exposure is bounded by
+`max_concurrent_positions × max_notional_per_trade`.
 
 ---
 

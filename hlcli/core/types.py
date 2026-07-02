@@ -107,6 +107,7 @@ class OpenOrder(BaseModel):
     price: float
     order_type: str = "limit"
     reduce_only: bool = False
+    is_trigger: bool = False  # a resting SL/TP trigger (native protection)
 
 
 class OrderResult(BaseModel):

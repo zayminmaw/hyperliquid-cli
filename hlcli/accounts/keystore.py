@@ -58,6 +58,11 @@ class Keystore:
         path = self.path_for(alias)
         if not path.exists():
             raise KeystoreError(f"no key stored for account '{alias}'.")
+        if path.stat().st_mode & 0o077:
+            raise KeystoreError(
+                f"key file {path} is readable by group/other — refusing to use it. "
+                f"Fix with: chmod 600 {path}"
+            )
         return path.read_text().strip()
 
     def delete(self, alias: str) -> None:

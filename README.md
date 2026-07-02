@@ -55,9 +55,9 @@ real fills) → `mainnet` (real money, **gated**: needs `HL_ENABLE_MAINNET=1` +
 
 ## Status
 
-All five phases (0–5) **code-complete**; 177 tests pass, keyless. The order-path
+All five phases (0–5) **code-complete**; 235 tests pass, keyless. The order-path
 decision layer is built out: candle-feed + deterministic regime context, the
 rationale-first decision tool, and a WAIT→follow-up re-check loop.
-Remaining work is operational: supply agent keys → run testnet/shadow → clear the
+Remaining work is operational: supply agent keys → run testnet/shadow (shadow books hypothetical trades whose resolved outcomes feed the tuner + graduation) → clear the
 graduation checklist → mainnet at tiny caps. See [handover](./docs/handover.md).
 Last updated: 2026-07-01

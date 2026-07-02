@@ -19,13 +19,16 @@ class FakeLiveExchange:
     """A live-network backend stand-in: fills entries, optionally rejects triggers."""
 
     def __init__(self, network=Network.TESTNET, marks=None, *, fail_triggers=False,
-                 fill_size=None, fill_price=None):
+                 fill_size=None, fill_price=None, positions=None, open_orders=None):
         self.network = network
         self._marks = marks or {"BTC": 100.0}
         self.fail_triggers = fail_triggers
         self.fill_size = fill_size  # None = fill the whole order
         self.fill_price = fill_price
+        self.positions = positions or []
+        self.open_orders = open_orders or []
         self.placed = []
+        self.canceled = []
 
     def get_marks(self):
         return dict(self._marks)
@@ -40,26 +43,33 @@ class FakeLiveExchange:
         return 10_000.0
 
     def get_positions(self):
-        return []
+        return list(self.positions)
 
     def get_open_orders(self):
-        return []
+        return list(self.open_orders)
 
     def place_order(self, order):
         self.placed.append(order)
+        oid = str(len(self.placed))  # numeric, like the real exchange
         is_trigger = order.order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT)
-        if self.fail_triggers and is_trigger:
+        # fail_triggers: True rejects every trigger; "tp" rejects only the take-profit
+        # (the partial-protection case — an SL already resting when the abort happens).
+        rejected = (self.fail_triggers is True and is_trigger) or (
+            self.fail_triggers == "tp" and order.order_type is OrderType.TAKE_PROFIT
+        )
+        if rejected:
             return OrderResult(accepted=False, status="error", message="trigger rejected")
         mark = self._marks.get(order.coin)
         price = self.fill_price if self.fill_price is not None else mark
         if is_trigger or order.reduce_only:
-            return OrderResult(accepted=True, status="filled", order_id="x",
+            return OrderResult(accepted=True, status="filled", order_id=oid,
                                filled_size=order.size, avg_price=price)
         filled = order.size if self.fill_size is None else self.fill_size
-        return OrderResult(accepted=True, status="filled" if filled > 0 else "resting", order_id="x",
+        return OrderResult(accepted=True, status="filled" if filled > 0 else "resting", order_id=oid,
                            filled_size=filled, avg_price=price if filled > 0 else None)
 
-    def cancel(self, *a, **k):
+    def cancel(self, coin, oid):
+        self.canceled.append((coin, oid))
         return OrderResult(accepted=True, status="canceled")
 
     def cancel_all(self, *a, **k):
@@ -148,7 +158,7 @@ def test_accepted_but_unfilled_entry_opens_no_trade(tmp_path):
     alerter = CapturingAlerter()
     s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
 
-    assert (s.fired, s.rejected) == (0, 1)
+    assert (s.fired, s.failed, s.rejected) == (0, 1, 0)  # exchange failure, not a gate reject
     assert state.open_trades() == []
     assert [o.order_type for o in ex.placed] == [OrderType.MARKET]  # no protection on a non-position
     assert any(e["event"] == "reject" and e["reason"] == "unfilled" for e in alerter.events)
@@ -161,12 +171,32 @@ def test_unprotectable_entry_is_emergency_closed_not_left_naked(tmp_path):
     alerter = CapturingAlerter()
     s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
 
-    assert (s.fired, s.rejected) == (0, 1)
-    assert state.open_trades() == []  # never recorded as a live trade
+    assert (s.fired, s.failed, s.rejected) == (0, 1, 0)
+    assert state.open_trades() == []  # not live — the row exists but is resolved
+    # Ledger-first: the fill was booked, then aborted — auditable, and a crash
+    # mid-protection would have left a row the resolver still manages.
+    aborted = state.resolved_trades()
+    assert len(aborted) == 1 and aborted[0]["status"] == "aborted"
     # entry → stop-loss (rejected) → market reduce-only flatten
     assert ex.placed[-1].order_type is OrderType.MARKET and ex.placed[-1].reduce_only
     crit = [e for e in alerter.events if e["event"] == "protection_failed"]
     assert crit and crit[0]["level"] == "critical" and crit[0]["emergency_closed"]
+
+
+def test_partial_protection_cancels_the_placed_trigger_on_abort(tmp_path):
+    # SL places, TP fails → flatten AND cancel the resting SL, or it ambushes the
+    # next BTC position.
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, fail_triggers="tp")
+    state.enqueue(_cand())
+    alerter = CapturingAlerter()
+    s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
+
+    assert s.failed == 1
+    sl_oid = 2  # entry was order 1, the accepted stop-loss order 2
+    assert ("BTC", sl_oid) in ex.canceled
+    crit = [e for e in alerter.events if e["event"] == "protection_failed"]
+    assert crit and crit[0]["triggers_canceled"] == 1
 
 
 def test_paper_fire_skips_native_protection(tmp_path):

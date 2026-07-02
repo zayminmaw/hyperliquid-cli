@@ -43,9 +43,10 @@ Command surface: `account add|ls|set-default|remove|positions|orders|balances|po
 | File | What it does | Key surface |
 |------|--------------|-------------|
 | `base.py` | The `Exchange` Protocol both backends satisfy. | `Exchange`, methods: `get_marks/get_book/get_candles/equity/get_positions/get_open_orders/place_order/cancel/cancel_all/set_leverage` |
-| `marks.py` | Public `/info` reads over **httpx** (keyless), TTL-cached; includes `candleSnapshot` for regime. | `MarksFeed`, `MarksFeed.candles()`, `api_url()` |
+| `marks.py` | Public `/info` reads over **httpx** (keyless), TTL-cached (HTTP errors raise; cache returned by copy); includes `candleSnapshot` for regime and `meta` for per-asset `szDecimals`. | `MarksFeed`, `MarksFeed.candles()`, `MarksFeed.sz_decimals()`, `api_url()` |
 | `paper.py` | Simulated book on public marks; state-backed (persists in `state-paper.db`). | `PaperExchange` |
-| `hyperliquid.py` | Live testnet/mainnet. Reads keyless; writes need the agent key (SDK + `eth_account` lazy-imported). | `HyperliquidExchange` (key only in `_agent_key`) |
+| `hyperliquid.py` | Live testnet/mainnet. Reads keyless (`frontendOpenOrders`, so trigger orders are visible to `cancel-all` and cleanup); writes need the agent key (SDK + `eth_account` lazy-imported) and are rounded to the asset's size/price precision on the wire (`rounding.py`). | `HyperliquidExchange` (key only in `_agent_key`) |
+| `rounding.py` | Pure per-asset wire rounding: size floors to `szDecimals`, price to 5 sig figs / `6−szDecimals` decimals. | `round_size()`, `round_price()` |
 | `factory.py` | `build_exchange(network, caps, account=, agent_key=)` picks the backend. | `build_exchange()` |
 
 ---
@@ -64,24 +65,26 @@ Command surface: `account add|ls|set-default|remove|positions|orders|balances|po
 | File | What it does | Key surface |
 |------|--------------|-------------|
 | `intake.py` | Build candidates from CLI flags / dicts; side inferred from level geometry; pair/reason aliases. | `make_candidate()`, `candidate_from_dict()`, `parse_batch()` |
-| `enrich.py` | Assemble the LLM's input: marks, equity, positions, P&L, recent decisions, tunable surface, plus an optional candle tail + regime label. | `enrich(…, candles=, regime=)`, `EnrichedContext` |
+| `enrich.py` | Assemble the LLM's input: marks, equity, positions, P&L, recent decisions **and resolved outcomes** (the track record, in R), tunable surface, an optional candle tail + regime label, and a `followup` block on WAIT re-checks. | `enrich(…, outcomes=, candles=, regime=, followup=)`, `EnrichedContext` |
 | `regime.py` | Deterministic market-regime classifier (computed in **code**, not by the LLM). Kaufman efficiency-ratio over the candle window → `trend`/`range`/`None` (`<20` bars or no feed ⇒ `None`; ER threshold `0.35`), plus a 12-bar OHLC tail for the model. | `classify()`, `summarize()` |
 | `decision.py` | The LLM call (lazy `anthropic`, `claude-sonnet-4-6`, forced strict rationale-first tool `submit_decision`, low temp — sent only to models that accept it) + validate/clamp. Carries `recheck_in_minutes` for WAIT timing (clamped to `[0,1440]`). Schema-invalid → dropped + tallied, never guessed. | `decide()`, `validate_decision()`, `load_decision_prompt()`, `DecisionResult` |
-| `gate.py` | The deterministic risk gate (first-failure wins) + fixed-fractional sizing + side inference. | `evaluate()`, `GateContext`, `GateOutcome`, `infer_side()` |
+| `gate.py` | The deterministic risk gate (first-failure wins, incl. mark sanity — mark present, inside sl/tp, R:R at mark ≥ floor) + fixed-fractional sizing **at the mark** + side inference. | `evaluate()`, `GateContext` (`mark=`), `GateOutcome`, `infer_side()` |
 | `execute.py` | `fire()` records the idempotency key **before** placing → a crash skips (missed trade), never double-fires. Releases the key on a clean reject. | `fire()` |
-| `protect.py` | Native exchange-side SL/TP reduce-only triggers; required on testnet/mainnet. | `requires_native_protection()`, `protective_orders()`, `place_protection()`, `emergency_close()`, `ProtectionResult` |
-| `resolve.py` | The monitor step: close open trades on SL/TP/expiry → the `trades` ledger (won/lost/expired, realized, R-multiple). | `resolve_open_trades()` |
+| `protect.py` | Native exchange-side SL/TP reduce-only triggers; required on testnet/mainnet. Failed protection cleans up after itself (`cancel_placed`), and `cancel_coin_triggers` removes the surviving half of a pair after a close. | `requires_native_protection()`, `protective_orders()`, `place_protection()`, `emergency_close()`, `cancel_placed()`, `cancel_coin_triggers()`, `ProtectionResult` |
+| `resolve.py` | The monitor step: close open trades on SL/TP/expiry → the `trades` ledger (won/lost/expired/closed, realized, R-multiple). On live networks it also reconciles **vanished** positions (native trigger fired on a wick, or a manual close — outcome inferred from candle extremes, else `closed` at mark), cancels surviving triggers after a close, and resolves shadow trades orderlessly. | `resolve_open_trades(…, shadow_only=)` |
 | `monitor.py` | Read-only position-health view. | `position_health()` |
-| `runner.py` | `run_once()` — the full pass orchestrator (resolve → re-check due WAIT deferrals → pull → enrich(+candles/regime) → decide → defer-if-WAIT / gate → fire → reconcile → protect → log → advance HWM). An `act+wait` decision is parked in the `deferred` table and re-checked with fresh data (within freshness, up to `HL_FOLLOWUP_MAX_ATTEMPTS`); re-checks freeze while the breaker is tripped. Honors `dry_run`, `fire_enabled` (shadow), injected `decide_fn`, and an `Alerter`. | `run_once()`, `PassSummary` (`seen/rechecked/approved/fired/rejected/dropped/deferred/resolved`) |
+| `runner.py` | `run_once()` — the full pass orchestrator (resolve → re-check due WAIT deferrals → pull → enrich(+candles/regime/outcomes) → decide → defer-if-WAIT / gate → fire → open ledger row (**before** protection, so a crash never leaves an untracked position; abort resolves it `aborted`) → protect → log → advance HWM). An `act+wait` decision is parked in the `deferred` table and re-checked with fresh data (within freshness, up to `HL_FOLLOWUP_MAX_ATTEMPTS`, labeled `followup`); re-checks freeze while the breaker is tripped. Shadow books hypothetical trades; unmanaged exchange positions raise an edge-triggered alert. Honors `dry_run` (fully side-effect-free), `fire_enabled` (shadow), injected `decide_fn`, and an `Alerter`. | `run_once()`, `PassSummary` (`seen/rechecked/approved/fired/rejected/failed/dropped/deferred/resolved`) |
 
 ---
 
 ## `state/` — durable SQLite (network-scoped)
 
 `store.py` — one DB per network (`state-<network>.db`). Holds: the intake stream +
-high-water mark, idempotency keys, the decision log, the `trades` ledger, the
+high-water mark, idempotency keys, the decision log, the `trades` ledger (with a
+`shadow` flag for hypothetical trades; additive column migrations run on open), the
 `deferred` table (WAIT candidates parked for re-check), the paper book, the breaker
-flag, and a `meta` key/value table.
+flag, and a `meta` key/value table. `resolved_trades(limit=N)` returns the most
+recent N (newest-closed first).
 
 Key surface (`StateStore`): `enqueue` · `pull_new` · `get_hwm`/`advance_hwm` ·
 `set_status` · `already_fired`/`record_fire`/`release_fire` · `log_decision`/`recent_decisions` ·
@@ -111,11 +114,11 @@ The HWM + idempotency keys are what make a restart never double-fire.
 | `stats.py` | Resolved-trade cohorts (coin × side × conviction-bucket), win-rate + avg-R; sample-gated (`MIN_COHORT_SAMPLES=5`). | `cohorts()`, `summary()`, `conviction_bucket()`, `Cohort` |
 | `config_tuner.py` | Propose tunable-surface edits (`claude-opus-4-8`, forced strict `submit_config`); clamped on propose. No eligible cohort ⇒ model not called. | `propose_config()`, `ConfigProposal` |
 | `prompt_tuner.py` | Refine the decision prompt from decisions-vs-outcomes (`claude-opus-4-8`, text). | `propose_prompt()`, `PromptProposal` |
-| `promote.py` | proposed → active (config re-clamped) + `promotions.jsonl` audit + `diff`/`history`. Artifacts live beside `config_path`. | `paths()`, `write_proposed_config/prompt()`, `promote()`, `history()`, `diff()`, `TunerPaths` |
+| `promote.py` | proposed → active (config re-clamped); promotion **consumes** the proposal file (promotable exactly once) and the `promotions.jsonl` audit records what went live (full config / prompt hash+size) + `diff`/`history`. Artifacts live beside `config_path`. | `paths()`, `write_proposed_config/prompt()`, `promote()`, `history()`, `diff()`, `TunerPaths` |
 
 ---
 
-## `tests/` — 177 passing, keyless
+## `tests/` — 235 passing, keyless
 
 Highest-risk code first: gate/sizing, the LLM-output validator/clamp, paper
 exchange + monitor, intake idempotency + HWM, config-schema clamping, the mainnet

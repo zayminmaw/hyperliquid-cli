@@ -54,6 +54,30 @@ def test_increase_averages_entry(tmp_path):
     assert ex.get_positions()[0].entry_price == 110.0
 
 
+def test_oversized_opposite_order_flips_the_position(tmp_path):
+    ex, _ = _ex(tmp_path)
+    ex.place_order(_order(side=Side.LONG, size=2.0, price=100.0))
+    ex.place_order(_order(side=Side.SHORT, size=5.0, price=100.0))  # closes 2, flips 3 short
+    pos = ex.get_positions()[0]
+    assert pos.side is Side.SHORT and pos.size == 3.0 and pos.entry_price == 100.0
+
+
+def test_reduce_only_never_flips(tmp_path):
+    ex, _ = _ex(tmp_path)
+    ex.place_order(_order(side=Side.LONG, size=2.0, price=100.0))
+    ex.place_order(_order(side=Side.SHORT, size=5.0, price=100.0, reduce_only=True))
+    assert ex.get_positions() == []  # closed, nothing opened the other way
+
+
+def test_trigger_orders_are_rejected_on_the_paper_book(tmp_path):
+    ex, _ = _ex(tmp_path)
+    result = ex.place_order(Order(
+        coin="BTC", side=Side.SHORT, order_type=OrderType.STOP_LOSS,
+        size=1.0, trigger_price=90.0, reduce_only=True,
+    ))
+    assert not result.accepted  # paper protection is the resolver, not a fake instant fill
+
+
 def test_book_survives_new_exchange_instance(tmp_path):
     ex, state = _ex(tmp_path)
     ex.place_order(_order())

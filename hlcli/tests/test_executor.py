@@ -240,6 +240,90 @@ def test_recheck_takes_concurrency_slot_before_fresh(tmp_path):
     assert [p.coin for p in ex.get_positions()] == ["BTC"]
 
 
+# --- the decision context carries real outcomes + re-check provenance ---
+
+def test_context_includes_resolved_outcomes(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.open_trade("old", "ETH", Side.LONG, 1500, 1400, 1700, 1.0, 0.9, None, NOW - 3600)
+    state.resolve_trade(1, "lost", 1400.0, -100.0, -1.0, NOW - 60)
+
+    seen = {}
+    def spy(ctx, caps, tunable):
+        seen["ctx"] = ctx
+        return act_now(ctx, caps, tunable)
+
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), decide_fn=spy, now=NOW)
+    outcomes = seen["ctx"].recent_outcomes
+    assert outcomes and outcomes[0]["result"] == "lost" and outcomes[0]["r"] == -1.0
+    assert seen["ctx"].followup is None  # a fresh candidate is not a re-check
+
+
+def test_recheck_context_is_labeled_with_attempts_and_expiry(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), decide_fn=act_wait(minutes=1), now=NOW)
+
+    seen = {}
+    def spy(ctx, caps, tunable):
+        seen["ctx"] = ctx
+        return act_now(ctx, caps, tunable)
+
+    run_once(ex, state, caps(), tunable(), decide_fn=spy, now=NOW + 120)
+    followup = seen["ctx"].followup
+    assert followup["attempts_remaining"] == caps().followup_max_attempts - 1
+    assert 0 < followup["expires_in_minutes"] <= caps().max_signal_age_minutes
+
+
+# --- shadow's hypothetical book: decisions become resolved outcomes without orders ---
+
+def test_shadow_approval_opens_a_hypothetical_trade(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), fire_enabled=False, decide_fn=act_now, now=NOW)
+    assert ex.get_positions() == []                       # exchange untouched
+    trades = state.open_trades(shadow=True)
+    assert len(trades) == 1 and trades[0]["entry"] == 100.0  # entered at the mark
+
+
+def test_shadow_trade_resolves_orderlessly_into_the_ledger(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), fire_enabled=False, decide_fn=act_now, now=NOW)
+
+    ex2 = PaperExchange(10_000.0, marks=FakeMarks({"BTC": 130.0}), state=state)  # through TP
+    s = run_once(ex2, state, caps(), tunable(), fire_enabled=False, decide_fn=act_now, now=NOW + 60)
+    assert s.resolved == 1
+    t = state.resolved_trades()[0]
+    assert t["status"] == "won" and t["shadow"] == 1 and t["exit_price"] == 120.0
+    assert ex2.get_positions() == [] and state.paper_realized() == 0.0  # no real P&L moved
+
+
+def test_shadow_book_enforces_one_per_coin(tmp_path):
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), fire_enabled=False, decide_fn=act_now, now=NOW)
+    state.enqueue(_cand("b"))  # same coin while the shadow trade is open
+    s = run_once(ex, state, caps(), tunable(), fire_enabled=False, decide_fn=act_now, now=NOW + 60)
+    assert (s.approved, s.rejected) == (0, 1)
+    assert len(state.open_trades(shadow=True)) == 1
+
+
+def test_shadow_pass_never_closes_real_trades(tmp_path):
+    # A real trade is open (from a live pass); a shadow pass with price through the
+    # stop must NOT flatten it — shadow may hold a read-only exchange.
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a"))
+    run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW)  # real fire
+    assert len(state.open_trades(shadow=False)) == 1
+
+    ex2 = PaperExchange(10_000.0, marks=FakeMarks({"BTC": 80.0}), state=state)  # through SL
+    s = run_once(ex2, state, caps(), tunable(), fire_enabled=False, decide_fn=act_now, now=NOW + 60)
+    assert s.resolved == 0
+    assert len(state.open_trades(shadow=False)) == 1      # still open, still real
+    assert len(ex2.get_positions()) == 1                  # book untouched
+
+
 def test_skip_with_wait_timing_is_not_deferred(tmp_path):
     ex, state = _setup(tmp_path)
     state.enqueue(_cand("a"))

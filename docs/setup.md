@@ -51,12 +51,14 @@ Copy `.env.example` to `.env` and adjust. Every var is `HL_`-prefixed.
 | `HL_DECISION_MODEL` / `_MAX_TOKENS` | `claude-sonnet-4-6` / `1024` | order-path model |
 | `HL_TUNER_MODEL` / `_MAX_TOKENS` | `claude-opus-4-8` / `4096` | daily-tuner model |
 
-`HL_DATA_DIR` (default `~/.hyperliquid-cli`) and `HL_CONFIG_PATH`
-(default `config/active_config.json`) are also configurable.
+`HL_DATA_DIR` (default `~/.hyperliquid-cli`) and `HL_CONFIG_PATH` are also
+configurable. A **relative** `HL_CONFIG_PATH` resolves against `HL_DATA_DIR`
+(default: `~/.hyperliquid-cli/config/active_config.json`), so `hl` behaves the
+same from any working directory; set an absolute path to opt out.
 
 The LLM decision call and the tuners read `ANTHROPIC_API_KEY` from the environment.
 
-### 2. `config/active_config.json` — the tunable surface (clamped on load)
+### 2. `active_config.json` — the tunable surface (clamped on load)
 
 The values the self-tuner may change. Missing file → safe defaults. A malformed file
 fails loudly (`ConfigError`) rather than silently running on the wrong config. See
@@ -121,7 +123,7 @@ hl tune history    # promotion audit log
 ## Tests
 
 ```bash
-.venv/bin/pytest -q          # 177 passing, ~3s, fully keyless (no anthropic/hyperliquid/eth_account needed)
+.venv/bin/pytest -q          # 235 passing, ~3s, fully keyless (no anthropic/hyperliquid/eth_account needed)
 ```
 
 The LLM call is mocked in every test (deterministic fixtures / injected `decide_fn`);

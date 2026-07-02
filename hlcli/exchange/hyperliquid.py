@@ -18,6 +18,7 @@ from hlcli.core.types import (
     Side,
 )
 from hlcli.exchange.marks import MarksFeed, api_url
+from hlcli.exchange.rounding import round_price, round_size
 
 
 class HyperliquidExchange:
@@ -89,15 +90,20 @@ class HyperliquidExchange:
         return positions
 
     def get_open_orders(self) -> list[OpenOrder]:
-        raw = self._info_client().open_orders(self._account_address)
+        # frontend_open_orders, not open_orders: only the frontend view includes the
+        # resting SL/TP trigger orders — without them cancel-all and the resolver's
+        # trigger cleanup would silently miss native protection.
+        raw = self._info_client().frontend_open_orders(self._account_address)
         return [
             OpenOrder(
                 coin=o["coin"],
                 oid=int(o["oid"]),
                 side=Side.LONG if o["side"] == "B" else Side.SHORT,
                 size=float(o["sz"]),
-                price=float(o["limitPx"]),
+                price=float(o.get("limitPx") or o.get("triggerPx") or 0.0),
+                order_type=str(o.get("orderType", "limit")).lower(),
                 reduce_only=bool(o.get("reduceOnly", False)),
+                is_trigger=bool(o.get("isTrigger", False)),
             )
             for o in raw
         ]
@@ -106,6 +112,12 @@ class HyperliquidExchange:
 
     def place_order(self, order: Order) -> OrderResult:
         ex = self._exchange_client()
+        order = self._round_for_wire(order)
+        if order.size <= 0:
+            return OrderResult(
+                accepted=False, status="error",
+                message=f"size rounds to zero at {order.coin}'s size precision",
+            )
         is_buy = order.side is Side.LONG
 
         if order.order_type is OrderType.MARKET:
@@ -127,6 +139,20 @@ class HyperliquidExchange:
                 reduce_only=order.reduce_only,
             )
         return _parse_order_response(resp)
+
+    def _round_for_wire(self, order: Order) -> Order:
+        """Round size/prices to the asset's exchange precision (size DOWN — never past
+        a cap). An unknown coin passes through untouched; the exchange rejects it with
+        its own message, which is clearer than us inventing precision."""
+        sz_decimals = self._marks.sz_decimals(order.coin)
+        if sz_decimals is None:
+            return order
+        return order.model_copy(update={
+            "size": round_size(order.size, sz_decimals),
+            "price": round_price(order.price, sz_decimals) if order.price is not None else None,
+            "trigger_price": round_price(order.trigger_price, sz_decimals)
+            if order.trigger_price is not None else None,
+        })
 
     def cancel(self, coin: str, oid: int) -> OrderResult:
         return _parse_simple(self._exchange_client().cancel(coin, oid), "canceled")

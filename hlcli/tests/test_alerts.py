@@ -84,6 +84,31 @@ def test_halted_alert_is_edge_triggered_not_per_pass(tmp_path):
     assert sum(e["event"] == "halted" for e in alerter.events) == 1  # once, not three times
 
 
+def test_unmanaged_position_alert_is_edge_triggered(tmp_path):
+    # A position on the exchange with no ledger row (crash between fill and write,
+    # or a manual trade) alerts once — not every pass.
+    from hlcli.core.types import Network, Position
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    stray = [Position(coin="ETH", side=Side.LONG, size=1.0, entry_price=1500.0)]
+    alerter = CapturingAlerter()
+    for _ in range(2):
+        ex = FakeLiveExchange(Network.MAINNET, positions=stray)
+        run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
+    unmanaged = [e for e in alerter.events if e["event"] == "unmanaged_position"]
+    assert len(unmanaged) == 1 and unmanaged[0]["coins"] == ["ETH"]
+
+
+def test_dry_run_writes_no_breaker_day_state(tmp_path):
+    state = StateStore(tmp_path / "state.db")
+    ex = PaperExchange(10_000.0, marks=FakeMarks(), state=state)
+    state.enqueue(_cand())
+    run_once(ex, state, caps(), tunable(), decide_fn=act_now, dry_run=True, now=NOW)
+    assert state.meta_get("breaker_day") is None  # dry-run mutated nothing
+    assert state.meta_get("day_start_equity") is None
+
+
 def test_no_alerter_is_a_silent_noop(tmp_path):
     state = StateStore(tmp_path / "state.db")
     ex = PaperExchange(10_000.0, marks=FakeMarks(), state=state)

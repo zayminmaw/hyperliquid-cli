@@ -29,10 +29,15 @@ class Breaker:
     def set(self, on: bool) -> None:
         self._state.set_breaker(on)
 
-    def daily_loss_hit(self, equity: float, *, today: str | None = None) -> bool:
-        """True once today's drawdown from the day-start equity hits the limit."""
+    def daily_loss_hit(self, equity: float, *, today: str | None = None, persist: bool = True) -> bool:
+        """True once today's drawdown from the day-start equity hits the limit.
+
+        `persist=False` (dry-run) never writes the day-rollover state — the preview
+        stays side-effect-free; a fresh day then simply reads as zero drawdown."""
         today = today or date.today().isoformat()
         if self._state.meta_get(_DAY_KEY) != today:
+            if not persist:
+                return False  # new day, nothing recorded: drawdown is zero by definition
             self._state.meta_set(_DAY_KEY, today)
             self._state.meta_set(_DAY_START_EQUITY_KEY, str(equity))
 

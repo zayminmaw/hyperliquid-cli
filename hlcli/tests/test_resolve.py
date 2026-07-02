@@ -70,6 +70,12 @@ def test_expiry_closes_at_mark(tmp_path):
     assert t["status"] == "expired" and t["exit_price"] == 108.0 and t["realized"] == 8.0
 
 
+def _live_position(coin="BTC", side=Side.LONG, size=1.0, entry=100.0):
+    from hlcli.core.types import Position
+
+    return Position(coin=coin, side=side, size=size, entry_price=entry)
+
+
 def test_native_protected_books_actual_close_fill_not_the_level(tmp_path):
     # On a live backend the resolver's market close fills with slippage; the ledger
     # must record that fill (here 88, not the 90 stop) so expectancy stays honest.
@@ -77,7 +83,8 @@ def test_native_protected_books_actual_close_fill_not_the_level(tmp_path):
     from hlcli.tests.test_protect import FakeLiveExchange
 
     state = StateStore(tmp_path / "state.db")
-    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 85.0}, fill_price=88.0)
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 85.0}, fill_price=88.0,
+                          positions=[_live_position()])
     _open(state)  # long, entry 100, sl 90
     n = resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW,
                             marks={"BTC": 85.0}, native_protected=True)
@@ -86,6 +93,56 @@ def test_native_protected_books_actual_close_fill_not_the_level(tmp_path):
     assert t["status"] == "lost" and t["exit_price"] == 88.0
     assert t["realized"] == -12.0  # (88 - 100) * 1.0, not the idealized (90-100)
     assert ex.placed[0].order_type is OrderType.MARKET and ex.placed[0].reduce_only  # live close
+
+
+def test_vanished_position_is_resolved_from_candle_extremes(tmp_path):
+    # A native SL fired on a wick; the mark recovered before this pass. The exchange
+    # is flat, the ledger says open — the candle low proves the stop was hit.
+    from hlcli.core.types import Candle, Network
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 100.0}, positions=[])  # flat
+    ex.get_candles = lambda coin, **kw: [
+        Candle(t=int(NOW * 1000), o=100, h=101, l=89.0, c=100, v=1),  # wick through sl=90
+    ]
+    _open(state)  # long, entry 100, sl 90 — mark 100 says "still live"
+    n = resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW,
+                            marks={"BTC": 100.0}, native_protected=True)
+    assert n == 1
+    t = state.resolved_trades()[0]
+    assert t["status"] == "lost" and t["exit_price"] == 90.0
+    assert ex.placed == []  # nothing to close — the position was already gone
+
+
+def test_vanished_position_with_no_level_touched_books_external_close(tmp_path):
+    from hlcli.core.types import Network
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 103.0}, positions=[])
+    _open(state)
+    resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW,
+                        marks={"BTC": 103.0}, native_protected=True)
+    t = state.resolved_trades()[0]
+    assert t["status"] == "closed" and t["exit_price"] == 103.0  # manual close at mark
+
+
+def test_live_close_cancels_the_surviving_trigger(tmp_path):
+    # After the SL side of the pair closes the trade, the orphaned TP trigger must
+    # be cancelled or it will close the NEXT position in this coin.
+    from hlcli.core.types import Network, OpenOrder
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    surviving_tp = OpenOrder(coin="BTC", oid=77, side=Side.SHORT, size=1.0, price=120.0,
+                             order_type="take profit market", reduce_only=True, is_trigger=True)
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 85.0}, fill_price=88.0,
+                          positions=[_live_position()], open_orders=[surviving_tp])
+    _open(state)
+    resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW,
+                        marks={"BTC": 85.0}, native_protected=True)
+    assert ("BTC", 77) in ex.canceled
 
 
 def test_runner_opens_then_resolves(tmp_path):

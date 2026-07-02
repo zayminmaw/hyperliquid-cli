@@ -42,6 +42,10 @@ def test_conviction_is_clamped_not_dropped(raw, clamped):
     _good(action="maybe"),                          # action outside enum
     _good(timing="soon"),                           # timing outside enum
     _good(conviction="high"),                       # non-numeric conviction
+    _good(conviction=float("nan")),                 # NaN would clamp to 1.0 — max size
+    _good(conviction="NaN"),                        # float("NaN") parses; still dropped
+    _good(conviction=float("inf")),                 # non-finite → garbage, not a verdict
+    _good(conviction=float("-inf")),
 ])
 def test_invalid_payload_is_dropped(payload):
     assert validate_decision(payload, "c1") is None  # dropped, never guessed
@@ -51,6 +55,7 @@ def test_recheck_is_parsed_and_clamped():
     assert validate_decision(_good(timing="wait", recheck_in_minutes=5000), "c1").recheck_in_minutes == 1440.0
     assert validate_decision(_good(recheck_in_minutes=-3), "c1").recheck_in_minutes == 0.0
     assert validate_decision(_good(), "c1").recheck_in_minutes is None  # missing → code default later
+    assert validate_decision(_good(recheck_in_minutes=float("nan")), "c1").recheck_in_minutes is None
 
 
 # --- decide: mocked client ---

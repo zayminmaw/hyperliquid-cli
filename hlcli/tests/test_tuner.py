@@ -169,3 +169,25 @@ def test_diff_reports_changed_fields(tmp_path):
 
 def test_promote_nothing_when_no_proposals(tmp_path):
     assert promote(_caps(tmp_path), now=NOW) == []
+
+
+def test_promotion_consumes_the_proposal(tmp_path):
+    # A promoted proposal is gone — a stale file can't be re-promoted weeks later
+    # after newer `tune run`s produced nothing.
+    c = _caps(tmp_path)
+    write_proposed_config(c, TunableConfig(risk_per_trade_pct=1.2))
+    write_proposed_prompt(c, "prompt v2")
+    promote(c, now=NOW)
+    p = paths(c)
+    assert not p.proposed_config.exists() and not p.proposed_prompt.exists()
+    assert promote(c, now=NOW + 1) == []  # second promote is a no-op
+
+
+def test_promotion_audit_records_what_went_live(tmp_path):
+    c = _caps(tmp_path)
+    write_proposed_config(c, TunableConfig(risk_per_trade_pct=1.2))
+    write_proposed_prompt(c, "prompt v2")
+    promote(c, now=NOW)
+    entries = {e["kind"]: e for e in history(c)}
+    assert entries["config"]["config"]["risk_per_trade_pct"] == 1.2
+    assert entries["prompt"]["chars"] == len("prompt v2") and "sha256" in entries["prompt"]

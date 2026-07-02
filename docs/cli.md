@@ -183,7 +183,7 @@ persistent paper book, testnet/mainnet use the live backend.
 ### `exec propose`
 Queue candidate setup(s) into the intake stream. Either supply all four levels, or a
 JSON batch via `--file`. Side is inferred from level geometry; incoherent levels are
-rejected (`sl<entry<tp` = long, `tp<entry<sl` = short). Duplicates (same id) are
+rejected (`sl<entry<tp` = long, `tp<entry<sl` = short). Batch items without an `id` get one derived from their content, so re-importing the same file enqueues nothing new. Duplicates (same id) are
 skipped — reported as `duplicates`.
 
 | Option | Default | Meaning |
@@ -206,7 +206,7 @@ One full pass: resolve open trades → re-check due WAIT deferrals → intake �
 → LLM decision → gate → fire → log. An `act + wait` decision is deferred for a later
 re-check rather than fired. Honors the global `--dry-run` (computes, mutates nothing;
 deferrals are skipped). Writes, so the mainnet gate applies. Emits a `PassSummary`
-(`seen/rechecked/approved/fired/rejected/dropped/deferred/resolved`).
+(`seen/rechecked/approved/fired/rejected/failed/dropped/deferred/resolved` — `rejected` is the gate saying no, `failed` is a gate-approved order dying at the exchange: reject/unfilled/aborted).
 
 ### `exec shadow`
 A full pass that **decides, gates, and logs but fires nothing** — the pre-mainnet

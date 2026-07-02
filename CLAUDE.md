@@ -80,11 +80,12 @@ Order of checks — implement as a short-circuit pipeline:
 ```
 schema-valid LLM output → kill switch → daily-loss-limit → freshness
   → allowed-coin → regime sanity → level sanity (entry/sl/tp coherent)
-  → R:R floor → one-per-coin → max-concurrent
+  → R:R floor → mark sanity (mark present, inside sl/tp, R:R at mark ≥ floor)
+  → one-per-coin → max-concurrent
   → sizing + notional cap + leverage cap → conviction→size clamp
 ```
 
-- **Sizing:** fixed-fractional — `risk_per_trade_pct × equity ÷ stop_distance`, clamped by `max_notional_per_trade` and `max_leverage`. Conviction only scales size _within_ those bounds; it never raises the ceiling.
+- **Sizing:** fixed-fractional, priced at the **mark** (the entry is a MARKET order) — `risk_per_trade_pct × equity ÷ |mark − sl|`, clamped by `max_notional_per_trade` and `max_leverage`. Conviction only scales size _within_ those bounds; it never raises the ceiling.
 - **One-per-coin** makes the per-trade cap the total per-coin exposure cap.
 
 ## Self-tuning is out-of-path and propose→approve

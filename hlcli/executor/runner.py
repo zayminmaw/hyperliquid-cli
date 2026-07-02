@@ -31,13 +31,18 @@ from pydantic import BaseModel
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
-from hlcli.core.types import Action, Candidate, Network, OrderResult, Position, Timing
+from hlcli.core.types import Action, Candidate, Network, OrderResult, Position, Side, Timing
 from hlcli.exchange.base import Exchange
 from hlcli.executor.decision import DecisionResult, decide
 from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
 from hlcli.executor.gate import GateContext, evaluate
-from hlcli.executor.protect import emergency_close, place_protection, requires_native_protection
+from hlcli.executor.protect import (
+    cancel_placed,
+    emergency_close,
+    place_protection,
+    requires_native_protection,
+)
 from hlcli.executor.regime import classify, summarize
 from hlcli.executor.resolve import resolve_open_trades
 from hlcli.safety.alerts import Alerter
@@ -55,9 +60,10 @@ class PassSummary(BaseModel):
     network: Network
     seen: int
     rechecked: int
-    approved: int
+    approved: int   # cleared the gate (fired, shadow-logged, or failed downstream)
     fired: int
-    rejected: int
+    rejected: int   # the gate said no
+    failed: int     # gate-approved but died at the exchange (reject/unfilled/aborted)
     dropped: int
     deferred: int
     resolved: int
@@ -82,19 +88,29 @@ def run_once(
 
     marks = exchange.get_marks()
     # Monitor step: close any open trade whose SL/TP/expiry has triggered, recording
-    # its outcome. Skipped for shadow/dry-run (no live book to manage).
+    # its outcome. A shadow pass resolves only its hypothetical trades (orderlessly —
+    # that's what turns shadow decisions into tuner/graduation outcomes); dry-run
+    # resolves nothing.
     resolved = (
-        resolve_open_trades(exchange, state, caps, tunable, now, marks=marks, native_protected=protected)
-        if fire_enabled and not dry_run else 0
+        resolve_open_trades(exchange, state, caps, tunable, now, marks=marks,
+                            native_protected=protected, shadow_only=not fire_enabled)
+        if not dry_run else 0
     )
 
     equity = exchange.equity()
     positions = exchange.get_positions()
     open_coins = {p.coin for p in positions}
+    if not fire_enabled:
+        # Shadow's book is hypothetical — feed its open trades into one-per-coin /
+        # max-concurrent so shadow discipline matches what live would have done.
+        open_coins |= {t["coin"] for t in state.open_trades(shadow=True)}
     realized = state.paper_realized() if exchange.network is Network.PAPER else None
     recent = state.recent_decisions(limit=10)
+    outcomes = state.resolved_trades(limit=10)  # newest first — the model's track record
     breaker_tripped = breaker.tripped()
-    daily_loss = breaker.daily_loss_hit(equity)
+    daily_loss = breaker.daily_loss_hit(equity, persist=not dry_run)
+    if alerter is not None and not dry_run and fire_enabled:
+        _alert_unmanaged(state, alerter, positions)
 
     # WAIT re-checks (skip in a dry-run preview, and while the kill switch is tripped — a
     # re-check can't fire anyway, so don't spend an LLM call or a follow-up attempt on it;
@@ -108,7 +124,7 @@ def run_once(
     common = _PassContext(
         caps=caps, tunable=tunable, decide_fn=decide_fn, marks=marks,
         market=_market_context(exchange, coins), equity=equity, positions=positions,
-        realized=realized, recent=recent, open_coins=open_coins, now=now,
+        realized=realized, recent=recent, outcomes=outcomes, open_coins=open_coins, now=now,
         breaker_tripped=breaker_tripped, daily_loss=daily_loss, protected=protected,
         fire_enabled=fire_enabled, dry_run=dry_run, alerter=alerter,
     )
@@ -130,8 +146,8 @@ def run_once(
     t = common.tally
     return PassSummary(
         network=exchange.network, seen=len(batch), rechecked=len(due),
-        approved=t.approved, fired=t.fired, rejected=t.rejected, dropped=t.dropped,
-        deferred=t.deferred, resolved=resolved,
+        approved=t.approved, fired=t.fired, rejected=t.rejected, failed=t.failed,
+        dropped=t.dropped, deferred=t.deferred, resolved=resolved,
         note=_note(dry_run=dry_run, fire_enabled=fire_enabled),
     )
 
@@ -141,6 +157,7 @@ class _Tally:
     approved: int = 0
     fired: int = 0
     rejected: int = 0
+    failed: int = 0  # gate-approved but died at the exchange — disjoint from `rejected`
     dropped: int = 0
     deferred: int = 0
 
@@ -159,6 +176,7 @@ class _PassContext:
     positions: list[Position]
     realized: float | None
     recent: list[dict]
+    outcomes: list[dict]  # recently resolved trades — the model's track record
     open_coins: set[str]
     now: float
     breaker_tripped: bool
@@ -183,21 +201,26 @@ class _Step:
 def _process_deferred(exchange: Exchange, state: StateStore, d: DeferredCandidate, common: _PassContext) -> None:
     """Re-check a due deferral against fresh data. This re-check consumes one attempt;
     a repeat WAIT reschedules with what's left, anything else is terminal."""
-    step = _evaluate(exchange, state, d.candidate, common, attempts_left=d.attempts_remaining - 1)
+    attempts_left = d.attempts_remaining - 1
+    expires_in = (d.candidate.created_at + common.caps.max_signal_age_minutes * 60 - common.now) / 60
+    followup = {"attempts_remaining": attempts_left, "expires_in_minutes": round(max(0.0, expires_in), 1)}
+    step = _evaluate(exchange, state, d.candidate, common, attempts_left=attempts_left, followup=followup)
     if step.status == "deferred":
         state.defer_candidate(d.candidate, step.next_check_at, step.attempts_remaining)
     else:
         state.drop_deferred(d.candidate.id)
 
 
-def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, common: _PassContext, *, attempts_left: int) -> _Step:
+def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, common: _PassContext, *,
+              attempts_left: int, followup: dict | None = None) -> _Step:
     """enrich → decide → (drop | WAIT-defer | gate → fire) → log, tallying as it goes.
-    Returns a `_Step` describing the outcome; the caller owns intake/deferred persistence."""
+    Returns a `_Step` describing the outcome; the caller owns intake/deferred persistence.
+    `followup` marks a WAIT re-check so the model knows this isn't a fresh look."""
     candles, regime = common.market[candidate.coin]  # built from this pass's batch ∪ due coins
     ctx = enrich(
         candidate, marks=common.marks, equity=common.equity, positions=common.positions,
-        realized=common.realized, recent=common.recent, tunable=common.tunable,
-        candles=candles, regime=regime,
+        realized=common.realized, recent=common.recent, outcomes=common.outcomes,
+        tunable=common.tunable, candles=candles, regime=regime, followup=followup,
     )
     result = common.decide_fn(ctx, common.caps, common.tunable)
 
@@ -217,7 +240,7 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         caps=common.caps, tunable=common.tunable, equity=common.equity,
         open_coins=set(common.open_coins), open_count=len(common.open_coins),
         now=common.now, breaker_tripped=common.breaker_tripped, daily_loss_hit=common.daily_loss,
-        regime=regime,
+        regime=regime, mark=common.marks.get(candidate.coin),
     )
     outcome = evaluate(candidate, decision, gate_ctx)
 
@@ -233,7 +256,8 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         _emit(common.alerter, "reject", level="warning", coin=candidate.coin, reason=outcome.reason)
     elif not common.fire_enabled:
         common.tally.approved += 1
-        status = "shadow"  # approved but deliberately not fired
+        status = "shadow"  # approved but deliberately not fired — booked hypothetically
+        _open_shadow_trade(state, candidate, decision, outcome, regime, common)
     else:
         common.tally.approved += 1
         status, fill = _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, common)
@@ -247,30 +271,60 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
 
 def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, common: _PassContext) -> tuple[str, OrderResult]:
     """Fire an approved order and reconcile against what actually filled — not what we
-    intended. Returns (status, fill); opens the ledger + native protection only on a real fill."""
+    intended. The ledger row is written the moment the fill is confirmed — *before*
+    protection — so a crash mid-protection leaves a position the resolver still
+    manages, never an untracked one. An abort then resolves that row rather than
+    deleting history."""
     fill = fire(exchange, state, candidate, outcome.order, common.now)
     filled = fill.filled_size if fill.filled_size is not None else outcome.order.size
     entry_price = fill.avg_price if fill.avg_price is not None else candidate.entry
     if not fill.accepted:
-        common.tally.rejected += 1  # duplicate or exchange reject
+        common.tally.failed += 1  # duplicate or exchange reject
         _emit(common.alerter, "reject", level="warning", coin=candidate.coin, reason=fill.message or fill.status)
         return "rejected", fill
     if filled <= 0:
-        common.tally.rejected += 1  # accepted but nothing filled (rested/canceled) — no position
+        common.tally.failed += 1  # accepted but nothing filled (rested/canceled) — no position
         _emit(common.alerter, "reject", level="warning", coin=candidate.coin, reason="unfilled")
         return "unfilled", fill
-    if common.protected and not _secure(exchange, candidate, filled, common.alerter):
-        common.tally.rejected += 1  # filled but couldn't be protected → emergency-closed
-        return "aborted", fill
-    common.tally.fired += 1
-    common.open_coins.add(candidate.coin)
-    state.open_trade(
+
+    trade_id = state.open_trade(
         candidate.id, candidate.coin, candidate.side, entry_price,
         candidate.sl, candidate.tp, filled, decision.conviction, regime, common.now,
     )
+    if common.protected:
+        close = _secure(exchange, candidate, filled, common.alerter)
+        if close is not None:  # protection failed — position flattened, trade aborted
+            common.tally.failed += 1
+            exit_price = close.avg_price if close.avg_price is not None else entry_price
+            realized, r_multiple = _abort_pnl(candidate.side, entry_price, candidate.sl, exit_price, filled)
+            state.resolve_trade(trade_id, "aborted", exit_price, realized, r_multiple, common.now)
+            return "aborted", fill
+    common.tally.fired += 1
+    common.open_coins.add(candidate.coin)
     _emit(common.alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
           size=filled, conviction=decision.conviction, order_id=fill.order_id)
     return "fired", fill
+
+
+def _open_shadow_trade(state: StateStore, candidate: Candidate, decision, outcome, regime, common: _PassContext) -> None:
+    """Book a gate-approved shadow decision as a hypothetical trade, entered at the
+    mark (what a MARKET fill would have paid). Resolved orderlessly by later shadow
+    passes — this is how shadow accumulates the outcomes the tuner and the
+    graduation checklist need before any real money moves."""
+    entry = common.marks[candidate.coin]  # gate approval guarantees the mark exists
+    state.open_trade(
+        candidate.id, candidate.coin, candidate.side, entry,
+        candidate.sl, candidate.tp, outcome.size, decision.conviction, regime, common.now,
+        shadow=True,
+    )
+    common.open_coins.add(candidate.coin)  # the hypothetical book honors one-per-coin too
+
+
+def _abort_pnl(side: Side, entry: float, sl: float, exit_price: float, size: float) -> tuple[float, float]:
+    """Realized P&L / R-multiple of an emergency-closed entry (usually ≈ the spread)."""
+    per_unit = (exit_price - entry) if side is Side.LONG else (entry - exit_price)
+    risk = abs(entry - sl)
+    return round(per_unit * size, 6), round(per_unit / risk, 4) if risk > 0 else 0.0
 
 
 def _wait(state: StateStore, candidate: Candidate, decision, regime, common: _PassContext, attempts_left: int) -> _Step:
@@ -329,16 +383,19 @@ def _fetch_candles(exchange: Exchange, coin: str):
         return []
 
 
-def _secure(exchange: Exchange, candidate, size: float, alerter: Alerter | None) -> bool:
+def _secure(exchange: Exchange, candidate, size: float, alerter: Alerter | None) -> OrderResult | None:
     """Place native protective triggers; if that fails, flatten the position rather than
-    leave it naked. Returns True only when the position is protected."""
+    leave it naked — and cancel whichever trigger DID place, so no stray reduce-only
+    order survives to ambush the next position. Returns None when protected, else the
+    emergency-close result (for the abort ledger entry)."""
     protection = place_protection(exchange, candidate, size)
     if protection.ok:
-        return True
+        return None
     closed = emergency_close(exchange, candidate, size)
+    canceled = cancel_placed(exchange, candidate.coin, protection.placed)
     _emit(alerter, "protection_failed", level="critical", coin=candidate.coin,
-          reason=protection.failed, emergency_closed=closed.accepted)
-    return False
+          reason=protection.failed, emergency_closed=closed.accepted, triggers_canceled=canceled)
+    return closed
 
 
 def _emit(alerter: Alerter | None, event: str, **fields) -> None:
@@ -351,14 +408,32 @@ _HALT_ALERT_KEY = "alert_halt_last"
 
 def _alert_halt(state: StateStore, alerter: Alerter, batch, breaker_tripped: bool, daily_loss: bool) -> None:
     """Alert when the breaker / loss-limit is blocking candidates — but only on a
-    *change* of state, so a tripped breaker doesn't spam the run loop every pass."""
+    *change* of state, so a tripped breaker doesn't spam the run loop every pass.
+    Parked WAIT deferrals count as blocked work too — they're frozen while halted."""
     reason = "kill switch" if breaker_tripped else "daily loss limit" if daily_loss else ""
-    if reason and batch:
+    blocked = len(batch) + state.deferred_count()
+    if reason and blocked:
         if state.meta_get(_HALT_ALERT_KEY) != reason:
-            alerter.alert("halted", level="critical", reason=reason, candidates=len(batch))
+            alerter.alert("halted", level="critical", reason=reason, candidates=blocked)
             state.meta_set(_HALT_ALERT_KEY, reason)
     elif not reason and state.meta_get(_HALT_ALERT_KEY):
         state.meta_set(_HALT_ALERT_KEY, "")  # cleared — re-arm for the next trip
+
+
+_UNMANAGED_ALERT_KEY = "alert_unmanaged_last"
+
+
+def _alert_unmanaged(state: StateStore, alerter: Alerter, positions: list[Position]) -> None:
+    """Alert (on change) when the exchange holds a position the ledger doesn't know —
+    e.g. a crash between fill and ledger write, or a manual trade on the executor's
+    account. The resolver won't manage it, so a human has to."""
+    ledger_coins = {t["coin"] for t in state.open_trades()}
+    unmanaged = sorted(p.coin for p in positions if p.coin not in ledger_coins)
+    fingerprint = ",".join(unmanaged)
+    if fingerprint != (state.meta_get(_UNMANAGED_ALERT_KEY) or ""):
+        if unmanaged:
+            alerter.alert("unmanaged_position", level="critical", coins=unmanaged)
+        state.meta_set(_UNMANAGED_ALERT_KEY, fingerprint)
 
 
 def _note(*, dry_run: bool, fire_enabled: bool) -> str:

@@ -59,6 +59,15 @@ def test_resolve_prefers_explicit_alias_then_default(tmp_path):
         s.resolve("missing", Network.TESTNET)
 
 
+def test_resolve_rejects_alias_on_the_wrong_network(tmp_path):
+    # `--network mainnet --account my-testnet` must fail loudly, never silently
+    # sign a mainnet action with a testnet account.
+    s = _store(tmp_path)
+    s.add(_acct(alias="t", network=Network.TESTNET))
+    with pytest.raises(AccountError, match="testnet"):
+        s.resolve("t", Network.MAINNET)
+
+
 def test_remove(tmp_path):
     s = _store(tmp_path)
     s.add(_acct())
@@ -94,6 +103,16 @@ def test_keystore_load_missing(tmp_path):
     ks = Keystore(tmp_path / "keys")
     with pytest.raises(KeystoreError):
         ks.load("nope")
+
+
+def test_keystore_refuses_a_loose_key_file(tmp_path):
+    import os
+
+    ks = Keystore(tmp_path / "keys")
+    ks.save("main", _KEY)
+    os.chmod(ks.path_for("main"), 0o644)  # e.g. restored from a backup
+    with pytest.raises(KeystoreError, match="chmod 600"):
+        ks.load("main")
 
 
 def test_agent_address_derivation(tmp_path):

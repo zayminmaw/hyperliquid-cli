@@ -71,6 +71,15 @@ class PaperExchange:
         if self._state is None:
             return OrderResult(accepted=True, status="recorded", order_id=oid, message="paper book")
 
+        if order.order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT):
+            # A trigger has no resting book here — filling it instantly at mark would
+            # fake a protective order that never protected anything. Paper protection
+            # is the executor-side resolver; reject rather than lie.
+            return OrderResult(
+                accepted=False, status="error",
+                message="paper book does not rest trigger orders; the resolver is paper's protection",
+            )
+
         fill_price = order.price if order.order_type is OrderType.LIMIT else self.get_marks().get(order.coin)
         if fill_price is None:
             return OrderResult(accepted=False, status="error", message=f"no mark for {order.coin}")
@@ -106,7 +115,11 @@ class PaperExchange:
         pnl_unit = (price - entry) if pos_side is Side.LONG else (entry - price)
         self._state.add_paper_realized(pnl_unit * closed)
         remaining = pos_size - closed
-        if remaining <= 1e-12:
-            self._state.delete_paper_position(order.coin)
-        else:
+        # A real book flips the excess into the new side — but reduce-only never opens.
+        flipped = 0.0 if order.reduce_only else order.size - closed
+        if remaining > 1e-12:
             self._state.upsert_paper_position(order.coin, pos_side, remaining, entry)
+        elif flipped > 1e-12:
+            self._state.upsert_paper_position(order.coin, order.side, flipped, price)
+        else:
+            self._state.delete_paper_position(order.coin)

@@ -13,6 +13,7 @@ suite run with no key or SDK present; tests inject a fake `client`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from hlcli.core.config import Caps
@@ -49,8 +50,10 @@ SYSTEM_PROMPT = (
     "You are the execution-judgment layer of a disciplined crypto-futures trading system. "
     "A human supplies the thesis (a candidate setup with entry/stop/target and reasoning); you "
     "supply execution judgment on ONE candidate at a time, given the current mark, a short tail of "
-    "recent price candles, the code-inferred market regime, the portfolio, recent outcomes, and the "
-    "active strategy config.\n\n"
+    "recent price candles, the code-inferred market regime, the portfolio, recent decisions and "
+    "resolved outcomes (your actual track record, in R-multiples), and the active strategy config. "
+    "A `followup` block means this is a re-check of a setup you previously said WAIT on — it shows "
+    "how many re-checks remain and how long before the setup goes stale.\n\n"
     "Think like a seasoned execution trader, not a forecaster. Your edge is responding correctly, "
     "not predicting the market — disciplined behavior matters more than any single call, and chasing, "
     "forcing marginal trades, or sizing up to win back a recent loss is how accounts die. Let the "
@@ -99,6 +102,10 @@ def validate_decision(payload: object, candidate_id: str) -> Decision | None:
         conviction = float(payload["conviction"])
     except (KeyError, ValueError, TypeError):
         return None
+    # NaN slides through a min/max clamp as the UPPER bound (max conviction) —
+    # a non-finite conviction is garbage, not a verdict, so it is dropped.
+    if not math.isfinite(conviction):
+        return None
 
     return Decision(
         candidate_id=candidate_id,
@@ -121,6 +128,8 @@ def _clamp_recheck(value: object) -> float | None:
     try:
         minutes = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(minutes):  # NaN would clamp to the ceiling, not a default
         return None
     return max(0.0, min(_RECHECK_CEILING_MIN, minutes))
 

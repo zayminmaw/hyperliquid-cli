@@ -38,18 +38,31 @@ class MarksFeed:
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
         self._cache: dict[str, float] = {}
         self._fetched_at = 0.0
+        self._sz_decimals: dict[str, int] | None = None  # static per session; fetched once
 
     def _info(self, body: dict) -> dict:
-        return self._client.post("/info", json=body).json()
+        response = self._client.post("/info", json=body)
+        response.raise_for_status()  # an HTTP error shouldn't surface as a parse error downstream
+        return response.json()
 
     def all_marks(self, *, force: bool = False) -> dict[str, float]:
         now = time.monotonic()
         if not force and self._cache and (now - self._fetched_at) < self._ttl:
-            return self._cache
+            return dict(self._cache)
         mids = self._info({"type": "allMids"})
         self._cache = {coin: float(px) for coin, px in mids.items()}
         self._fetched_at = now
-        return self._cache
+        return dict(self._cache)  # a copy — callers must not mutate the cache
+
+    def sz_decimals(self, coin: str) -> int | None:
+        """The asset's size precision from the exchange `meta` universe, or None for an
+        unknown coin. Fetched once per session (static exchange metadata)."""
+        if self._sz_decimals is None:
+            meta = self._info({"type": "meta"})
+            self._sz_decimals = {
+                a["name"]: int(a["szDecimals"]) for a in meta.get("universe", [])
+            }
+        return self._sz_decimals.get(coin)
 
     def mark(self, coin: str) -> float | None:
         return self.all_marks().get(coin)

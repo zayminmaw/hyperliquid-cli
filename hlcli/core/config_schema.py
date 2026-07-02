@@ -12,6 +12,7 @@ The clamp is the safety contract: every field is bounded into a sane range here,
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -55,31 +56,40 @@ class ConfigError(RuntimeError):
     """The active config file exists but could not be parsed."""
 
 
-def _bound(value: float, lo: float, hi: float) -> float:
+def _bound(value: float, lo: float, hi: float, default: float) -> float:
+    """Clamp into [lo, hi]. A non-finite value would slide through min/max as the
+    UPPER bound (NaN compares false everywhere) — it's garbage, so use the field's
+    safe default instead of the widest setting."""
+    if not math.isfinite(value):
+        return default
     return max(lo, min(hi, value))
+
+
+_DEFAULTS = TunableConfig()
 
 
 def clamp(cfg: TunableConfig) -> TunableConfig:
     """Bound every tunable field into its safe range. Idempotent."""
     s = cfg.sizing
-    floor = _bound(s.floor_fraction, 0.0, 1.0)
-    ceil = _bound(s.ceil_fraction, 0.0, 1.0)
+    d = _DEFAULTS.sizing
+    floor = _bound(s.floor_fraction, 0.0, 1.0, d.floor_fraction)
+    ceil = _bound(s.ceil_fraction, 0.0, 1.0, d.ceil_fraction)
     floor = min(floor, ceil)  # floor can never exceed ceil
 
     regimes = tuple(r for r in cfg.regime.allowed_regimes if r in _KNOWN_REGIMES) or _KNOWN_REGIMES
 
     return cfg.model_copy(
         update={
-            "risk_per_trade_pct": _bound(cfg.risk_per_trade_pct, 0.0, _RISK_PCT_MAX),
+            "risk_per_trade_pct": _bound(cfg.risk_per_trade_pct, 0.0, _RISK_PCT_MAX, _DEFAULTS.risk_per_trade_pct),
             "max_candidates_per_pass": int(
-                _bound(cfg.max_candidates_per_pass, 1, _MAX_CANDIDATES_CEILING)
+                _bound(cfg.max_candidates_per_pass, 1, _MAX_CANDIDATES_CEILING, _DEFAULTS.max_candidates_per_pass)
             ),
-            "decision_temperature": _bound(cfg.decision_temperature, 0.0, 1.0),
-            "max_hold_minutes": int(_bound(cfg.max_hold_minutes, 0, _MAX_HOLD_CEILING)),
+            "decision_temperature": _bound(cfg.decision_temperature, 0.0, 1.0, _DEFAULTS.decision_temperature),
+            "max_hold_minutes": int(_bound(cfg.max_hold_minutes, 0, _MAX_HOLD_CEILING, _DEFAULTS.max_hold_minutes)),
             "regime": cfg.regime.model_copy(update={"allowed_regimes": regimes}),
             "sizing": s.model_copy(
                 update={
-                    "min_conviction": _bound(s.min_conviction, 0.0, 1.0),
+                    "min_conviction": _bound(s.min_conviction, 0.0, 1.0, d.min_conviction),
                     "floor_fraction": floor,
                     "ceil_fraction": ceil,
                 }

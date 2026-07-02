@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-01
 **Author:** zayminmaw (built with Claude Code)
-**Status:** Code-complete through all five planned phases (Phase 0–5). 177 tests pass.
+**Status:** Code-complete through all five planned phases (Phase 0–5). 235 tests pass.
 Remaining work is **operational**, not coding: supply agent keys, run testnet/shadow
 to accumulate resolved trades, let the graduation checklist clear, then go to mainnet
 at tiny caps.
@@ -44,7 +44,7 @@ hl --help
 hl exec propose --coin BTC --entry 60000 --tp 66000 --sl 58000 --reason "breakout"
 hl exec once                   # one full executor pass on the paper book
 hl exec report                 # equity, positions, P&L, breaker, graduation verdict
-.venv/bin/pytest -q            # 177 passing
+.venv/bin/pytest -q            # 235 passing
 ```
 
 ### Running (production / live)

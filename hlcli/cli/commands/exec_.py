@@ -97,23 +97,36 @@ def shadow(ctx: typer.Context) -> None:
     emit(summary.model_dump(), as_json=g.json_out, title="exec shadow")
 
 
+_FAILURE_ALERT_EVERY = 10  # alert on the 1st failure of a streak, then every Nth
+_MAX_BACKOFF_SECONDS = 60.0
+
+
 @app.command("run")
 def run(ctx: typer.Context, interval: float = typer.Option(5.0, "--interval", help="seconds between passes")) -> None:
     """Continuous executor loop (ctrl-c to stop)."""
     g = state_of(ctx)
-    exchange, state, caps, tunable = _env(g, for_write=True)
+    exchange, state, caps, _ = _env(g, for_write=True)
     alerter = _alerter(caps, g.network)
     note(f"executor running every {interval}s on {g.network.value} — ctrl-c to stop")
+    failures = 0
     try:
         while True:
             try:
-                s = run_once(exchange, state, caps, tunable, dry_run=g.dry_run, alerter=alerter)
+                # Re-read the tunable surface each pass so a `tune promote` mid-run
+                # takes effect without a restart (the decision prompt already does).
+                s = run_once(exchange, state, caps, load_tunable(), dry_run=g.dry_run, alerter=alerter)
+                failures = 0
                 note(f"[dim]{time.strftime('%H:%M:%S')}[/dim] seen={s.seen} fired={s.fired} "
-                     f"deferred={s.deferred} rechecked={s.rechecked} "
-                     f"resolved={s.resolved} rejected={s.rejected} dropped={s.dropped}")
+                     f"deferred={s.deferred} rechecked={s.rechecked} resolved={s.resolved} "
+                     f"rejected={s.rejected} failed={s.failed} dropped={s.dropped}")
             except Exception as exc:  # keep the loop alive across transient LLM/network faults
-                note(f"[yellow]{time.strftime('%H:%M:%S')} pass failed: {exc}[/yellow]")
-            time.sleep(interval)
+                failures += 1
+                note(f"[yellow]{time.strftime('%H:%M:%S')} pass failed ({failures}x): {exc}[/yellow]")
+                if failures == 1 or failures % _FAILURE_ALERT_EVERY == 0:
+                    alerter.alert("pass_failed", level="warning", consecutive=failures, error=str(exc))
+            # Repeated failures back off exponentially — a hard-down API isn't retried
+            # every 5 seconds forever at full LLM cost.
+            time.sleep(min(interval * (2 ** min(failures, 10)), _MAX_BACKOFF_SECONDS) if failures else interval)
     except KeyboardInterrupt:
         note("stopped")
 

@@ -33,7 +33,9 @@ class EnrichedContext(BaseModel):
     open_positions: list[dict]
     regime: str | None = None  # code-computed (trend/range); None = unknown, gate skips the check
     candles: list[dict] | None = None  # compact recent OHLC tail; None when no price history
-    recent_outcomes: list[dict]
+    recent_decisions: list[dict]  # what was recently decided/fired (no results yet)
+    recent_outcomes: list[dict]  # resolved trades: what actually won/lost, in R
+    followup: dict | None = None  # set on a WAIT re-check: attempts left + minutes to staleness
     tunable: dict
 
 
@@ -45,9 +47,11 @@ def enrich(
     positions: list[Position],
     realized: float | None,
     recent: list[dict],
+    outcomes: list[dict] | None = None,
     tunable: TunableConfig,
     candles: list[dict] | None = None,
     regime: str | None = None,
+    followup: dict | None = None,
 ) -> EnrichedContext:
     return EnrichedContext(
         candidate=candidate,
@@ -57,6 +61,7 @@ def enrich(
         unrealized_pnl=round(sum(p.unrealized_pnl for p in positions), 4),
         regime=regime,
         candles=candles,
+        followup=followup,
         open_positions=[
             {
                 "coin": p.coin,
@@ -67,7 +72,8 @@ def enrich(
             }
             for p in positions
         ],
-        recent_outcomes=_summarize_recent(recent),
+        recent_decisions=_summarize_recent(recent),
+        recent_outcomes=_summarize_outcomes(outcomes or []),
         # Only the *tunable* surface is exposed — never the hard caps or keys.
         tunable={
             "risk_per_trade_pct": tunable.risk_per_trade_pct,
@@ -75,6 +81,22 @@ def enrich(
             "min_conviction": tunable.sizing.min_conviction,
         },
     )
+
+
+def _summarize_outcomes(trades: list[dict]) -> list[dict]:
+    """Resolved trades as compact result rows — the model's actual track record,
+    so "don't chase / don't force" has evidence behind it."""
+    return [
+        {
+            "coin": t["coin"],
+            "side": t["side"],
+            "conviction": t["conviction"],
+            "result": t["status"],
+            "r": t["r_multiple"],
+            "shadow": bool(t.get("shadow")),
+        }
+        for t in trades
+    ]
 
 
 def _summarize_recent(recent: list[dict]) -> list[dict]:

@@ -29,19 +29,27 @@ def add(
 
     caps = get_caps()
     acct_type = AccountType.READ_ONLY if read_only else AccountType.TRADE
-    key_ref = None
+    store = open_store(caps)
+    private_key = None
 
     if acct_type is AccountType.TRADE:
         # Read the key off the prompt — never a CLI arg (shell history) and never logged.
         private_key = typer.prompt("Agent private key", hide_input=True)
-        derived = agent_address(private_key)
-        key_ref = Keystore(caps.data_dir / "keys").save(alias, private_key)
+        derived = agent_address(private_key)  # validates the key before anything persists
         note(f"[dim]agent wallet: {derived} (approve this agent for {address} on Hyperliquid)[/dim]")
 
-    store = open_store(caps)
+    # Row first, key second: saving the key before `add` would overwrite an existing
+    # alias's key file and then fail on the duplicate — silently rebinding that account.
     account = store.add(
-        Account(alias=alias, address=address, network=state.network, type=acct_type, key_ref=key_ref)
+        Account(alias=alias, address=address, network=state.network, type=acct_type,
+                key_ref=alias if private_key is not None else None)
     )
+    if private_key is not None:
+        try:
+            Keystore(caps.data_dir / "keys").save(alias, private_key)
+        except Exception:
+            store.remove(alias)  # don't leave a row pointing at a key that never landed
+            raise
     emit(
         {"alias": account.alias, "address": account.address, "network": account.network.value,
          "type": account.type.value, "default": account.is_default},
@@ -76,6 +84,8 @@ def remove(ctx: typer.Context, alias: str = typer.Argument(...)) -> None:
     if account.key_ref:
         Keystore(caps.data_dir / "keys").delete(account.key_ref)
     note(f"removed [yellow]{alias}[/yellow]")
+    if account.is_default:
+        note(f"[dim]{account.network.value} has no default account now — set one with `hl account set-default`.[/dim]")
 
 
 @app.command("positions")

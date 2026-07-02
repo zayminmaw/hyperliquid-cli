@@ -31,7 +31,7 @@ def _decision(action=Action.ACT, timing=Timing.NOW, conviction=1.0) -> Decision:
 def _ctx(caps=None, **kw) -> GateContext:
     base = dict(
         caps=caps or _caps(), tunable=clamp(TunableConfig()), equity=10_000.0,
-        open_coins=set(), open_count=0, now=NOW,
+        open_coins=set(), open_count=0, now=NOW, mark=100.0,  # mark at the default entry
     )
     return GateContext(**{**base, **kw})
 
@@ -95,6 +95,37 @@ def test_rejects_low_rr():
     # risk 10, reward 5 -> rr 0.5 < 1.5
     out = evaluate(_candidate(entry=100, tp=105, sl=90), _decision(), _ctx())
     assert not out.approved and "R:R" in out.reason
+
+
+# --- mark sanity: the entry is a MARKET order, so the mark is what we'd pay ---
+
+def test_rejects_missing_mark():
+    out = evaluate(_candidate(), _decision(), _ctx(mark=None))
+    assert not out.approved and "no mark" in out.reason
+
+
+@pytest.mark.parametrize("mark", [89.0, 90.0, 120.0, 125.0])  # beyond sl / at sl / at tp / beyond tp
+def test_rejects_mark_outside_levels(mark):
+    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(), _ctx(mark=mark))
+    assert not out.approved and "outside sl/tp" in out.reason
+
+
+def test_rejects_entry_that_has_run():
+    # mark 110: reward 10 / risk 20 = 0.5 R:R at mark, though the thesis R:R was 2.0
+    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(), _ctx(mark=110.0))
+    assert not out.approved and "R:R at mark" in out.reason
+
+
+def test_mark_retraced_toward_stop_still_approves():
+    # mark 95: reward 25 / risk 5 = 5.0 R:R at mark — better fill than the thesis
+    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(), _ctx(mark=95.0))
+    assert out.approved
+
+
+def test_sizing_prices_risk_at_the_mark():
+    # mark 95: stop distance 5 (not 10) → 50 risk / 5 = 10 units, notional at 95
+    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(conviction=1.0), _ctx(mark=95.0))
+    assert out.size == 10.0 and out.notional == 950.0
 
 
 def test_rejects_one_per_coin():

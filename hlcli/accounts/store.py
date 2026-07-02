@@ -4,8 +4,10 @@ Holds *metadata only* — alias, the main account address being traded, network,
 type (`trade` / `read-only`), and a key reference (the alias under which the
 agent key is kept in the keystore). The key itself never lives here.
 
-Accounts are network-scoped: the same wallet on testnet and mainnet are two rows
-(different agent approvals), each with its own default flag per network.
+Aliases are globally unique (the primary key); the same wallet used on testnet and
+mainnet needs two aliases (different agent approvals), each with its own default
+flag per network. `resolve` refuses an alias whose network doesn't match the
+requested one — a testnet account must never sign a mainnet action.
 """
 
 from __future__ import annotations
@@ -122,11 +124,17 @@ class AccountStore:
         return _to_account(row) if row else None
 
     def resolve(self, alias: str | None, network: Network) -> Account | None:
-        """Explicit `--account` alias wins; otherwise the network's default."""
+        """Explicit `--account` alias wins; otherwise the network's default. An alias
+        registered for a different network is an error, not a silent cross-network use."""
         if alias is not None:
             account = self.get(alias)
             if account is None:
                 raise AccountError(f"no account '{alias}'.")
+            if account.network is not network:
+                raise AccountError(
+                    f"account '{alias}' is registered for {account.network.value}, "
+                    f"not {network.value}."
+                )
             return account
         return self.get_default(network)
 
