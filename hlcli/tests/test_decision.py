@@ -2,6 +2,7 @@
 shadow / dropped paths through the executor pass. The real API is never hit — a
 fake client returns canned payloads."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -72,7 +73,9 @@ class FakeClient:
         self.kwargs = kwargs
         block = SimpleNamespace(type="tool_use", name="submit_decision", input=self._payload)
         content = [block] if self._payload is not None else []
-        return SimpleNamespace(content=content)
+        # No tool block ≈ a truncated/refused generation, so mimic its stop_reason.
+        stop = "end_turn" if self._payload is not None else "max_tokens"
+        return SimpleNamespace(content=content, stop_reason=stop)
 
 
 def _ctx():
@@ -94,6 +97,18 @@ def test_decide_drops_malformed_output():
 def test_decide_drops_when_model_skips_the_tool():
     res = decide(_ctx(), caps(), tunable(), client=FakeClient(None))
     assert res.dropped and res.note == "no_decision"
+    assert res.stop_reason == "max_tokens"  # why it stopped rides along for the audit log
+
+
+def test_decide_wraps_context_in_tags_with_compact_json():
+    client = FakeClient(_good())
+    decide(_ctx(), caps(), tunable(), client=client)
+    content = client.kwargs["messages"][0]["content"]
+    assert content.startswith("Judge the single candidate")
+    inner = content.split("<context>\n", 1)[1].split("\n</context>", 1)[0]
+    ctx = json.loads(inner)          # valid JSON…
+    assert "\n" not in inner         # …and compact — indenting doubles the hot-loop cost
+    assert ctx["candidate"]["coin"] == "BTC"
 
 
 def test_decide_uses_order_path_model_and_low_temp():
@@ -104,12 +119,27 @@ def test_decide_uses_order_path_model_and_low_temp():
     assert client.kwargs["tool_choice"]["name"] == "submit_decision"
 
 
-def test_decide_omits_temperature_for_no_sampling_models():
-    # Opus 4.7+/Fable reject sampling params with a 400, so the order-path call must
-    # drop `temperature` when the model is overridden to one of those families.
+@pytest.mark.parametrize("model", ["claude-opus-4-8", "claude-sonnet-5", "claude-fable-5"])
+def test_decide_omits_temperature_for_no_sampling_models(model):
+    # Opus 4.7+/Sonnet 5/Fable reject (non-default) sampling params with a 400, so the
+    # order-path call must drop `temperature` when overridden to one of those families.
     client = FakeClient(_good())
-    decide(_ctx(), caps(decision_model="claude-opus-4-8"), tunable(), client=client)
+    decide(_ctx(), caps(decision_model=model), tunable(), client=client)
     assert "temperature" not in client.kwargs
+
+
+def test_recent_decision_rows_carry_coin_and_age():
+    # Coin comes from the logged context; age from the row ts vs the pass `now`.
+    row = {
+        "candidate_id": "a", "ts": NOW - 600,
+        "decision": json.dumps({"candidate_id": "a", "action": "act", "conviction": 0.7}),
+        "fill": None, "context": json.dumps({"coin": "BTC"}),
+    }
+    c = Candidate(id="c1", coin="ETH", side=Side.LONG, entry=100, tp=120, sl=90, created_at=NOW)
+    ctx = enrich(c, marks={"ETH": 100.0}, equity=10_000.0, positions=[],
+                 realized=0.0, recent=[row], tunable=tunable(), now=NOW)
+    r = ctx.recent_decisions[0]
+    assert (r["coin"], r["minutes_ago"], r["action"]) == ("BTC", 10.0, "act")
 
 
 # --- runner: shadow + dropped paths ---

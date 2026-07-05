@@ -138,6 +138,37 @@ def test_prompt_tuner_proposes(tmp_path):
     assert res.note == "ok" and res.proposed == "refined prompt"
 
 
+def test_prompt_tuner_strips_a_wrapping_code_fence(tmp_path):
+    # `promote` writes the proposal verbatim — a fenced output must not ship its fences.
+    state = StateStore(tmp_path / "s.db")
+    _seed(state, 5)
+    res = propose_prompt(state, _caps(tmp_path), "PROMPT",
+                         client=FakeText("```markdown\nrefined prompt\n```"))
+    assert res.proposed == "refined prompt"
+
+
+def test_prompt_tuner_sees_rationales_and_readable_prompt(tmp_path):
+    # The decision *reasoning* is the tuner's main signal; the current prompt goes in a
+    # tag rather than being JSON-escaped into one long string.
+    state = StateStore(tmp_path / "s.db")
+    _seed(state, 5)
+    state.log_decision("c0", NOW, decision={
+        "candidate_id": "c0", "action": "act", "timing": "now",
+        "conviction": 0.8, "rationale": "clean pullback to support",
+    })
+
+    class Capture(FakeText):
+        def create(self, **kwargs):
+            self.kwargs = kwargs
+            return super().create(**kwargs)
+
+    client = Capture("refined prompt")
+    propose_prompt(state, _caps(tmp_path), "CURRENT PROMPT", client=client)
+    content = client.kwargs["messages"][0]["content"]
+    assert "<current_prompt>\nCURRENT PROMPT\n</current_prompt>" in content
+    assert "clean pullback to support" in content
+
+
 # --- promote / diff / history ---
 
 def test_promote_makes_proposals_active_and_records(tmp_path):

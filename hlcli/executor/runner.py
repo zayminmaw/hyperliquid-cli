@@ -171,7 +171,7 @@ class _PassContext:
     tunable: TunableConfig
     decide_fn: DecideFn
     marks: dict[str, float]
-    market: dict[str, tuple]  # coin → (candle summary, regime); see _market_context
+    market: dict[str, tuple]  # coin → (labeled candle context, regime); see _market_context
     equity: float
     positions: list[Position]
     realized: float | None
@@ -217,17 +217,32 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
     Returns a `_Step` describing the outcome; the caller owns intake/deferred persistence.
     `followup` marks a WAIT re-check so the model knows this isn't a fresh look."""
     candles, regime = common.market[candidate.coin]  # built from this pass's batch ∪ due coins
+
+    # No mark ⇒ the gate's mark-sanity check would reject regardless of the verdict,
+    # so don't spend a paid LLM call to find that out.
+    if common.marks.get(candidate.coin) is None:
+        common.tally.rejected += 1
+        if not common.dry_run:
+            state.log_decision(candidate.id, common.now,
+                               context={"coin": candidate.coin, "rejected": "no mark for coin"})
+            _emit(common.alerter, "reject", level="warning", coin=candidate.coin, reason="no mark for coin")
+        return _Step("rejected")
+
     ctx = enrich(
         candidate, marks=common.marks, equity=common.equity, positions=common.positions,
         realized=common.realized, recent=common.recent, outcomes=common.outcomes,
         tunable=common.tunable, candles=candles, regime=regime, followup=followup,
+        now=common.now,
     )
     result = common.decide_fn(ctx, common.caps, common.tunable)
 
     if result.dropped:
         common.tally.dropped += 1
         if not common.dry_run:
-            state.log_decision(candidate.id, common.now, context={"dropped": result.note, "raw": result.raw})
+            state.log_decision(candidate.id, common.now, context={
+                "coin": candidate.coin, "dropped": result.note, "raw": result.raw,
+                "stop_reason": result.stop_reason,
+            })
         return _Step("dropped")
 
     decision = result.decision
@@ -264,7 +279,8 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
 
     state.log_decision(
         candidate.id, common.now, decision=decision, gate=outcome, fill=fill,
-        context={"equity": common.equity, "open_coins": sorted(common.open_coins), "regime": regime},
+        context={"coin": candidate.coin, "equity": common.equity,
+                 "open_coins": sorted(common.open_coins), "regime": regime},
     )
     return _Step(status)
 
@@ -335,13 +351,15 @@ def _wait(state: StateStore, candidate: Candidate, decision, regime, common: _Pa
         common.tally.rejected += 1
         reason = "wait: out of attempts" if attempts_left < 1 else "wait: would be stale before re-check"
         if not common.dry_run:
-            state.log_decision(candidate.id, common.now, decision=decision, context={"wait": reason, "regime": regime})
+            state.log_decision(candidate.id, common.now, decision=decision,
+                               context={"coin": candidate.coin, "wait": reason, "regime": regime})
         return _Step("rejected")
     common.tally.deferred += 1
     if not common.dry_run:
         state.log_decision(
             candidate.id, common.now, decision=decision,
-            context={"wait": "deferred", "next_check_at": next_at, "attempts_remaining": attempts_left, "regime": regime},
+            context={"coin": candidate.coin, "wait": "deferred", "next_check_at": next_at,
+                     "attempts_remaining": attempts_left, "regime": regime},
         )
     return _Step("deferred", next_check_at=next_at, attempts_remaining=attempts_left)
 
@@ -365,9 +383,17 @@ def _market_context(exchange: Exchange, coins: set[str]) -> dict[str, tuple]:
     return {coin: _coin_context(exchange, coin) for coin in coins}
 
 
+# The interval the decision context's candle tail is fetched at. Passed explicitly to
+# `get_candles` AND labeled in the prompt payload — bare OHLC bars are meaningless to
+# the model without their timeframe.
+_CANDLE_INTERVAL = "15m"
+
+
 def _coin_context(exchange: Exchange, coin: str) -> tuple:
     bars = _fetch_candles(exchange, coin)
-    return summarize(bars), classify(bars)
+    tail = summarize(bars)
+    candles = {"interval": _CANDLE_INTERVAL, "order": "oldest_first", "bars": tail} if tail else None
+    return candles, classify(bars)
 
 
 def _fetch_candles(exchange: Exchange, coin: str):
@@ -378,7 +404,7 @@ def _fetch_candles(exchange: Exchange, coin: str):
     # unexpected response shape; an unexpected bug (e.g. a programming error) still
     # surfaces rather than masquerading as "no candles".
     try:
-        return exchange.get_candles(coin)
+        return exchange.get_candles(coin, interval=_CANDLE_INTERVAL)
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         return []
 

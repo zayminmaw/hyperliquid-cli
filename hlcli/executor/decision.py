@@ -35,7 +35,7 @@ DECISION_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "rationale": {"type": "string", "description": "One short sentence: your read of the setup at the current mark, the reasoning behind the verdict below."},
+            "rationale": {"type": "string", "description": "2-4 sentences, reasoned BEFORE the verdict: what invalidates this setup, whether the entry is still good at the current mark, how the regime bears on it, and why the verdict below follows."},
             "conviction": {"type": "number", "description": "Genuine edge in the setup as a decimal, 0.0 (none) to 1.0 (high)."},
             "timing": {"type": "string", "enum": ["now", "wait"], "description": "Enter now, or wait for a better moment."},
             "recheck_in_minutes": {"type": "number", "description": "When timing is 'wait', minutes until the setup should be re-checked with fresh data; the system re-checks a few times before it expires. Use 0 when acting now."},
@@ -51,23 +51,32 @@ SYSTEM_PROMPT = (
     "A human supplies the thesis (a candidate setup with entry/stop/target and reasoning); you "
     "supply execution judgment on ONE candidate at a time, given the current mark, a short tail of "
     "recent price candles, the code-inferred market regime, the portfolio, recent decisions and "
-    "resolved outcomes (your actual track record, in R-multiples), and the active strategy config. "
-    "A `followup` block means this is a re-check of a setup you previously said WAIT on — it shows "
-    "how many re-checks remain and how long before the setup goes stale.\n\n"
+    "resolved outcomes (both newest-first; outcomes are your actual track record, in R-multiples), "
+    "and the active strategy config. A `followup` block means this is a re-check of a setup you "
+    "previously said WAIT on — it shows how many re-checks remain and how long before the setup "
+    "goes stale.\n\n"
     "Think like a seasoned execution trader, not a forecaster. Your edge is responding correctly, "
     "not predicting the market — disciplined behavior matters more than any single call, and chasing, "
     "forcing marginal trades, or sizing up to win back a recent loss is how accounts die. Let the "
     "setup come to you: WAIT for a clean entry or SKIP a marginal one rather than taking a mediocre "
     "fill now. Judge risk before reward — what invalidates this setup, and is the entry still good at "
     "the current mark? Stand aside when the picture is unclear: incoherent or contradictory levels, a "
-    "regime that doesn't support the trade, or a mark that has already run past the entry. Capital "
-    "preservation and consistency beat being right once.\n\n"
-    "Decide only: action (act/skip), timing (now/wait), conviction, recheck_in_minutes, and a "
-    "one-sentence rationale. When you choose to WAIT, set recheck_in_minutes to when the setup is "
-    "worth another look; the system re-checks it with fresh data a few times before it expires. "
-    "Conviction is a decimal in [0,1] reflecting genuine edge, not enthusiasm: it scales position "
-    "size within fixed risk caps, so ~0.5 is a setup you'd take at half size and 0.8+ is reserved for "
-    "high-edge setups. You do NOT size positions, place stops, pick coins, or override any limit — "
+    "regime that doesn't support the trade, or a mark that has already run past the entry. Discipline "
+    "cuts both ways, though: when the levels are coherent, the R:R still clears at the current mark, "
+    "and the regime supports the trade, take it — passing on a valid setup is also an error, and your "
+    "resolved outcomes record both kinds of mistake.\n\n"
+    "Decide only: action (act/skip), timing (now/wait), conviction, recheck_in_minutes, and a brief "
+    "rationale (2-4 sentences — reason there first: what invalidates the setup, whether the entry is "
+    "still good at the mark, the regime fit, then the verdict). The combinations mean: skip is final "
+    "for this candidate; act+now fires immediately as a market order at the mark; act+wait defers the "
+    "setup for a fresh re-check — set recheck_in_minutes to when it is worth another look. Never pair "
+    "skip with wait.\n\n"
+    "Conviction is a decimal in [0,1] reflecting genuine edge, not enthusiasm: the code maps it to "
+    "position size within fixed risk caps. Below the config's min_conviction the size is zero — an "
+    "act below that threshold is an effective skip, so prefer an honest skip. Anchors: ~0.3 is barely "
+    "worth the floor size, ~0.5 a setup you'd take at half size, 0.8+ reserved for rare high-edge "
+    "setups. Use the whole range so conviction carries signal — if every trade lands at 0.6-0.8, "
+    "sizing degenerates. You do NOT size positions, place stops, pick coins, or override any limit — "
     "deterministic code owns all sizing math and safety, and your verdict is validated and clamped "
     "before anything reaches the exchange.\n\n"
     "Be selective, and always answer by calling the submit_decision tool."
@@ -81,6 +90,9 @@ class DecisionResult:
     decision: Decision | None
     raw: dict | None  # what the model returned, for the audit log
     note: str  # "ok" | "schema_invalid" | "no_decision"
+    # Why generation stopped ("end_turn" | "max_tokens" | "refusal" | ...) — logged so a
+    # drop caused by truncation or a refusal is distinguishable from malformed output.
+    stop_reason: str | None = None
 
     @property
     def dropped(self) -> bool:
@@ -112,7 +124,7 @@ def validate_decision(payload: object, candidate_id: str) -> Decision | None:
         action=action,
         timing=timing,
         conviction=max(0.0, min(1.0, conviction)),
-        rationale=str(payload.get("rationale", ""))[:500],
+        rationale=str(payload.get("rationale", ""))[:800],
         recheck_in_minutes=_clamp_recheck(payload.get("recheck_in_minutes")),
     )
 
@@ -154,20 +166,32 @@ def decide(
         system=load_decision_prompt(caps),
         tools=[DECISION_TOOL],
         tool_choice={"type": "tool", "name": "submit_decision"},
-        messages=[{"role": "user", "content": ctx.model_dump_json(indent=2)}],
+        messages=[{"role": "user", "content": _user_message(ctx)}],
     )
-    # `temperature` is rejected (400) by the Opus 4.7+ and Fable/Mythos families; the
-    # order-path model is env-overridable, so only send it to a model that accepts it.
+    # `temperature` is rejected (400) by the Opus 4.7+, Sonnet 5, and Fable/Mythos
+    # families; the order-path model is env-overridable, so only send it to a model
+    # that accepts it.
     if _supports_temperature(caps.decision_model):
         kwargs["temperature"] = tunable.decision_temperature
     response = client.messages.create(**kwargs)
 
+    stop_reason = getattr(response, "stop_reason", None)
     payload = _tool_payload(response)
     decision = validate_decision(payload, ctx.candidate.id)
     if decision is None:
         return DecisionResult(None, payload if isinstance(payload, dict) else None,
-                              "schema_invalid" if payload is not None else "no_decision")
-    return DecisionResult(decision, payload, "ok")
+                              "schema_invalid" if payload is not None else "no_decision",
+                              stop_reason=stop_reason)
+    return DecisionResult(decision, payload, "ok", stop_reason=stop_reason)
+
+
+def _user_message(ctx: EnrichedContext) -> str:
+    """The per-candidate user turn: a one-line task statement plus the context as
+    compact JSON (indenting roughly doubles the token cost of the hot loop)."""
+    return (
+        "Judge the single candidate in the context below per your instructions.\n"
+        f"<context>\n{ctx.model_dump_json()}\n</context>"
+    )
 
 
 def load_decision_prompt(caps: Caps) -> str:
@@ -177,7 +201,8 @@ def load_decision_prompt(caps: Caps) -> str:
 
 
 # Model families that reject sampling params (temperature/top_p/top_k) with a 400.
-_NO_SAMPLING_PARAMS = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable", "claude-mythos")
+# Sonnet 5 rejects *non-default* values, which the tunable temperature would be.
+_NO_SAMPLING_PARAMS = ("claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-5", "claude-fable", "claude-mythos")
 
 
 def _supports_temperature(model: str) -> bool:

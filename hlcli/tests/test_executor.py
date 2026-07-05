@@ -1,10 +1,12 @@
 """End-to-end executor pass: candidates → paper fills, deterministic + restart-safe."""
 
+import json
+
 from hlcli.core.config_schema import RegimeGate, TunableConfig, clamp
 from hlcli.core.types import Candidate, Candle, Order, OrderResult, OrderType, Side
 from hlcli.exchange.paper import PaperExchange
 from hlcli.executor.execute import fire
-from hlcli.executor.runner import run_once
+from hlcli.executor.runner import _coin_context, run_once
 from hlcli.state.store import StateStore
 from hlcli.tests._helpers import FakeMarks, act_now, act_wait, caps, skip_wait, tunable
 
@@ -330,3 +332,40 @@ def test_skip_with_wait_timing_is_not_deferred(tmp_path):
     s = run_once(ex, state, caps(), tunable(), decide_fn=skip_wait, now=NOW)
     assert (s.deferred, s.rejected) == (0, 1)  # a skip is terminal — WAIT timing is ignored
     assert state.deferred_count() == 0
+
+
+def test_no_mark_rejects_without_spending_an_llm_call(tmp_path):
+    # The gate would reject a markless coin anyway — the paid decision call must be skipped.
+    ex, state = _setup(tmp_path, marks={"ETH": 1500.0})  # BTC has no mark
+    state.enqueue(_cand("a"))
+
+    def boom(ctx, caps, tunable):
+        raise AssertionError("decide must not be called when the coin has no mark")
+
+    s = run_once(ex, state, caps(), tunable(), decide_fn=boom, now=NOW)
+    assert (s.rejected, s.fired) == (1, 0)
+    context = json.loads(state.recent_decisions(1)[0]["context"])
+    assert context == {"coin": "BTC", "rejected": "no mark for coin"}
+
+
+def test_candle_context_is_labeled_with_interval_and_order():
+    class _CandleEx:
+        def get_candles(self, coin, *, interval="1h", lookback=48):
+            self.interval = interval
+            return [Candle(t=i, o=1.0, h=2.0, l=0.5, c=1.5, v=10.0) for i in range(30)]
+
+    ex = _CandleEx()
+    candles, regime = _coin_context(ex, "BTC")
+    assert ex.interval == "15m"  # fetched at the labeled interval, not the callee default
+    assert candles["interval"] == "15m" and candles["order"] == "oldest_first"
+    assert candles["bars"] and set(candles["bars"][0]) == {"o", "h", "l", "c"}
+    assert regime is not None    # classify still sees the raw bars
+
+
+def test_candle_context_is_none_when_no_history():
+    class _EmptyEx:
+        def get_candles(self, coin, *, interval="15m", lookback=48):
+            return []
+
+    candles, regime = _coin_context(_EmptyEx(), "BTC")
+    assert candles is None and regime is None

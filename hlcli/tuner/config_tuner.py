@@ -20,36 +20,42 @@ from hlcli.core.llm import make_client
 from hlcli.state.store import StateStore
 from hlcli.tuner.stats import MIN_COHORT_SAMPLES, Cohort, cohorts, summary
 
+# Strict mode can't encode numeric ranges, so the clamp bounds live in the field
+# descriptions — the model's only channel for knowing them. A proposal outside a
+# bound gets silently clamped, which is no longer the config the model argued for,
+# so keep these in sync with `config_schema.clamp`.
 CONFIG_TOOL = {
     "name": "submit_config",
-    "description": "Submit the full proposed tunable config. Values are clamped to safe bounds on load.",
+    "description": "Submit the full proposed tunable config. Values outside the stated bounds are clamped on load — propose within them.",
     "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {
-            "risk_per_trade_pct": {"type": "number"},
+            "risk_per_trade_pct": {"type": "number", "description": "Percent of equity risked per trade (fixed-fractional sizing). Clamped to [0.0, 5.0]."},
             "regime": {
                 "type": "object",
+                "description": "The deterministic regime gate: when enabled, a candidate whose code-computed regime is not in allowed_regimes is rejected before sizing.",
                 "properties": {
-                    "enabled": {"type": "boolean"},
-                    "allowed_regimes": {"type": "array", "items": {"type": "string"}},
+                    "enabled": {"type": "boolean", "description": "Whether the regime gate runs at all."},
+                    "allowed_regimes": {"type": "array", "items": {"type": "string"}, "description": "Subset of ['trend', 'range'] — unknown names are discarded on load."},
                 },
                 "required": ["enabled", "allowed_regimes"],
                 "additionalProperties": False,
             },
             "sizing": {
                 "type": "object",
+                "description": "Maps the decision model's conviction (0-1) to a fraction of the gate-permitted max size. Never raises the hard-cap ceiling.",
                 "properties": {
-                    "min_conviction": {"type": "number"},
-                    "floor_fraction": {"type": "number"},
-                    "ceil_fraction": {"type": "number"},
+                    "min_conviction": {"type": "number", "description": "Conviction below this sizes to zero (an effective skip). Clamped to [0.0, 1.0]."},
+                    "floor_fraction": {"type": "number", "description": "Size fraction at conviction == min_conviction. Clamped to [0.0, 1.0] and never above ceil_fraction."},
+                    "ceil_fraction": {"type": "number", "description": "Size fraction at conviction == 1.0. Clamped to [0.0, 1.0]."},
                 },
                 "required": ["min_conviction", "floor_fraction", "ceil_fraction"],
                 "additionalProperties": False,
             },
-            "max_candidates_per_pass": {"type": "integer"},
-            "decision_temperature": {"type": "number"},
-            "max_hold_minutes": {"type": "integer"},
+            "max_candidates_per_pass": {"type": "integer", "description": "Fresh candidates pulled per executor pass. Clamped to [1, 50]."},
+            "decision_temperature": {"type": "number", "description": "Sampling temperature for the order-path decision model (ignored on models that reject sampling params). Clamped to [0.0, 1.0]."},
+            "max_hold_minutes": {"type": "integer", "description": "Auto-expire an open trade after this many minutes; 0 disables expiry. Clamped to [0, 10080] (one week)."},
         },
         "required": [
             "risk_per_trade_pct", "regime", "sizing",
@@ -63,11 +69,12 @@ SYSTEM_PROMPT = (
     "You tune the strategy config of a crypto-futures executor from its own resolved-trade "
     "record. You are out of the order path: your proposal is reviewed by a human and clamped "
     "to safe bounds before it can ever take effect, so propose the config you believe maximizes "
-    "expectancy — do not self-censor toward the current values.\n\n"
+    "expectancy.\n\n"
     "Favor regimes/conviction-buckets/coins with positive expectancy (avg_r) and adequate sample "
-    "size; pull risk and size away from cohorts that lose. Make incremental, defensible changes "
-    "grounded in the cohort stats, not large speculative swings. Always answer via submit_config "
-    "with the FULL config."
+    "size; pull risk and size away from cohorts that lose. Let the evidence set the step size: a "
+    "well-sampled cohort justifies a large move, a thin one only a small move. Do not anchor to "
+    "the current values, and do not move beyond what the cohorts support. Always answer via "
+    "submit_config with the FULL config."
 )
 
 

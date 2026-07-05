@@ -32,9 +32,11 @@ class EnrichedContext(BaseModel):
     unrealized_pnl: float
     open_positions: list[dict]
     regime: str | None = None  # code-computed (trend/range); None = unknown, gate skips the check
-    candles: list[dict] | None = None  # compact recent OHLC tail; None when no price history
-    recent_decisions: list[dict]  # what was recently decided/fired (no results yet)
-    recent_outcomes: list[dict]  # resolved trades: what actually won/lost, in R
+    # Compact recent OHLC tail with its interval + ordering labeled — bare bars are
+    # useless to the model without a timeframe. None when no price history.
+    candles: dict | None = None  # {"interval": "15m", "order": "oldest_first", "bars": [...]}
+    recent_decisions: list[dict]  # what was recently decided/fired (no results yet); newest first
+    recent_outcomes: list[dict]  # resolved trades: what actually won/lost, in R; newest first
     followup: dict | None = None  # set on a WAIT re-check: attempts left + minutes to staleness
     tunable: dict
 
@@ -49,9 +51,10 @@ def enrich(
     recent: list[dict],
     outcomes: list[dict] | None = None,
     tunable: TunableConfig,
-    candles: list[dict] | None = None,
+    candles: dict | None = None,
     regime: str | None = None,
     followup: dict | None = None,
+    now: float | None = None,  # for the minutes_ago on recent decisions
 ) -> EnrichedContext:
     return EnrichedContext(
         candidate=candidate,
@@ -72,7 +75,7 @@ def enrich(
             }
             for p in positions
         ],
-        recent_decisions=_summarize_recent(recent),
+        recent_decisions=_summarize_recent(recent, now),
         recent_outcomes=_summarize_outcomes(outcomes or []),
         # Only the *tunable* surface is exposed — never the hard caps or keys.
         tunable={
@@ -99,15 +102,21 @@ def _summarize_outcomes(trades: list[dict]) -> list[dict]:
     ]
 
 
-def _summarize_recent(recent: list[dict]) -> list[dict]:
-    """Compress decision-log rows into a compact what-worked/what-didn't window."""
+def _summarize_recent(recent: list[dict], now: float | None) -> list[dict]:
+    """Compress decision-log rows into a compact what-worked/what-didn't window.
+    Coin and age anchor each row — without them the model can't connect a past
+    decision to a market or judge its recency."""
     out = []
     for row in recent:
         decision = _loads(row.get("decision"))
         fill = _loads(row.get("fill"))
+        context = _loads(row.get("context"))
+        ts = row.get("ts")
         out.append(
             {
                 "candidate": (decision or {}).get("candidate_id", row.get("candidate_id")),
+                "coin": (context or {}).get("coin"),
+                "minutes_ago": round((now - ts) / 60, 1) if now is not None and ts is not None else None,
                 "action": (decision or {}).get("action"),
                 "conviction": (decision or {}).get("conviction"),
                 "fired": bool((fill or {}).get("accepted")) if fill else False,
