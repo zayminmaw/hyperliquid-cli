@@ -15,6 +15,10 @@ from statistics import mean
 
 MIN_COHORT_SAMPLES = 5  # below this a cohort is too thin to learn from
 
+# A `scaled` row is a sentry partial close banked at a profit ladder — profit taken
+# on purpose is a win, not a miss, or every scale-out would depress its cohort.
+_WIN_STATUSES = ("won", "scaled")
+
 
 @dataclass
 class Cohort:
@@ -44,7 +48,7 @@ def cohorts(trades: list[dict], *, min_samples: int = MIN_COHORT_SAMPLES) -> lis
     for key, ts in sorted(groups.items()):
         if len(ts) < min_samples:
             continue
-        wins = sum(1 for t in ts if t["status"] == "won")
+        wins = sum(1 for t in ts if t["status"] in _WIN_STATUSES)
         out.append(Cohort(
             key=key, n=len(ts), wins=wins, win_rate=round(wins / len(ts), 3),
             avg_r=round(mean(t["r_multiple"] for t in ts), 4),
@@ -57,7 +61,7 @@ def summary(trades: list[dict]) -> dict:
     """Portfolio-wide resolved-trade stats."""
     if not trades:
         return {"n": 0, "wins": 0, "win_rate": 0.0, "avg_r": 0.0, "total_realized": 0.0}
-    wins = sum(1 for t in trades if t["status"] == "won")
+    wins = sum(1 for t in trades if t["status"] in _WIN_STATUSES)
     return {
         "n": len(trades),
         "wins": wins,

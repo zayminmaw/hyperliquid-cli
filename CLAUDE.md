@@ -44,6 +44,7 @@ Work proceeds **phase by phase** (PLAN.md §12), each phase ending at a review g
 | 3 — LLM decision             | Enrich, decision prompt, structured output + clamp, `shadow`   | Shadow runs produce sane, fully-logged decisions      |
 | 4 — Self-tuning              | Stats cohorts, config + prompt tuners, propose→approve         | Tuner proposes from logged outcomes; `promote` works  |
 | 5 — Mainnet hardening        | Native exchange SL/TP, mainnet gate, key review, alerting      | Testnet/shadow expectancy clears → tiny mainnet caps  |
+| 6 — Sentry (a→d)             | In-trade manager: trail engine → LLM shadow → gated live → ADD | Per sub-phase, PLAN.md §14                            |
 
 Don't build ahead of the current phase or skip a gate.
 

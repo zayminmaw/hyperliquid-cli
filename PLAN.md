@@ -100,6 +100,7 @@ hl asset     price <coin> | book <coin>                 # -w for live watch
 hl trade     order limit|market|stop-loss|take-profit
              cancel | cancel-all | set-leverage          # Mode A
 hl exec      propose | once | run | shadow | status | report | breaker   # Mode B
+hl sentry    once | run | shadow | status | log                          # Phase 6 in-trade manager
 hl tune      run | diff | promote | history
 hl config    show | set | edit
 ```
@@ -311,6 +312,7 @@ hlcli/
 ├── exchange/       # base protocol, paper book, hyperliquid (testnet+mainnet), marks+cache
 ├── accounts/       # sqlite multi-account store + keystore
 ├── executor/       # intake, enrich, decision (LLM), gate, execute, monitor
+├── sentry/         # in-trade manager: deterministic trail engine, LLM manager + management gate (§14)
 ├── tuner/          # stats cohorts, config_tuner, prompt_tuner, promote
 ├── state/          # sqlite: book, idempotency, high-water mark, decision log
 ├── safety/         # breaker / kill switch / loss limits / mainnet gate
@@ -327,6 +329,10 @@ hlcli/
 | **3 — LLM decision**             | Enrich, decision prompt, structured output + clamp, decision log, `shadow`                     | Shadow runs produce sane, fully-logged decisions on paper/testnet      |
 | **4 — Self-tuning**              | Stats cohorts, config + prompt tuners, propose→approve                                         | Tuner proposes from real logged outcomes; `promote` works; clamps hold |
 | **5 — Mainnet hardening**        | Native exchange SL/TP, mainnet gate + confirmation, graduation checklist, key review, alerting | Testnet/shadow expectancy clears → controlled mainnet at tiny caps     |
+| **6a — Trail engine**            | Deterministic in-trade mechanics: breakeven ratchet, ATR/percent trail, scale-out ladder (§14) | Trades trail + scale out on paper, ratchet-only, restart-safe          |
+| **6b — Sentry shadow**           | LLM manager proposes actions per open position; logged only, measured vs the 6a baseline      | Shadow log shows sane actions; value-add vs baseline measurable        |
+| **6c — Sentry live (↓risk)**     | HOLD/TIGHTEN/REDUCE/CLOSE/EXTEND_TP through the management gate; deferred re-entry cadence    | Gated actions fire on paper/testnet; churn caps hold                   |
+| **6d — Pyramiding (ADD)**        | The one risk-increasing action, hardest gate; testnet until graduation                        | ADDs pass full entry caps; add-risk covered by unrealized P&L          |
 
 ### Testing
 
@@ -355,3 +361,79 @@ The plan makes a default choice on each; flag any you want to change.
    exist / marks move materially? Drives cost and latency.
 6. **Native SL/TP for mainnet** — confirm you want exchange-side trigger orders as
    a hard mainnet prerequisite (strongly recommended).
+
+---
+
+## 14. Sentry — the in-trade manager (Phase 6)
+
+Sentry extends the §1 split into the *life* of a trade: today the executor fires,
+places static SL/TP, and waits for a level to hit. Sentry actively manages what
+happens in between — and owns entry timing for parked WAIT candidates.
+
+**Scope (user-confirmed 2026-07-05):** sentry never originates trades. It watches
+two pools: **deferred WAIT candidates** (enters them through the existing decision
++ entry gate when the market gives the opportunity — same followup semantics,
+sentry's cadence) and **open positions** (manages them). §13 Q1 stays at
+choose-among-supplied.
+
+**Research grounding:** Alpha Arena (real LLMs, real money, on Hyperliquid) showed
+discipline beats prediction — the winner traded <3×/day with strict exits; losers
+overtraded, over-levered, flip-flopped. FinPos showed naive LLMs fail position-aware
+trading without explicit position/exposure representation and a multi-timescale
+view. Practitioner rules (breakeven+buffer at ~+1R, ratchet-only trailing, 50%
+scale-out at +1R, pyramid only from unrealized profit) are deterministic — so they
+are **code, not LLM**. The LLM adds judgment on top: thesis broken → close early,
+regime flip → tighten, confirmed trend → add.
+
+### Mechanics vs judgment
+
+- **6a trail engine (code, always-on once enabled):** per open trade, each pass:
+  breakeven move (SL → entry ± buffer once unrealized ≥ trigger R), trail
+  (ATR-multiple or percent, from candles already fetched), optional scale-out
+  (close a fraction at a ladder R). Invariants enforced in code: **SL only ratchets
+  toward profit, never widens; protection is replaced place-new-then-cancel-old
+  (never naked); dust moves suppressed.** On paper the ledger's `sl` *is* the
+  protection (the resolver closes on it); on live networks the engine also syncs
+  the native triggers. The engine is the measurable baseline for 6b.
+- **LLM manager (6b–6d):** bounded action menu per position — it picks an action,
+  never free-forms an order:
+
+| Action         | Risk | Management-gate conditions (deterministic)                                                                                     |
+| -------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `HOLD`         | =    | default; always valid; non-HOLD requires a rationale                                                                            |
+| `TIGHTEN_STOP` | ↓    | strictly better than current SL (ratchet), min gap from mark; breakeven only at ≥ trigger R                                     |
+| `REDUCE`       | ↓    | pct ∈ {25, 50, 75}; remainder ≥ min size, else it becomes a CLOSE                                                                |
+| `CLOSE`        | ↓    | always allowed                                                                                                                   |
+| `EXTEND_TP`    | ~    | only once SL ≥ breakeven; bounded move per action                                                                                |
+| `ADD`          | ↑    | unrealized ≥ +1R at mark; add ≤ ½ current size; add-risk ≤ unrealized P&L; SL raised in the same action; full entry caps re-run; max adds/position |
+
+### The management gate (first-failure, mirrors §5)
+
+```
+schema-valid LLM output → breaker (tripped ⇒ only ↓risk actions pass)
+  → cooldown + rate limits → action-specific checks (table above)
+  → wire rounding → idempotency (action content-hash) → fire
+```
+
+### Anti-churn (the Alpha Arena lesson — enforced in code, not prompt)
+
+Evaluate on candle close, not continuously; per-position cooldown after any
+action; hard caps on actions/position/day and LLM calls/day; no opposing actions
+inside a window (no ADD within N min of a REDUCE); HOLD is the schema default at
+low temperature; invalid output dropped + tallied, never guessed at (§6 rule).
+
+### Config split (§9 holds)
+
+- **`.env` hard caps:** `SENTRY_MAX_ACTIONS_PER_POSITION_PER_DAY`,
+  `SENTRY_MAX_LLM_CALLS_PER_DAY`, `SENTRY_MIN_ACTION_INTERVAL_MINUTES`,
+  `SENTRY_MAX_ADDS_PER_POSITION`, add-size ratio ceiling.
+- **Tunable surface (clamped):** trail style (atr|percent|off), ATR multiple,
+  breakeven trigger R + buffer, scale-out ladder (R, fraction), cadence minutes.
+
+### Logging & learning
+
+Every evaluation → `sentry_log` (full position context + proposed action + gate
+verdict + fill), same audit/tuner-fuel role as `decision_log`. Shadow (6b) logs
+LLM proposals *next to* what the 6a baseline did, so the LLM's value-add is
+measured before it can act. Graduation before 6c/6d mirrors §7: sentry actions on
+mainnet only after testnet/shadow evidence clears.

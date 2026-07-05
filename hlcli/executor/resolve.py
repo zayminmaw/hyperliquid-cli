@@ -127,18 +127,26 @@ def _classify(trade: dict, mark: float, now: float, tunable: TunableConfig) -> t
     side = Side(trade["side"])
     if side is Side.LONG:
         if mark <= trade["sl"]:
-            return "lost", trade["sl"]
+            return _stop_status(trade, side), trade["sl"]
         if mark >= trade["tp"]:
             return "won", trade["tp"]
     else:
         if mark >= trade["sl"]:
-            return "lost", trade["sl"]
+            return _stop_status(trade, side), trade["sl"]
         if mark <= trade["tp"]:
             return "won", trade["tp"]
 
     if tunable.max_hold_minutes and (now - trade["opened_at"]) / 60.0 > tunable.max_hold_minutes:
         return "expired", mark
     return None
+
+
+def _stop_status(trade: dict, side: Side) -> str:
+    """A stop hit is only a loss while the stop sits on the losing side of entry.
+    Once sentry has ratcheted it past entry, a stop-out banks profit — booking that
+    `lost` would poison the win-rate cohorts the tuner learns from."""
+    profit_side = trade["sl"] > trade["entry"] if side is Side.LONG else trade["sl"] < trade["entry"]
+    return "won" if profit_side else "lost"
 
 
 def _classify_vanished(exchange: Exchange, trade: dict, mark: float) -> tuple[str, float]:
@@ -156,21 +164,24 @@ def _classify_vanished(exchange: Exchange, trade: dict, mark: float) -> tuple[st
     lows, highs = [b.l for b in bars], [b.h for b in bars]
     if side is Side.LONG:
         if lows and min(lows) <= trade["sl"]:
-            return "lost", trade["sl"]
+            return _stop_status(trade, side), trade["sl"]
         if highs and max(highs) >= trade["tp"]:
             return "won", trade["tp"]
     else:
         if highs and max(highs) >= trade["sl"]:
-            return "lost", trade["sl"]
+            return _stop_status(trade, side), trade["sl"]
         if lows and min(lows) <= trade["tp"]:
             return "won", trade["tp"]
     return "closed", mark  # closed externally (manual flatten, liquidation, …)
 
 
 def _pnl(trade: dict, side: Side, exit_price: float) -> tuple[float, float]:
-    """Realized P&L and R-multiple (reward in units of the trade's initial risk)."""
+    """Realized P&L and R-multiple (reward in units of the trade's initial risk).
+
+    Risk anchors to `initial_sl`: once sentry has ratcheted the working `sl` toward
+    profit, |entry − sl| shrinks and would inflate the R the tuner learns from."""
     per_unit = (exit_price - trade["entry"]) if side is Side.LONG else (trade["entry"] - exit_price)
-    risk = abs(trade["entry"] - trade["sl"])
+    risk = abs(trade["entry"] - (trade["initial_sl"] or trade["sl"]))
     realized = round(per_unit * trade["size"], 6)
     r_multiple = round(per_unit / risk, 4) if risk > 0 else 0.0
     return realized, r_multiple

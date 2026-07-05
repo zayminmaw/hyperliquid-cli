@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-02 | Session: ANTHROPIC_API_KEY via .env + masked in `config show`; 241 tests pass; next = operational testnet/paper runs (user supplying key + testnet wallet)
+> Last updated: 2026-07-05 | Session: Sentry planned (PLAN.md §14) + Phase 6a trail engine built; 283 tests pass; next = 6b sentry shadow
 
 ---
 
 ## 🎯 CURRENT TASK
 
-- Task: Post-review hardening ✅ complete
-- Goal: fix every bug/improvement from the 2026-07-02 end-to-end review (NaN clamps, wire rounding, trigger cleanup, position reconciliation, shadow outcomes, account safety, promote lifecycle)
-- Status: done — 235 tests pass, keyless-import invariant re-verified, docs synced
-- Next action: none coding-side. Operational as before: supply agent keys, run testnet/shadow (shadow now genuinely accumulates tuner/graduation outcomes), clear graduation, tiny mainnet caps.
+- Task: "Sentry" — in-trade manager (Phase 6, PLAN.md §14); scope user-confirmed: manages open positions + enters deferred WAITs, never originates
+- Goal: 6a deterministic mechanics ✅ → 6b LLM shadow vs baseline → 6c gated live ↓risk actions → 6d ADD
+- Status: 6a complete (gate passed: paper trail/scale-out verified live, ratchet-only, restart-safe, 283 tests)
+- Next action: 6b — management decision prompt + strict tool, position-context enrich, shadow logging next to the 6a baseline, deferred re-entry on sentry cadence
 - Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: ANTHROPIC_API_KEY now readable from `.env` (shell env wins) via `_LLMEnv` in core/llm.py, passed explicitly to `anthropic.Anthropic(api_key=…)`; kept OFF the Caps object; `hl config show` displays it masked (first4…last4, `…` if ≤8 chars, "not set" if absent)
-- Result: 241 pass (was 235); verified live: set → `sk-a…TAIL`, unset → `not set`
-- File(s) touched: hlcli/core/llm.py, hlcli/cli/commands/config.py, hlcli/tests/test_llm.py (new), .env.example, docs/setup.md
+- Did: built Phase 6a — `TunableConfig.trail` (clamped, default off), `sentry/engine.py` (pure R-anchored rules) + `sentry/apply.py` (idempotent scale-out, live stop place-new-then-cancel-old, shadow orderless), `sentry_log` + `initial_sl`/`scaled_out` migrations, `hl sentry once|run|status|log`, runner integration (`PassSummary.managed`), resolver R/win fixes, 33 new tests
+- Result: 283 pass, keyless; verified end-to-end on paper vs real marks (scale-out @+1R, trail ratchet, churn-guard no-op, dry-run clean); PLAN.md §14 + ACTION-ITEMS + docs synced
+- File(s) touched: hlcli/sentry/* (new), core/config_schema.py, state/store.py, executor/{runner,resolve}.py, tuner/stats.py, cli/{app.py,commands/sentry.py,commands/exec_.py}, tests/test_sentry.py (new), PLAN.md, ACTION-ITEMS.md, CLAUDE.md, docs/{modules,decisions}.md
 
 ---
 
@@ -42,7 +42,8 @@
 | `hlcli/executor/gate.py` | first-failure gate incl. mark sanity; `_size` priced at mark; `infer_side` |
 | `hlcli/executor/{enrich,decision,regime}.py` | context (+resolved outcomes, `followup`) · `decide` + NaN-safe `validate_decision` · ER regime |
 | `hlcli/executor/{intake,execute,runner,resolve,protect}.py` | content-hash batch ids · idempotent fire · `run_once` (ledger-first, shadow book, unmanaged alert) · resolver (vanished-position reconciliation, shadow orderless, trigger cleanup) · protection + `cancel_placed`/`cancel_coin_triggers` |
-| `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts · tuners · promote consumes proposals, audit records content |
+| `hlcli/sentry/{engine,apply}.py` | 6a in-trade manager: pure R-anchored rules (ratchet/trail/scale-out) · apply (idempotent partials, live stop place-new-then-cancel-old, shadow orderless) |
+| `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts (`scaled`=win) · tuners · promote consumes proposals, audit records content |
 | `hlcli/safety/{breaker,alerts,graduation}.py` | kill switch + loss-limit (`persist=` for dry-run) · JSONL alerts · graduation verdict |
 
 ---
@@ -57,8 +58,8 @@
 - [2026-07-02] Ledger-first fills: trades row written on fill BEFORE protection; failed protection ⇒ emergency close + cancel placed triggers + row resolved `aborted` (was: no ledger). Positions the ledger doesn't know raise an edge-triggered `unmanaged_position` alert
 - [2026-07-02] Live resolver reconciles against get_positions(): a vanished position (native trigger on a wick / manual close) books won/lost from candle extremes (SL checked first — pessimistic) else `closed` at mark; every live close cancels the coin's surviving reduce-only triggers
 - [2026-07-02] Shadow books hypothetical trades (`trades.shadow=1`, entry at mark) resolved orderlessly — THIS is the tuner/graduation training data; shadow passes never touch real trades; hypothetical book honors one-per-coin
-- [2026-07-02] Wire rounding is code's job: size FLOORS to szDecimals (never up past a cap), px = 5 sig figs then ≤6−szDecimals decimals; unknown coin passes through (exchange's reject is clearer). Reads use frontendOpenOrders so triggers are visible/cancelable
-- [2026-07-02] promote() consumes proposal files (promotable exactly once) and records what went live; account resolve refuses a wrong-network alias; `account add` = row first, key second; relative HL_CONFIG_PATH anchors to HL_DATA_DIR
+- [2026-07-05] Sentry (PLAN.md §14): deterministic mechanics FIRST (6a trail engine, all rules default off) → 6b LLM shadow judged vs that baseline → 6c gated live ↓risk → 6d ADD last; sentry never originates trades (user-confirmed: manages positions + enters deferred WAITs)
+- [2026-07-05] R anchors to `initial_sl` once the stop ratchets; a profit-side stop-out books `won`; `scaled` partials count as wins; live stop replace = place-new-then-cancel-old (reject ⇒ old level kept everywhere); scale-out idempotent via `sentry:scale:<id>` recorded before the order
 
 ---
 
@@ -70,7 +71,8 @@
 - PassSummary counters are disjoint: `rejected` = gate said no; `failed` = gate-approved but died at the exchange (reject/unfilled/aborted). Don't fold them back together.
 - Executor entry is a MARKET order; ledger + protection size from `OrderResult.filled_size`/`avg_price`. Don't revert to GTC limit entry (review finding H1).
 - test helpers' `caps()` pins `config_path=/nonexistent/...` so prompt/config reads never touch a dev's real `~/.hyperliquid-cli`; tuner tests still pass their own tmp `config_path`.
-- Python 3.12 at `/opt/homebrew/bin/python3.12` (system default is 3.11).
+- Run tests with `.venv/bin/pytest` (bare python3.12 has no pytest). Python 3.12 at `/opt/homebrew/bin/python3.12`.
+- Sentry 6a is inert until the tunable `trail` rules are switched on (all default off); `hl sentry once` tells you when nothing is active.
 - Executor tests inject `run_once(..., decide_fn=...)`; real `decide`/tuners tested via fakes. `exec`/`tune run` need ANTHROPIC_API_KEY.
 - `resolved_trades(limit=N)` = most recent N (newest-closed first) — don't assume oldest-first.
 - FakeLiveExchange (test_protect) models positions/open_orders/canceled; `fail_triggers="tp"` = partial-protection case.

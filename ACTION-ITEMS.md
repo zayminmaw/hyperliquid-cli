@@ -93,3 +93,39 @@ Gate: testnet/shadow expectancy clears → controlled mainnet at tiny caps.
 §13 Q6 = native SL/TP is a hard mainnet prerequisite (user-confirmed). Native triggers scoped to testnet+mainnet so the safety path is exercised before real money (user-confirmed over mainnet-only). Live testnet/mainnet runs + real graduation deferred pending keys (as with Phase 1/3/4).
 
 Pre-mainnet self-review fixes (all applied): H1 executor entry is now MARKET so accepted⇒filled (a resting GTC limit would track a phantom position); runner reconciles open_trade + protection size/entry against the *actual* fill (`OrderResult.filled_size`/`avg_price`), unfilled⇒no trade. M3 live resolver books the real close-fill price, not the idealized level. M4 `fire()` releases the idempotency key on a definitive reject (keeps crash-safety; transport errors still raise→keep key). L5 `halted` alert is edge-triggered (meta `alert_halt_last`), not per-pass. L6 clamp filters `allowed_regimes` to a known vocabulary. L7 gate rejects non-positive equity explicitly. 152 tests pass.
+
+## Phase 6: Sentry — in-trade manager (PLAN.md §14)
+Scope confirmed 2026-07-05: manages open positions + enters deferred WAIT candidates; never originates trades (§13 Q1 unchanged).
+
+### 6a — Deterministic trail engine (no LLM)
+Gate: trades trail + scale out on paper, ratchet-only, restart-safe. ✅ passed
+
+- [x] 6a.1 Tunable surface: `trail` sub-model (style atr|percent|off, atr_multiple, trail_start_r, breakeven_trigger_r, breakeven_buffer_r, scale_out_r, scale_out_fraction, min_move_r) + clamps; all rules default OFF
+- [x] 6a.2 `sentry/engine.py` — pure rule evaluation: breakeven ratchet, ATR(14)/percent trail, one-shot scale-out; SL only moves toward profit, never at/past the mark; dust suppression (`min_move_r`); everything in R vs `initial_sl`
+- [x] 6a.3 State: `sentry_log` table; trades gain `initial_sl` (backfilled) + `scaled_out` (additive migrations); `update_trade_sl` / `split_trade` (partial → resolved `scaled` child row)
+- [x] 6a.4 Apply layer (`sentry/apply.py`): paper scale-out = reduce-only LIMIT at the ladder; live = reduce-only MARKET booking the real fill; live stop sync place-new-then-cancel-old (reject ⇒ old level kept everywhere); idempotent via `sentry:scale:<id>`; shadow rows managed orderlessly. Resolver follow-through: R vs `initial_sl`, profit-side stop-out books `won`, stats count `scaled` as a win
+- [x] 6a.5 `hl sentry once | run | status | log` CLI; `run_once` runs the manager just before resolve (`PassSummary.managed`)
+- [x] 6a.6 Tests (33): ratchet/dust/mark-guard invariants, breakeven + trail math (long/short), ATR, scale-out split + book, crash idempotency, shadow isolation, dry-run, live trigger sync + rejection, resolver interplay, runner integration — 283 total pass, keyless
+
+✅ Phase 6a complete — verified live on paper (real mainnet marks): scale-out banked at the +1R ladder, percent trail ratcheted the stop, second pass a clean no-op (churn guards), dry-run side-effect-free.
+
+### 6b — Sentry shadow (LLM proposes, logs only)
+Gate: shadow log shows sane actions; value-add vs 6a baseline measurable.
+
+- [ ] 6b.1 Management decision prompt + strict tool schema (action menu, HOLD default)
+- [ ] 6b.2 Position context enrich (multi-timescale candles, thesis from decision_log, prior sentry actions)
+- [ ] 6b.3 Shadow logging next to baseline actions; comparison in `sentry status`
+- [ ] 6b.4 Deferred WAIT re-entry on sentry cadence (reuses decide + entry gate + followup semantics, shared attempt counters)
+
+### 6c — Sentry live, risk-reducing only
+Gate: gated actions fire on paper/testnet; churn caps hold.
+
+- [ ] 6c.1 Management gate (first-failure): schema → breaker (↓risk only when tripped) → cooldown/rate caps → action checks → rounding → idempotency
+- [ ] 6c.2 Hard caps in `.env`: actions/position/day, LLM calls/day, min action interval, opposing-action window
+- [ ] 6c.3 HOLD/TIGHTEN_STOP/REDUCE/CLOSE/EXTEND_TP live on paper → testnet
+
+### 6d — Pyramiding (ADD)
+Gate: ADDs pass full entry caps; add-risk covered by unrealized P&L; testnet until graduation.
+
+- [ ] 6d.1 ADD action: ≥+1R, add ≤ ½ size, add-risk ≤ unrealized, SL raised atomically, entry caps re-run, max adds/position
+- [ ] 6d.2 Graduation evidence before mainnet ADD

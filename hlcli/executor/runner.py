@@ -47,6 +47,8 @@ from hlcli.executor.regime import classify, summarize
 from hlcli.executor.resolve import resolve_open_trades
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
+from hlcli.sentry.apply import manage_open_trades
+from hlcli.sentry.engine import active as trail_active
 from hlcli.state.store import DeferredCandidate, StateStore
 
 DecideFn = Callable[..., DecisionResult]
@@ -67,6 +69,7 @@ class PassSummary(BaseModel):
     dropped: int
     deferred: int
     resolved: int
+    managed: int = 0  # sentry 6a actions applied (stops moved + scale-outs)
     note: str
 
 
@@ -87,6 +90,17 @@ def run_once(
     protected = requires_native_protection(exchange.network)
 
     marks = exchange.get_marks()
+    # Sentry 6a: ratchet stops / bank scale-outs BEFORE resolving, so this pass's
+    # close-out check runs against the tightened levels. The engine guarantees a
+    # moved stop sits strictly on the losing side of the current mark, so a tighten
+    # can never trigger its own close in the same pass. All-off config ⇒ no-op.
+    managed = 0
+    if not dry_run and trail_active(tunable.trail):
+        m = manage_open_trades(exchange, state, tunable, now, marks=marks,
+                               native_protected=protected, shadow_only=not fire_enabled,
+                               alerter=alerter)
+        managed = m.stops_moved + m.scaled_out
+
     # Monitor step: close any open trade whose SL/TP/expiry has triggered, recording
     # its outcome. A shadow pass resolves only its hypothetical trades (orderlessly —
     # that's what turns shadow decisions into tuner/graduation outcomes); dry-run
@@ -147,7 +161,7 @@ def run_once(
     return PassSummary(
         network=exchange.network, seen=len(batch), rechecked=len(due),
         approved=t.approved, fired=t.fired, rejected=t.rejected, failed=t.failed,
-        dropped=t.dropped, deferred=t.deferred, resolved=resolved,
+        dropped=t.dropped, deferred=t.deferred, resolved=resolved, managed=managed,
         note=_note(dry_run=dry_run, fire_enabled=fire_enabled),
     )
 

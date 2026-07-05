@@ -71,9 +71,9 @@ Command surface: `account add|ls|set-default|remove|positions|orders|balances|po
 | `gate.py` | The deterministic risk gate (first-failure wins, incl. mark sanity — mark present, inside sl/tp, R:R at mark ≥ floor) + fixed-fractional sizing **at the mark** + side inference. | `evaluate()`, `GateContext` (`mark=`), `GateOutcome`, `infer_side()` |
 | `execute.py` | `fire()` records the idempotency key **before** placing → a crash skips (missed trade), never double-fires. Releases the key on a clean reject. | `fire()` |
 | `protect.py` | Native exchange-side SL/TP reduce-only triggers; required on testnet/mainnet. Failed protection cleans up after itself (`cancel_placed`), and `cancel_coin_triggers` removes the surviving half of a pair after a close. | `requires_native_protection()`, `protective_orders()`, `place_protection()`, `emergency_close()`, `cancel_placed()`, `cancel_coin_triggers()`, `ProtectionResult` |
-| `resolve.py` | The monitor step: close open trades on SL/TP/expiry → the `trades` ledger (won/lost/expired/closed, realized, R-multiple). On live networks it also reconciles **vanished** positions (native trigger fired on a wick, or a manual close — outcome inferred from candle extremes, else `closed` at mark), cancels surviving triggers after a close, and resolves shadow trades orderlessly. | `resolve_open_trades(…, shadow_only=)` |
+| `resolve.py` | The monitor step: close open trades on SL/TP/expiry → the `trades` ledger (won/lost/expired/closed, realized, R-multiple — R against `initial_sl`, and a stop-out on the profit side of entry books `won`, since sentry may have ratcheted the stop past entry). On live networks it also reconciles **vanished** positions (native trigger fired on a wick, or a manual close — outcome inferred from candle extremes, else `closed` at mark), cancels surviving triggers after a close, and resolves shadow trades orderlessly. | `resolve_open_trades(…, shadow_only=)` |
 | `monitor.py` | Read-only position-health view. | `position_health()` |
-| `runner.py` | `run_once()` — the full pass orchestrator (resolve → re-check due WAIT deferrals → pull → enrich(+candles/regime/outcomes) → decide (skipped when the coin has no mark — the gate would reject anyway, so the paid call isn't spent) → defer-if-WAIT / gate → fire → open ledger row (**before** protection, so a crash never leaves an untracked position; abort resolves it `aborted`) → protect → log → advance HWM). An `act+wait` decision is parked in the `deferred` table and re-checked with fresh data (within freshness, up to `HL_FOLLOWUP_MAX_ATTEMPTS`, labeled `followup`); re-checks freeze while the breaker is tripped. Shadow books hypothetical trades; unmanaged exchange positions raise an edge-triggered alert. Honors `dry_run` (fully side-effect-free), `fire_enabled` (shadow), injected `decide_fn`, and an `Alerter`. | `run_once()`, `PassSummary` (`seen/rechecked/approved/fired/rejected/failed/dropped/deferred/resolved`) |
+| `runner.py` | `run_once()` — the full pass orchestrator (resolve → re-check due WAIT deferrals → pull → enrich(+candles/regime/outcomes) → decide (skipped when the coin has no mark — the gate would reject anyway, so the paid call isn't spent) → defer-if-WAIT / gate → fire → open ledger row (**before** protection, so a crash never leaves an untracked position; abort resolves it `aborted`) → protect → log → advance HWM). An `act+wait` decision is parked in the `deferred` table and re-checked with fresh data (within freshness, up to `HL_FOLLOWUP_MAX_ATTEMPTS`, labeled `followup`); re-checks freeze while the breaker is tripped. Shadow books hypothetical trades; unmanaged exchange positions raise an edge-triggered alert. Honors `dry_run` (fully side-effect-free), `fire_enabled` (shadow), injected `decide_fn`, and an `Alerter`. | `run_once()`, `PassSummary` (`seen/rechecked/approved/fired/rejected/failed/dropped/deferred/resolved/managed`) — `managed` = sentry 6a actions, run just before resolve |
 
 ---
 
@@ -81,14 +81,17 @@ Command surface: `account add|ls|set-default|remove|positions|orders|balances|po
 
 `store.py` — one DB per network (`state-<network>.db`). Holds: the intake stream +
 high-water mark, idempotency keys, the decision log, the `trades` ledger (with a
-`shadow` flag for hypothetical trades; additive column migrations run on open), the
-`deferred` table (WAIT candidates parked for re-check), the paper book, the breaker
-flag, and a `meta` key/value table. `resolved_trades(limit=N)` returns the most
-recent N (newest-closed first).
+`shadow` flag for hypothetical trades, `initial_sl` anchoring R math once sentry
+ratchets the working `sl`, and a one-shot `scaled_out` flag; additive column
+migrations run on open), the `sentry_log` management audit trail, the `deferred`
+table (WAIT candidates parked for re-check), the paper book, the breaker flag, and
+a `meta` key/value table. `resolved_trades(limit=N)` returns the most recent N
+(newest-closed first).
 
 Key surface (`StateStore`): `enqueue` · `pull_new` · `get_hwm`/`advance_hwm` ·
 `set_status` · `already_fired`/`record_fire`/`release_fire` · `log_decision`/`recent_decisions` ·
 `open_trade`/`open_trades`/`resolve_trade`/`resolved_trades` ·
+`update_trade_sl`/`split_trade` · `log_sentry`/`recent_sentry` ·
 `defer_candidate`/`due_deferred`/`drop_deferred`/`deferred_count` (with `DeferredCandidate`) ·
 `paper_positions`/`upsert_paper_position`/`delete_paper_position`/`paper_realized`/`add_paper_realized` ·
 `breaker_tripped`/`set_breaker` · `meta_get`/`meta_set`. Constructed via `open_state(caps, network)`.
@@ -107,18 +110,32 @@ The HWM + idempotency keys are what make a restart never double-fire.
 
 ---
 
+## `sentry/` — the in-trade manager (Phase 6a: deterministic mechanics)
+
+| File | What it does | Key surface |
+|------|--------------|-------------|
+| `engine.py` | Pure trade-management rules, measured in R against `initial_sl`: breakeven ratchet (`breakeven_trigger_r`/`_buffer_r`), ATR/percent trail (activates at `trail_start_r`), one-shot scale-out ladder. Invariants: the stop only ratchets toward profit, never sits at/past the mark, dust moves (`min_move_r`) are suppressed, missing candle data never moves a stop. | `plan()`, `active()`, `atr()`, `ScaleOut`, `MoveStop` |
+| `apply.py` | Fires the plan: paper scale-out = reduce-only LIMIT at the ladder level (the book realizes it exactly), live = reduce-only MARKET booking the real fill; a live stop moves **place-new-then-cancel-old** (never naked; reject ⇒ old level kept on both exchange and ledger); scale-outs are idempotent (`sentry:scale:<id>` key recorded before the order, like `fire`). Shadow rows are managed identically but orderlessly; a shadow pass never touches real trades. Every action → `sentry_log`. | `manage_open_trades()`, `ManageSummary` |
+
+Config lives on the tunable surface (`TunableConfig.trail`, clamped; all rules
+default **off**, so an unconfigured install behaves exactly as before). `run_once`
+runs the manager just before resolve; `hl sentry once|run|status|log` runs it
+standalone. LLM judgment (Phases 6b–6d) is not built yet — see PLAN.md §14.
+
+---
+
 ## `tuner/` — self-tuning (out-of-path, propose→approve)
 
 | File | What it does | Key surface |
 |------|--------------|-------------|
-| `stats.py` | Resolved-trade cohorts (coin × side × conviction-bucket), win-rate + avg-R; sample-gated (`MIN_COHORT_SAMPLES=5`). | `cohorts()`, `summary()`, `conviction_bucket()`, `Cohort` |
+| `stats.py` | Resolved-trade cohorts (coin × side × conviction-bucket), win-rate + avg-R; sample-gated (`MIN_COHORT_SAMPLES=5`). A `scaled` row (sentry partial banked at a profit ladder) counts as a win. | `cohorts()`, `summary()`, `conviction_bucket()`, `Cohort` |
 | `config_tuner.py` | Propose tunable-surface edits (`claude-opus-4-8`, forced strict `submit_config`; every field description states its units + clamp bounds — strict mode can't encode numeric ranges, so descriptions are the model's only channel for them); clamped on propose. No eligible cohort ⇒ model not called. | `propose_config()`, `ConfigProposal` |
 | `prompt_tuner.py` | Refine the decision prompt from decisions-vs-outcomes (`claude-opus-4-8`, text). Pairs include the decision **rationale** (which reasoning won/lost is the point of tuning a prompt); the current prompt goes to the model in a tag, not JSON-escaped; a fenced output is stripped before it can reach `promote`. | `propose_prompt()`, `PromptProposal` |
 | `promote.py` | proposed → active (config re-clamped); promotion **consumes** the proposal file (promotable exactly once) and the `promotions.jsonl` audit records what went live (full config / prompt hash+size) + `diff`/`history`. Artifacts live beside `config_path`. | `paths()`, `write_proposed_config/prompt()`, `promote()`, `history()`, `diff()`, `TunerPaths` |
 
 ---
 
-## `tests/` — 235 passing, keyless
+## `tests/` — 283 passing, keyless
 
 Highest-risk code first: gate/sizing, the LLM-output validator/clamp, paper
 exchange + monitor, intake idempotency + HWM, config-schema clamping, the mainnet

@@ -25,6 +25,7 @@ _RISK_PCT_MAX = 5.0
 _MAX_CANDIDATES_CEILING = 50
 _MAX_HOLD_CEILING = 10_080  # one week in minutes; an upper sanity bound on auto-expiry
 _KNOWN_REGIMES = ("trend", "range")  # the gate's vocabulary; a tuner can't invent regimes
+_TRAIL_STYLES = ("off", "atr", "percent")  # sentry trail methods; unknown style ⇒ default (off)
 
 
 class RegimeGate(BaseModel):
@@ -43,6 +44,25 @@ class ConvictionSizing(BaseModel):
     ceil_fraction: float = 1.0
 
 
+class TrailConfig(BaseModel):
+    """Sentry 6a — deterministic in-trade management rules (PLAN.md §14).
+
+    Distances are in R (the trade's initial risk, `|entry − initial_sl|`), so the
+    rules stay coherent after the stop has already been ratcheted. Everything
+    defaults OFF: an unconfigured install manages trades exactly as before.
+    """
+
+    style: str = "off"                # off | atr | percent — trailing-stop method
+    atr_multiple: float = 2.0         # atr style: trail distance = multiple × ATR(14)
+    trail_percent: float = 1.0        # percent style: distance = this % of the mark
+    trail_start_r: float = 1.0        # trailing activates once unrealized ≥ this many R
+    breakeven_trigger_r: float = 0.0  # move SL to entry ± buffer at this R; 0 disables
+    breakeven_buffer_r: float = 0.05  # buffer past entry, in R
+    scale_out_r: float = 0.0          # bank a fraction of the position at this R; 0 disables
+    scale_out_fraction: float = 0.5   # fraction closed by the one-shot scale-out
+    min_move_r: float = 0.1           # suppress SL moves smaller than this (churn guard)
+
+
 class TunableConfig(BaseModel):
     risk_per_trade_pct: float = 0.5
     regime: RegimeGate = Field(default_factory=RegimeGate)
@@ -50,6 +70,7 @@ class TunableConfig(BaseModel):
     max_candidates_per_pass: int = 5
     decision_temperature: float = 0.2  # low temp for the hot decision loop
     max_hold_minutes: int = 0  # auto-expire an open trade after this long; 0 disables
+    trail: TrailConfig = Field(default_factory=TrailConfig)
 
 
 class ConfigError(RuntimeError):
@@ -78,6 +99,22 @@ def clamp(cfg: TunableConfig) -> TunableConfig:
 
     regimes = tuple(r for r in cfg.regime.allowed_regimes if r in _KNOWN_REGIMES) or _KNOWN_REGIMES
 
+    t = cfg.trail
+    dt = _DEFAULTS.trail
+    trail = t.model_copy(
+        update={
+            "style": t.style if t.style in _TRAIL_STYLES else dt.style,
+            "atr_multiple": _bound(t.atr_multiple, 0.5, 10.0, dt.atr_multiple),
+            "trail_percent": _bound(t.trail_percent, 0.1, 20.0, dt.trail_percent),
+            "trail_start_r": _bound(t.trail_start_r, 0.0, 10.0, dt.trail_start_r),
+            "breakeven_trigger_r": _bound(t.breakeven_trigger_r, 0.0, 10.0, dt.breakeven_trigger_r),
+            "breakeven_buffer_r": _bound(t.breakeven_buffer_r, 0.0, 0.9, dt.breakeven_buffer_r),
+            "scale_out_r": _bound(t.scale_out_r, 0.0, 10.0, dt.scale_out_r),
+            "scale_out_fraction": _bound(t.scale_out_fraction, 0.1, 0.9, dt.scale_out_fraction),
+            "min_move_r": _bound(t.min_move_r, 0.0, 2.0, dt.min_move_r),
+        }
+    )
+
     return cfg.model_copy(
         update={
             "risk_per_trade_pct": _bound(cfg.risk_per_trade_pct, 0.0, _RISK_PCT_MAX, _DEFAULTS.risk_per_trade_pct),
@@ -87,6 +124,7 @@ def clamp(cfg: TunableConfig) -> TunableConfig:
             "decision_temperature": _bound(cfg.decision_temperature, 0.0, 1.0, _DEFAULTS.decision_temperature),
             "max_hold_minutes": int(_bound(cfg.max_hold_minutes, 0, _MAX_HOLD_CEILING, _DEFAULTS.max_hold_minutes)),
             "regime": cfg.regime.model_copy(update={"allowed_regimes": regimes}),
+            "trail": trail,
             "sizing": s.model_copy(
                 update={
                     "min_conviction": _bound(s.min_conviction, 0.0, 1.0, d.min_conviction),

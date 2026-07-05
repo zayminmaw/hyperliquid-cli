@@ -117,7 +117,7 @@ def run(ctx: typer.Context, interval: float = typer.Option(5.0, "--interval", he
                 s = run_once(exchange, state, caps, load_tunable(), dry_run=g.dry_run, alerter=alerter)
                 failures = 0
                 note(f"[dim]{time.strftime('%H:%M:%S')}[/dim] seen={s.seen} fired={s.fired} "
-                     f"deferred={s.deferred} rechecked={s.rechecked} resolved={s.resolved} "
+                     f"deferred={s.deferred} rechecked={s.rechecked} resolved={s.resolved} managed={s.managed} "
                      f"rejected={s.rejected} failed={s.failed} dropped={s.dropped}")
             except Exception as exc:  # keep the loop alive across transient LLM/network faults
                 failures += 1
