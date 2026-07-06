@@ -5,11 +5,16 @@ management verdict is an *input*, never a bypass. The gate owns everything the
 prompt merely asks for — the ratchet direction, the churn caps, the
 breakeven-before-extend rule — so a bad verdict is rejected here, not trusted.
 
-Risk can only go down or stay: tighten/reduce/close are the permitted risk
-direction; extend_tp is the one "let it run" action and carries the strictest
-conditions (already protected at breakeven, bounded to one initial-R per move,
-and never inside the opposing window of a recent bank). ADD does not exist until
-Phase 6d.
+Risk can only go down or stay — with one earned exception. tighten/reduce/close
+are the permitted risk direction; extend_tp is the "let it run" action (already
+protected at breakeven, bounded to one initial-R per move, never inside the
+opposing window of a recent bank); and ADD (6d) is the lone risk-increasing
+action, admitted only under the full pyramid discipline: the position is a
+winner at/above `sentry_add_min_r`, the stop rises in the same action, the add's
+entire risk is covered by unrealized profit, each add is at most half the
+current size, the entry-path notional/leverage caps are re-run on the enlarged
+position, and a lifetime per-coin add budget applies. The model nominates; the
+code sizes.
 """
 
 from __future__ import annotations
@@ -39,7 +44,16 @@ class MoveTP:
     new_tp: float
 
 
-Plan = MoveStop | ScaleOut | CloseAll | MoveTP
+@dataclass(frozen=True)
+class AddTo:
+    """Pyramid: buy/sell `size` more at market, with the stop raised to `new_stop`
+    for the whole enlarged position. Size was computed by the gate, never the model."""
+
+    size: float
+    new_stop: float
+
+
+Plan = MoveStop | ScaleOut | CloseAll | MoveTP | AddTo
 
 
 @dataclass
@@ -57,6 +71,9 @@ class ManageGateContext:
     actions_today: int             # applied managed actions on this trade, rolling 24h
     last_bank_ts: float | None     # most recent reduce/scale-out (the extend↔bank window)
     last_extend_ts: float | None   # most recent extend_tp (the bank↔extend window)
+    equity: float = 0.0            # for the ADD leverage re-check
+    coin_adds: int = 0             # lifetime managed_add count for this coin (ADD budget)
+    coin_size: float = 0.0         # the coin's TOTAL open size (an add creates sibling rows)
 
 
 @dataclass
@@ -71,7 +88,7 @@ def evaluate_management(decision: ManagementDecision, trade: dict, ctx: ManageGa
         return ManageOutcome(approved=True, reason="hold")
 
     halted = ctx.breaker_tripped or ctx.daily_loss_hit
-    if halted and decision.action is ManagementAction.EXTEND_TP:
+    if halted and decision.action in (ManagementAction.EXTEND_TP, ManagementAction.ADD):
         return ManageOutcome(False, "halted: risk may only go down")
     if ctx.actions_today >= ctx.caps.sentry_max_actions_per_position_per_day:
         return ManageOutcome(False, "per-position action budget exhausted")
@@ -95,6 +112,8 @@ def evaluate_management(decision: ManagementDecision, trade: dict, ctx: ManageGa
         return _check_reduce(decision.reduce_pct, trade, ctx)
     if decision.action is ManagementAction.CLOSE:
         return ManageOutcome(True, plan=CloseAll(level=ctx.mark))
+    if decision.action is ManagementAction.ADD:
+        return _check_add(decision.new_stop, trade, side, risk, ctx)
     return _check_extend(decision.new_tp, trade, side, risk)
 
 
@@ -121,6 +140,43 @@ def _check_reduce(pct: float, trade: dict, ctx: ManageGateContext) -> ManageOutc
     favorable = (ctx.mark - trade["entry"]) if Side(trade["side"]) is Side.LONG else (trade["entry"] - ctx.mark)
     r_now = round(favorable / risk, 4) if risk > 0 else 0.0
     return ManageOutcome(True, plan=ScaleOut(size=close_size, level=ctx.mark, r=r_now))
+
+
+def _check_add(new_stop: float, trade: dict, side: Side, risk: float,
+               ctx: ManageGateContext) -> ManageOutcome:
+    """The full pyramid discipline. The model nominated an add + a raised stop; the
+    size comes out of these checks, never out of the verdict."""
+    if trade["coin"] not in ctx.caps.coins:
+        return ManageOutcome(False, "coin no longer allowed")
+    if ctx.coin_adds >= ctx.caps.sentry_max_adds_per_position:
+        return ManageOutcome(False, "per-position add budget exhausted")
+
+    favorable = (ctx.mark - trade["entry"]) if side is Side.LONG else (trade["entry"] - ctx.mark)
+    if favorable / risk < ctx.caps.sentry_add_min_r:
+        return ManageOutcome(False, f"adds only to winners at ≥ {ctx.caps.sentry_add_min_r}R")
+
+    raised = (new_stop - trade["sl"]) if side is Side.LONG else (trade["sl"] - new_stop)
+    if raised <= 0:
+        return ManageOutcome(False, "an add must raise the stop with it")
+    if (new_stop >= ctx.mark) if side is Side.LONG else (new_stop <= ctx.mark):
+        return ManageOutcome(False, "raised stop at/past the mark would fire instantly")
+
+    # Safe-pyramid sizing: the add's whole risk (entered at the mark, stopped at the
+    # raised stop) must be covered by THIS row's unrealized profit (attribution-clean
+    # and conservative when a prior add created sibling rows), each add is at most
+    # half the coin's current size, and the enlarged position re-clears the entry
+    # path's notional + leverage caps against the coin's TOTAL size.
+    add_risk_per_unit = abs(ctx.mark - new_stop)
+    held = max(ctx.coin_size, trade["size"])
+    unrealized = favorable * trade["size"]
+    by_profit = unrealized / add_risk_per_unit
+    by_half = 0.5 * held
+    by_notional = ctx.caps.max_notional_per_trade / ctx.mark - held
+    by_leverage = (ctx.equity * ctx.caps.max_leverage) / ctx.mark - held
+    size = min(by_profit, by_half, by_notional, by_leverage)
+    if size <= 0:
+        return ManageOutcome(False, "no room to add inside the caps")
+    return ManageOutcome(True, plan=AddTo(size=round(size, 10), new_stop=new_stop))
 
 
 def _check_extend(new_tp: float, trade: dict, side: Side, risk: float) -> ManageOutcome:

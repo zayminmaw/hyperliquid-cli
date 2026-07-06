@@ -68,6 +68,9 @@ class Caps(BaseSettings):
     sentry_max_actions_per_position_per_day: int = 4
     sentry_max_llm_calls_per_day: int = 200           # backstop across all positions
     sentry_opposing_window_minutes: float = 120.0     # no extend_tp ↔ reduce flip-flops inside this
+    # ADD (6d) — the one risk-increasing action; pyramid rules are hard policy:
+    sentry_add_min_r: float = 1.0            # adds only to winners at/above this unrealized R
+    sentry_max_adds_per_position: int = 2    # lifetime cap per coin position, not per day
 
     # --- graduation checklist (mainnet readiness; risk policy, off-limits to the tuner) ---
     graduation_min_trades: int = 20

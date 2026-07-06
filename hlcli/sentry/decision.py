@@ -5,9 +5,10 @@ position (is the thesis intact? tighten, bank, close, or leave it alone?) from a
 bounded action menu; deterministic code owns every number that reaches the
 exchange. Output that fails validation is dropped and tallied, never guessed at.
 
-In 6b this only ever runs in shadow — proposals are logged next to what the 6a
-rule baseline did, so the LLM's value-add is measured before it may act (6c).
-ADD (the one risk-increasing action) is deliberately absent until 6d.
+Runs in shadow (6b — proposals logged next to the 6a rule baseline) and live
+(6c/6d — through the management gate). ADD is the one risk-increasing action
+(6d): the model may only *nominate* it with a raised stop; the gate enforces
+every pyramid rule and the code computes the size.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ class ManagementAction(StrEnum):
     REDUCE = "reduce"
     CLOSE = "close"
     EXTEND_TP = "extend_tp"
+    ADD = "add"  # 6d — the one risk-increasing action; the code sizes it, never the model
 
 
 _REDUCE_STEPS = (25.0, 50.0, 75.0)
@@ -46,8 +48,8 @@ MANAGEMENT_TOOL = {
         "properties": {
             "rationale": {"type": "string", "description": "2-4 sentences, reasoned BEFORE the verdict: is the original thesis still intact at the current mark, has the regime or structure shifted since entry, and why the action below follows. Required for any action other than hold."},
             "confidence": {"type": "number", "description": "How clearly the evidence supports this action, 0.0 to 1.0."},
-            "action": {"type": "string", "enum": ["hold", "tighten_stop", "reduce", "close", "extend_tp"], "description": "hold = leave the position exactly as it is (the default); tighten_stop = move the stop toward profit; reduce = bank part of the position; close = exit fully at market; extend_tp = move the take-profit further out."},
-            "new_stop": {"type": "number", "description": "For tighten_stop: the new stop price — it must protect MORE than the current stop (the code rejects anything wider). 0 for other actions."},
+            "action": {"type": "string", "enum": ["hold", "tighten_stop", "reduce", "close", "extend_tp", "add"], "description": "hold = leave the position exactly as it is (the default); tighten_stop = move the stop toward profit; reduce = bank part of the position; close = exit fully at market; extend_tp = move the take-profit further out; add = pyramid into a clear winner (rare — the code sizes the add and enforces every pyramid rule)."},
+            "new_stop": {"type": "number", "description": "For tighten_stop: the new stop price — it must protect MORE than the current stop (the code rejects anything wider). For add: the RAISED stop that will protect the whole enlarged position — an add is rejected unless the stop comes up with it. 0 for other actions."},
             "reduce_pct": {"type": "number", "enum": [0, 25, 50, 75], "description": "For reduce: the percentage of the position to close. 0 for other actions."},
             "new_tp": {"type": "number", "description": "For extend_tp: the new take-profit price, further from entry than the current one. 0 for other actions."},
         },
@@ -78,6 +80,12 @@ SYSTEM_PROMPT = (
     "add size, and never move a target closer to force a win — risk only ever goes down or stays. "
     "Every number you give is validated and clamped by deterministic code before anything could "
     "reach an exchange.\n\n"
+    "The one exception to risk-only-down is add: pyramiding into a position that is clearly "
+    "working — trending decisively in your favor with the thesis strengthening, not merely green. "
+    "Adds are rare and earn their place: the code only permits one when the position is at least "
+    "+1R, the stop is raised in the same action (give a new_stop that protects the whole enlarged "
+    "position), and the add's entire risk is covered by unrealized profit. You never choose the "
+    "add's size — the code computes it and caps it. When in doubt, hold or tighten instead.\n\n"
     "State your rationale first — thesis intact or broken, what changed since entry — then the "
     "verdict, and always answer by calling the submit_management tool."
 )
@@ -133,8 +141,8 @@ def validate_management(payload: object, trade_id: int) -> ManagementDecision | 
         return None
 
     new_stop = reduce_pct = new_tp = None
-    if action is ManagementAction.TIGHTEN_STOP:
-        new_stop = _positive_price(payload.get("new_stop"))
+    if action in (ManagementAction.TIGHTEN_STOP, ManagementAction.ADD):
+        new_stop = _positive_price(payload.get("new_stop"))  # an add must raise the stop with it
         if new_stop is None:
             return None
     elif action is ManagementAction.REDUCE:

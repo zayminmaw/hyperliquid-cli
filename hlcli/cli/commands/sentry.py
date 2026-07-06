@@ -29,7 +29,7 @@ from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.sentry.apply import manage_open_trades
-from hlcli.sentry.live import manage_live
+from hlcli.sentry.live import graduation_for_management, manage_live
 from hlcli.sentry.shadow import shadow_pass
 from hlcli.state.store import StateStore, open_state
 
@@ -86,10 +86,10 @@ def shadow(ctx: typer.Context) -> None:
 
 @app.command("manage")
 def manage(ctx: typer.Context) -> None:
-    """6c: one LIVE management pass — LLM verdicts through the management gate.
-    Risk-reducing menu only; paper/testnet only until graduation (6d)."""
+    """One LIVE management pass — LLM verdicts through the management gate
+    (tighten/reduce/close/extend_tp, plus gated ADD). Mainnet requires graduation."""
     g = state_of(ctx)
-    _refuse_mainnet(g)
+    _check_mainnet_graduation(g)
     exchange, state, caps, tunable = _env(g, for_write=True)
     s = manage_live(exchange, state, caps, tunable,
                     native_protected=requires_native_protection(g.network),
@@ -100,11 +100,19 @@ def manage(ctx: typer.Context) -> None:
          as_json=g.json_out, title="sentry manage")
 
 
-def _refuse_mainnet(g: GlobalState) -> None:
-    if g.network is Network.MAINNET:
+def _check_mainnet_graduation(g: GlobalState) -> None:
+    """Mainnet management must be EARNED on the testnet book (§14): enough resolved
+    trades, over enough days, with positive expectancy — the same graduation that
+    gates the executor's first real order."""
+    if g.network is not Network.MAINNET:
+        return
+    verdict = graduation_for_management(get_caps())
+    if not verdict["ready"]:
+        failed = ", ".join(k for k, ok in verdict["checks"].items() if not ok)
         raise typer.BadParameter(
-            "sentry live management is paper/testnet only in Phase 6c "
-            "(mainnet management arrives with graduation in 6d)")
+            f"sentry management on mainnet requires graduation on the testnet book — "
+            f"failing: {failed} (n={verdict['n']}, avg_r={verdict['avg_r']}, "
+            f"span_days={verdict['span_days']})")
 
 
 @app.command("run")
@@ -120,7 +128,7 @@ def run(
         raise typer.BadParameter("--shadow and --manage are exclusive: manage already logs "
                                  "every proposal, so shadowing on top doubles the LLM spend")
     if with_manage:
-        _refuse_mainnet(g)
+        _check_mainnet_graduation(g)
     exchange, state, caps, _ = _env(g, for_write=True)
     alerter = _alerter(caps, g.network)
     mode = " (+shadow)" if with_shadow else " (+manage)" if with_manage else ""

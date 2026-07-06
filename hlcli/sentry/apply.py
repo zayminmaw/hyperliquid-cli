@@ -19,7 +19,7 @@ import httpx
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Candle, Order, OrderType, Side
 from hlcli.exchange.base import Exchange
-from hlcli.executor.protect import cancel_coin_triggers
+from hlcli.executor.protect import cancel_coin_triggers, cancel_placed
 from hlcli.safety.alerts import Alerter
 from hlcli.sentry.engine import MoveStop, ScaleOut, active, plan
 from hlcli.state.store import StateStore
@@ -33,6 +33,7 @@ class ManageSummary:
     scaled_out: int = 0
     closed: int = 0     # 6c judgment closes
     tps_moved: int = 0  # 6c target extensions
+    added: int = 0      # 6d pyramids
     failed: int = 0
     actions: list[dict] = field(default_factory=list)  # what happened (or would, in dry-run)
 
@@ -124,13 +125,14 @@ def apply_scale_out(exchange: Exchange, state: StateStore, trade: dict, action: 
 def apply_move_stop(exchange: Exchange, state: StateStore, trade: dict, action: MoveStop,
                     now: float, *, native_protected: bool, summary: ManageSummary,
                     alerter: Alerter | None, log_action: str = "move_stop",
-                    extra: dict | None = None) -> None:
+                    extra: dict | None = None) -> bool:
+    """Returns True when the stop actually moved — `apply_add` aborts on False."""
     if native_protected and not trade["shadow"]:
         if not _sync_native_stop(exchange, trade, action.new_sl):
             summary.failed += 1
             _emit(alerter, "sentry_failed", coin=trade["coin"], action=log_action,
                   reason="new trigger rejected; old stop kept")
-            return
+            return False
 
     old_sl = trade["sl"]
     state.update_trade_sl(trade["id"], action.new_sl)
@@ -140,6 +142,7 @@ def apply_move_stop(exchange: Exchange, state: StateStore, trade: dict, action: 
     state.log_sentry(now, trade["id"], trade["coin"], log_action, detail)
     summary.actions.append({"trade_id": trade["id"], "coin": trade["coin"],
                             "action": log_action, **detail})
+    return True
 
 
 def apply_close(exchange: Exchange, state: StateStore, trade: dict, level: float,
@@ -210,6 +213,81 @@ def apply_move_tp(exchange: Exchange, state: StateStore, trade: dict, new_tp: fl
     state.log_sentry(now, trade["id"], trade["coin"], log_action, detail)
     summary.actions.append({"trade_id": trade["id"], "coin": trade["coin"],
                             "action": log_action, **detail})
+
+
+def apply_add(exchange: Exchange, state: StateStore, trade: dict, size: float, new_stop: float,
+              mark: float, now: float, *, native_protected: bool, summary: ManageSummary,
+              alerter: Alerter | None, conviction: float = 0.0, regime: str | None = None,
+              log_action: str = "managed_add", extra: dict | None = None) -> None:
+    """Pyramid (6d): raise the whole position's stop FIRST — no new size before the
+    old risk shrinks — then fire the add, ledger the new slice as its own trades row
+    (entry at the fill, initial_sl at the raised stop, so its R math is honest), and
+    on a live network protect the slice with its own reduce-only pair. A slice whose
+    protection fails is emergency-closed and booked `aborted`, exactly like a failed
+    entry. The idempotency key derives from the coin's lifetime add ordinal, so a
+    crash between order and ledger row cannot double-add."""
+    side = Side(trade["side"])
+    if not apply_move_stop(exchange, state, trade, MoveStop(new_sl=new_stop, reason="add"), now,
+                           native_protected=native_protected, summary=summary, alerter=alerter):
+        return  # stop refused to move ⇒ there is no add
+
+    ordinal = state.sentry_count_since(0.0, (log_action,), coin=trade["coin"])
+    key = f"sentry:add:{trade['coin']}:{ordinal}"
+    if state.already_fired(key):
+        return
+    state.record_fire(key, None, now)
+    result = exchange.place_order(Order(
+        coin=trade["coin"], side=side, order_type=OrderType.MARKET, size=size,
+    ))
+    filled = result.filled_size if result.filled_size is not None else size
+    if not result.accepted or filled <= 0:
+        state.release_fire(key)
+        summary.failed += 1
+        _emit(alerter, "sentry_failed", coin=trade["coin"], action=log_action,
+              reason=result.message or result.status)
+        return
+    entry = result.avg_price if result.avg_price is not None else mark
+
+    child_id = state.open_trade(trade["candidate_id"], trade["coin"], side, entry, new_stop,
+                                trade["tp"], filled, conviction, regime, now)
+    if native_protected and not _protect_slice(exchange, state, trade, child_id, entry,
+                                               new_stop, filled, now, summary, alerter):
+        return
+
+    summary.added += 1
+    detail = {"size": filled, "entry": entry, "new_stop": new_stop, "child_trade_id": child_id,
+              **(extra or {})}
+    state.log_sentry(now, trade["id"], trade["coin"], log_action, detail)
+    summary.actions.append({"trade_id": trade["id"], "coin": trade["coin"],
+                            "action": log_action, **detail})
+
+
+def _protect_slice(exchange: Exchange, state: StateStore, trade: dict, child_id: int,
+                   entry: float, new_stop: float, filled: float, now: float,
+                   summary: ManageSummary, alerter: Alerter | None) -> bool:
+    """Native SL/TP for an added slice — the same hard prerequisite as an entry:
+    unprotectable ⇒ flattened, never left naked."""
+    closing = _closing(trade)
+    placed = []
+    for order_type, trigger in ((OrderType.STOP_LOSS, new_stop), (OrderType.TAKE_PROFIT, trade["tp"])):
+        result = exchange.place_order(Order(coin=trade["coin"], side=closing, order_type=order_type,
+                                            size=filled, trigger_price=trigger, reduce_only=True))
+        placed.append(result)
+        if not result.accepted:
+            close = exchange.place_order(Order(coin=trade["coin"], side=closing,
+                                               order_type=OrderType.MARKET, size=filled,
+                                               reduce_only=True))
+            canceled = cancel_placed(exchange, trade["coin"], placed)
+            exit_price = close.avg_price if close.avg_price is not None else entry
+            per_unit = (exit_price - entry) if Side(trade["side"]) is Side.LONG else (entry - exit_price)
+            risk = abs(entry - new_stop)
+            state.resolve_trade(child_id, "aborted", exit_price, round(per_unit * filled, 6),
+                                round(per_unit / risk, 4) if risk > 0 else 0.0, now)
+            summary.failed += 1
+            _emit(alerter, "sentry_failed", coin=trade["coin"], action="managed_add",
+                  reason=f"slice protection rejected; emergency-closed (triggers_canceled={canceled})")
+            return False
+    return True
 
 
 def _closing(trade: dict) -> Side:

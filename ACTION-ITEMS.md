@@ -129,7 +129,11 @@ Gate: gated actions fire on paper/testnet; churn caps hold. ✅ passed (live-ver
 ✅ Phase 6c complete — 336 tests pass. Live-verified on paper: real LLM pass evaluated the open position and HELD with a sane thesis-aware rationale (logged `managed_hold`); immediate rerun was eval-spaced with zero LLM calls; prior_actions shadow-leak found live and fixed (shadow rows excluded from history).
 
 ### 6d — Pyramiding (ADD)
-Gate: ADDs pass full entry caps; add-risk covered by unrealized P&L; testnet until graduation.
+Gate: ADDs pass full entry caps; add-risk covered by unrealized P&L; testnet until graduation. ✅ passed
 
-- [ ] 6d.1 ADD action: ≥+1R, add ≤ ½ size, add-risk ≤ unrealized, SL raised atomically, entry caps re-run, max adds/position
-- [ ] 6d.2 Graduation evidence before mainnet ADD
+- [x] 6d.1 ADD action (`gate._check_add` + `apply.apply_add`): winners only (≥ `HL_SENTRY_ADD_MIN_R`, default 1.0); the model nominates add + a raised stop, the CODE sizes it — min(profit-covered risk, ½ the coin's total size, notional-cap room, leverage-cap room), rejected when halted or no room; lifetime `HL_SENTRY_MAX_ADDS_PER_POSITION` per coin. Apply order: raise the whole position's stop FIRST (refused raise ⇒ no add) → idempotent MARKET add (key = coin's add ordinal, crash-safe) → ledger child row (entry at fill, initial_sl at the raised stop — honest R) → live slice protection (own reduce-only SL/TP pair; failure ⇒ emergency close + `aborted` row, like a failed entry)
+- [x] 6d.2 Graduation before mainnet management: `graduation_for_management(caps)` assesses the TESTNET book (real + shadow) via `safety/graduation.assess`; `hl sentry manage`/`run --manage` on mainnet refuse with the failing checks named until it clears
+
+✅ Phase 6d complete — 351 tests pass (15 new: validation, gate matrix incl. sizing clamps + sibling-row coin_size, paper add + blended book, crash idempotency, live raise-fire-protect ordering, raise-rejection abort, slice-protection emergency close, graduation verdict). Live-verified: mainnet `sentry manage`/`run --manage` refused with named failing graduation checks on an empty testnet book.
+
+**Phase 6 (sentry) complete** — remaining work is operational: accumulate `sentry run --manage` evidence on paper/testnet, clear graduation, then mainnet management at tiny caps.

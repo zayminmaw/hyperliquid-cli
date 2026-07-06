@@ -34,6 +34,7 @@ from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.sentry.apply import (
     ManageSummary,
+    apply_add,
     apply_close,
     apply_move_stop,
     apply_move_tp,
@@ -42,12 +43,13 @@ from hlcli.sentry.apply import (
 from hlcli.sentry.context import FAST_INTERVAL, SLOW_INTERVAL, build_context, frames_for, labeled
 from hlcli.sentry.decision import decide_management
 from hlcli.sentry.engine import MoveStop, ScaleOut
-from hlcli.sentry.gate import CloseAll, ManageGateContext, MoveTP, evaluate_management
+from hlcli.sentry.gate import AddTo, CloseAll, ManageGateContext, MoveTP, evaluate_management
 from hlcli.sentry.shadow import ManageFn
 from hlcli.state.store import StateStore
 
 # Log-row vocabularies — the sentry log is also the churn state (see gate docstring).
-_APPLIED = ("managed_tighten_stop", "managed_reduce", "managed_close", "managed_extend_tp")
+_APPLIED = ("managed_tighten_stop", "managed_reduce", "managed_close", "managed_extend_tp",
+            "managed_add")
 _EVALUATED = _APPLIED + ("managed_hold", "managed_rejected", "managed_dropped")
 _BANK_SIDE = ("managed_reduce", "scale_out")  # rule ladder counts toward the opposing window too
 _EXTEND_SIDE = ("managed_extend_tp",)
@@ -84,15 +86,20 @@ def manage_live(
     marks = marks if marks is not None else exchange.get_marks()
     breaker = Breaker(state, caps)
     breaker_tripped = breaker.tripped()
-    daily_loss = breaker.daily_loss_hit(exchange.equity())
+    equity = exchange.equity()
+    daily_loss = breaker.daily_loss_hit(equity)
 
     summary = LiveSummary()
     day_ago = now - _DAY_SECONDS
     calls_today = state.sentry_count_since(day_ago, _EVALUATED)
     bars_cache: dict[str, tuple[list[Candle], list[Candle]]] = {}
     applied = ManageSummary()  # the apply helpers tally into this; folded in below
+    book = state.open_trades(shadow=False)
+    coin_sizes: dict[str, float] = {}
+    for t in book:
+        coin_sizes[t["coin"]] = coin_sizes.get(t["coin"], 0.0) + t["size"]
 
-    for trade in state.open_trades(shadow=False):
+    for trade in book:
         mark = marks.get(trade["coin"])
         if mark is None:
             continue
@@ -129,6 +136,9 @@ def manage_live(
             actions_today=state.sentry_count_since(day_ago, _APPLIED, trade["id"]),
             last_bank_ts=state.last_sentry_ts(trade["id"], _BANK_SIDE),
             last_extend_ts=state.last_sentry_ts(trade["id"], _EXTEND_SIDE),
+            equity=equity,
+            coin_adds=state.sentry_count_since(0.0, ("managed_add",), coin=trade["coin"]),
+            coin_size=coin_sizes.get(trade["coin"], trade["size"]),
         )
         outcome = evaluate_management(decision, trade, gate_ctx)
 
@@ -146,16 +156,20 @@ def manage_live(
                       action=decision.action.value, reason=outcome.reason)
             continue
 
-        _apply(exchange, state, trade, outcome.plan, decision, now,
+        _apply(exchange, state, trade, outcome.plan, decision, mark, ctx.regime, now,
                native_protected=native_protected, summary=applied, alerter=alerter)
 
-    summary.applied = applied.stops_moved + applied.scaled_out + applied.closed + applied.tps_moved
+    # An ADD increments both `added` and (via its internal raise) `stops_moved`, so
+    # summing everything would double-count it; the raise already represents it once.
+    summary.applied = (applied.stops_moved + applied.scaled_out + applied.closed
+                       + applied.tps_moved)
     summary.failed = applied.failed
     summary.actions = applied.actions
     return summary
 
 
-def _apply(exchange, state, trade, plan, decision, now, *, native_protected, summary, alerter) -> None:
+def _apply(exchange, state, trade, plan, decision, mark, regime, now, *,
+           native_protected, summary, alerter) -> None:
     extra = {"confidence": decision.confidence, "rationale": decision.rationale}
     kw = dict(native_protected=native_protected, summary=summary, alerter=alerter, extra=extra)
     if isinstance(plan, MoveStop):
@@ -166,8 +180,26 @@ def _apply(exchange, state, trade, plan, decision, now, *, native_protected, sum
         apply_close(exchange, state, trade, plan.level, now, log_action="managed_close", **kw)
     elif isinstance(plan, MoveTP):
         apply_move_tp(exchange, state, trade, plan.new_tp, now, log_action="managed_extend_tp", **kw)
+    elif isinstance(plan, AddTo):
+        apply_add(exchange, state, trade, plan.size, plan.new_stop, mark, now,
+                  conviction=decision.confidence, regime=regime, **kw)
 
 
 def _emit(alerter: Alerter | None, event: str, **fields) -> None:
     if alerter is not None:
         alerter.alert(event, level="warning", **fields)
+
+
+def graduation_for_management(caps: Caps) -> dict:
+    """Whether sentry may manage MAINNET positions — judged on the TESTNET book
+    (real + shadow resolved trades), per §7/§14: mainnet privileges are earned on
+    fake money, never granted on the strength of the mainnet book itself."""
+    from hlcli.core.types import Network
+    from hlcli.safety.graduation import assess
+    from hlcli.state.store import open_state
+
+    state = open_state(caps, Network.TESTNET)
+    try:
+        return assess(state.resolved_trades(), caps)
+    finally:
+        state.close()

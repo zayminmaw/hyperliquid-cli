@@ -54,7 +54,7 @@ def test_confidence_clamped_not_dropped(raw, clamped):
     None,
     "not a dict",
     {"confidence": 0.5},                              # missing action
-    _good(action="add"),                              # not in the 6b menu (ADD is 6d)
+    _good(action="add"),                              # ADD without a raised stop (new_stop=0)
     _good(confidence="high"),
     _good(confidence=float("nan")),
     _good(action="tighten_stop", new_stop=0),         # tighten with no usable stop

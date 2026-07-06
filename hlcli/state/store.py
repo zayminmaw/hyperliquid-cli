@@ -294,14 +294,19 @@ class StateStore:
         return row["ts"]
 
     def sentry_count_since(self, since_ts: float, actions: tuple[str, ...],
-                           trade_id: int | None = None) -> int:
-        """How many `actions` rows landed since `since_ts` — the rolling-24h budgets."""
+                           trade_id: int | None = None, coin: str | None = None) -> int:
+        """How many `actions` rows landed since `since_ts` — the budget counters.
+        `trade_id` scopes per-row budgets; `coin` scopes per-position ones (an ADD
+        creates a sibling ledger row, so its lifetime cap must count by coin)."""
         marks = ",".join("?" * len(actions))
         sql = f"SELECT COUNT(*) FROM sentry_log WHERE ts >= ? AND action IN ({marks})"
         params: list = [since_ts, *actions]
         if trade_id is not None:
             sql += " AND trade_id = ?"
             params.append(trade_id)
+        if coin is not None:
+            sql += " AND coin = ?"
+            params.append(coin)
         return self._conn.execute(sql, params).fetchone()[0]
 
     # --- deferred follow-ups (LLM said WAIT; re-checked later with fresh data) ---
