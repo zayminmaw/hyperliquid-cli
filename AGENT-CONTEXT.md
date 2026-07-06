@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-06 | Session: Sentry 6a (committed) + 6b LLM shadow built & live-verified; 312 tests pass; next = 6c gated live ↓risk actions
+> Last updated: 2026-07-06 | Session: Sentry 6a+6b committed; 6c gated live manager built & live-verified; 336 tests pass; next = 6d ADD
 
 ---
 
 ## 🎯 CURRENT TASK
 
 - Task: "Sentry" — in-trade manager (Phase 6, PLAN.md §14); scope user-confirmed: manages open positions + enters deferred WAITs, never originates
-- Goal: 6a mechanics ✅ → 6b LLM shadow vs baseline ✅ → 6c gated live ↓risk actions → 6d ADD
-- Status: 6b complete, uncommitted (6a committed by user). Gates passed; shadow evidence now accumulates operationally via `sentry run --shadow`
-- Next action: 6c — management gate (first-failure: schema → breaker ↓risk-only → cooldown/rate caps → action checks → rounding → idempotency), new `.env` hard caps (actions/position/day, LLM calls/day, min interval, opposing-action window), then live hold/tighten/reduce/close/extend_tp on paper→testnet
-- Blocked by: none (6c go/no-go ideally reads accumulated shadow agreement data first)
+- Goal: 6a mechanics ✅ → 6b LLM shadow vs baseline ✅ → 6c gated live ↓risk actions ✅ → 6d ADD
+- Status: 6c complete, uncommitted (6a/6b committed by user). `hl sentry manage` / `run --manage` live on paper/testnet; mainnet refused until graduation
+- Next action: 6d — ADD (pyramid): gate conditions (≥+1R at mark, add ≤ ½ size, add-risk ≤ unrealized P&L, SL raised atomically, full entry caps re-run, max adds/position), graduation wiring before mainnet management
+- Blocked by: none (operationally: accumulate `run --manage` evidence on paper/testnet before 6d)
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: built Phase 6b — `sentry/decision.py` (strict `submit_management`, HOLD-default prompt, drop-never-guess validation, no ADD), `sentry/context.py` (thesis via new store getters `intake_candidate`/`decision_for`/`sentry_for_trade`, 15m+1h frames, prior actions), `sentry/shadow.py` (proposal paired with 6a baseline, `agrees`, `shadow_dropped`), watch pass = `run_once(include_intake=False)` (deferred re-entry on sentry cadence, intake untouched), CLI `sentry shadow`/`run --shadow`/status scoreboard; `supports_temperature` → core/llm.py
-- Result: 312 pass (29 new); live sonnet shadow call on paper produced a sane thesis-aware tighten_stop at +0.2R vs idle baseline, fired nothing; docs/ACTION-ITEMS synced
-- File(s) touched: hlcli/sentry/{decision,context,shadow}.py (new), core/llm.py, executor/{decision,runner}.py, state/store.py, cli/commands/sentry.py, tests/test_sentry_shadow.py (new), ACTION-ITEMS.md, docs/{modules,decisions}.md
+- Did: built Phase 6c — `sentry/gate.py` (first-failure management gate; churn clocks read from sentry_log so restarts can't reset them), `sentry/live.py` (`manage_live`: eval spacing + rolling-24h budgets, real trades only, every evaluation logged), apply layer grew `apply_close` (won/lost by realized sign) + `apply_move_tp` (place-new-then-cancel-old); `HL_SENTRY_*` hard caps; stats `scaled`-win-only-if-positive; CLI `manage`/`run --manage` with mainnet refusal; fixed live-observed context leak (shadow rows out of prior_actions)
+- Result: 336 pass (24 new); live-verified on paper: real LLM pass HELD with sane rationale (`managed_hold` logged), rerun eval-spaced with 0 LLM calls
+- File(s) touched: hlcli/sentry/{gate,live}.py (new), sentry/{apply,context,shadow}.py, core/config.py, state/store.py, tuner/stats.py, cli/commands/sentry.py, .env.example, tests/test_sentry_live.py (new), tests/test_sentry_shadow.py, PLAN.md, CLAUDE.md, ACTION-ITEMS.md, docs/{modules,decisions}.md
 
 ---
 
@@ -43,7 +43,8 @@
 | `hlcli/executor/{enrich,decision,regime}.py` | context (+resolved outcomes, `followup`) · `decide` + NaN-safe `validate_decision` · ER regime |
 | `hlcli/executor/{intake,execute,runner,resolve,protect}.py` | content-hash batch ids · idempotent fire · `run_once` (ledger-first, shadow book, unmanaged alert) · resolver (vanished-position reconciliation, shadow orderless, trigger cleanup) · protection + `cancel_placed`/`cancel_coin_triggers` |
 | `hlcli/sentry/{engine,apply}.py` | 6a: pure R-anchored rules (ratchet/trail/scale-out) · apply (idempotent partials, live stop place-new-then-cancel-old, shadow orderless) |
-| `hlcli/sentry/{decision,context,shadow}.py` | 6b: strict `submit_management` (no ADD) · thesis+2-frame context · shadow pass pairing proposal with the 6a baseline (never shown to model) |
+| `hlcli/sentry/{decision,context,shadow}.py` | 6b: strict `submit_management` (no ADD) · thesis+2-frame context (prior_actions excludes shadow rows) · shadow pass pairing proposal with the 6a baseline (never shown to model) |
+| `hlcli/sentry/{gate,live}.py` | 6c: management gate (churn clocks FROM sentry_log; ↓risk-only when halted; extend needs breakeven + ≤1R) · live pass (eval spacing, 24h budgets, real book only, `HL_SENTRY_*` caps) |
 | `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts (`scaled`=win) · tuners · promote consumes proposals, audit records content |
 | `hlcli/safety/{breaker,alerts,graduation}.py` | kill switch + loss-limit (`persist=` for dry-run) · JSONL alerts · graduation verdict |
 

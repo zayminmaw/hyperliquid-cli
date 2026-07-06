@@ -34,7 +34,7 @@ the *actual* fill rather than the intended order.
 Command surface: `account add|ls|set-default|remove|positions|orders|balances|portfolio` ·
 `markets ls|prices` · `asset price|book` · `trade order|cancel|cancel-all|set-leverage`
 (Mode A) · `exec propose|once|run|shadow|status|report|breaker` (Mode B) ·
-`sentry once|run|shadow|status|log` (in-trade manager) ·
+`sentry once|run|shadow|manage|status|log` (in-trade manager) ·
 `tune run|diff|promote|history` · `config show|set|edit`.
 
 ---
@@ -111,7 +111,7 @@ The HWM + idempotency keys are what make a restart never double-fire.
 
 ---
 
-## `sentry/` — the in-trade manager (Phase 6a mechanics + 6b LLM shadow)
+## `sentry/` — the in-trade manager (6a mechanics · 6b shadow · 6c gated live)
 
 | File | What it does | Key surface |
 |------|--------------|-------------|
@@ -120,6 +120,8 @@ The HWM + idempotency keys are what make a restart never double-fire.
 | `context.py` | 6b: the management context — position state in R, the original thesis (intake reasoning/news + entry verdict from the decision log), two candle timescales (15m + 1h), regime, the trade's own management history, the trail surface. Keyless by construction. | `build_context()`, `ManagementContext` |
 | `decision.py` | 6b: the LLM manager (order-path model, forced strict rationale-first `submit_management`). Bounded menu — hold (the stated default) / tighten_stop / reduce (25·50·75) / close / extend_tp; **no ADD until 6d**. Structural validation drops (never guesses) a bad action, non-finite confidence, or an action whose own parameter is unusable; direction sanity is the 6c gate's job. | `decide_management()`, `validate_management()`, `ManagementAction`, `ManagementDecision`, `ManagementResult` |
 | `shadow.py` | 6b: propose-and-log over every open trade (real + hypothetical), pairing each LLM proposal with what the 6a rule baseline would do at the same instant (`agrees` = crude alignment), before the rules mutate the book. Fires nothing; drops logged as `shadow_dropped`. This paired log is the value-add evidence that gates 6c. | `shadow_pass()`, `ShadowSummary` |
+| `gate.py` | 6c: the management gate — deterministic, first-failure, the verdict is input never bypass. Breaker/loss-limit ⇒ only ↓risk actions pass; per-position daily action budget; cooldown; extend↔bank opposing window; tighten must ratchet, clear `min_move_r`, and sit off the mark; one partial per trade; extend_tp requires breakeven-or-better and moves ≤ 1R per action. | `evaluate_management()`, `ManageGateContext`, `ManageOutcome`, `CloseAll`, `MoveTP` |
+| `live.py` | 6c: the live pass — real trades only (the shadow book keeps rules + proposals). Eval spacing (`sentry_eval_interval_minutes`) and the rolling-24h LLM call budget throttle spend; churn clocks are read from the sentry log itself, so a restart can't reset them. Every evaluation logged: `managed_hold`/`managed_rejected`/`managed_dropped` or the applied `managed_<action>` with confidence + rationale. A judgment CLOSE books won/lost by the **sign** of realized P&L. | `manage_live()`, `LiveSummary` |
 
 Config lives on the tunable surface (`TunableConfig.trail`, clamped; all rules
 default **off**, so an unconfigured install behaves exactly as before). `run_once`
@@ -128,8 +130,10 @@ runs the manager just before resolve. `hl sentry once|run` is the **watch pass**
 on sentry's cadence — it may *enter* a parked setup through the normal decision +
 entry gate, but it never consumes the intake stream (that stays with `hl exec`).
 `hl sentry shadow` (or `run --shadow`) runs the 6b propose-and-log pass; `status`
-shows the shadow scoreboard. Live LLM actions (6c) and ADD (6d) are not built yet
-— see PLAN.md §14.
+shows the shadow scoreboard. `hl sentry manage` (or `run --manage`) is 6c: gated
+live LLM actions, **paper/testnet only** until graduation; `--shadow` and
+`--manage` are mutually exclusive. Churn hard caps live in `.env`
+(`HL_SENTRY_*`). ADD (6d) is not built yet — see PLAN.md §14.
 
 ---
 
@@ -137,14 +141,14 @@ shows the shadow scoreboard. Live LLM actions (6c) and ADD (6d) are not built ye
 
 | File | What it does | Key surface |
 |------|--------------|-------------|
-| `stats.py` | Resolved-trade cohorts (coin × side × conviction-bucket), win-rate + avg-R; sample-gated (`MIN_COHORT_SAMPLES=5`). A `scaled` row (sentry partial banked at a profit ladder) counts as a win. | `cohorts()`, `summary()`, `conviction_bucket()`, `Cohort` |
+| `stats.py` | Resolved-trade cohorts (coin × side × conviction-bucket), win-rate + avg-R; sample-gated (`MIN_COHORT_SAMPLES=5`). A `scaled` row (sentry partial) counts as a win only when its realized P&L is positive — the 6c manager can bank a partial loss. | `cohorts()`, `summary()`, `conviction_bucket()`, `Cohort` |
 | `config_tuner.py` | Propose tunable-surface edits (`claude-opus-4-8`, forced strict `submit_config`; every field description states its units + clamp bounds — strict mode can't encode numeric ranges, so descriptions are the model's only channel for them); clamped on propose. No eligible cohort ⇒ model not called. | `propose_config()`, `ConfigProposal` |
 | `prompt_tuner.py` | Refine the decision prompt from decisions-vs-outcomes (`claude-opus-4-8`, text). Pairs include the decision **rationale** (which reasoning won/lost is the point of tuning a prompt); the current prompt goes to the model in a tag, not JSON-escaped; a fenced output is stripped before it can reach `promote`. | `propose_prompt()`, `PromptProposal` |
 | `promote.py` | proposed → active (config re-clamped); promotion **consumes** the proposal file (promotable exactly once) and the `promotions.jsonl` audit records what went live (full config / prompt hash+size) + `diff`/`history`. Artifacts live beside `config_path`. | `paths()`, `write_proposed_config/prompt()`, `promote()`, `history()`, `diff()`, `TunerPaths` |
 
 ---
 
-## `tests/` — 312 passing, keyless
+## `tests/` — 336 passing, keyless
 
 Highest-risk code first: gate/sizing, the LLM-output validator/clamp, paper
 exchange + monitor, intake idempotency + HWM, config-schema clamping, the mainnet

@@ -100,7 +100,7 @@ hl asset     price <coin> | book <coin>                 # -w for live watch
 hl trade     order limit|market|stop-loss|take-profit
              cancel | cancel-all | set-leverage          # Mode A
 hl exec      propose | once | run | shadow | status | report | breaker   # Mode B
-hl sentry    once | run | shadow | status | log                          # Phase 6 in-trade manager
+hl sentry    once | run | shadow | manage | status | log                 # Phase 6 in-trade manager
 hl tune      run | diff | promote | history
 hl config    show | set | edit
 ```

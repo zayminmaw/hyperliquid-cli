@@ -228,6 +228,10 @@ class StateStore:
         self._conn.execute("UPDATE trades SET sl = ? WHERE id = ?", (new_sl, trade_id))
         self._conn.commit()
 
+    def update_trade_tp(self, trade_id: int, new_tp: float) -> None:
+        self._conn.execute("UPDATE trades SET tp = ? WHERE id = ?", (new_tp, trade_id))
+        self._conn.commit()
+
     def split_trade(
         self, trade_id: int, close_size: float, exit_price: float, realized: float,
         r_multiple: float, closed_at: float,
@@ -279,6 +283,26 @@ class StateStore:
             (trade_id, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def last_sentry_ts(self, trade_id: int, actions: tuple[str, ...]) -> float | None:
+        """When this trade last saw one of `actions` — the cooldown / eval-spacing clock."""
+        marks = ",".join("?" * len(actions))
+        row = self._conn.execute(
+            f"SELECT MAX(ts) AS ts FROM sentry_log WHERE trade_id = ? AND action IN ({marks})",
+            (trade_id, *actions),
+        ).fetchone()
+        return row["ts"]
+
+    def sentry_count_since(self, since_ts: float, actions: tuple[str, ...],
+                           trade_id: int | None = None) -> int:
+        """How many `actions` rows landed since `since_ts` — the rolling-24h budgets."""
+        marks = ",".join("?" * len(actions))
+        sql = f"SELECT COUNT(*) FROM sentry_log WHERE ts >= ? AND action IN ({marks})"
+        params: list = [since_ts, *actions]
+        if trade_id is not None:
+            sql += " AND trade_id = ?"
+            params.append(trade_id)
+        return self._conn.execute(sql, params).fetchone()[0]
 
     # --- deferred follow-ups (LLM said WAIT; re-checked later with fresh data) ---
 

@@ -19,6 +19,7 @@ import httpx
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Candle, Order, OrderType, Side
 from hlcli.exchange.base import Exchange
+from hlcli.executor.protect import cancel_coin_triggers
 from hlcli.safety.alerts import Alerter
 from hlcli.sentry.engine import MoveStop, ScaleOut, active, plan
 from hlcli.state.store import StateStore
@@ -30,6 +31,8 @@ _CANDLE_INTERVAL = "15m"  # matches the executor's decision-context tail
 class ManageSummary:
     stops_moved: int = 0
     scaled_out: int = 0
+    closed: int = 0     # 6c judgment closes
+    tps_moved: int = 0  # 6c target extensions
     failed: int = 0
     actions: list[dict] = field(default_factory=list)  # what happened (or would, in dry-run)
 
@@ -69,17 +72,21 @@ def manage_open_trades(
                 summary.actions.append(_preview(trade, action))
                 continue
             if isinstance(action, ScaleOut):
-                _apply_scale_out(exchange, state, trade, action, now,
-                                 native_protected=native_protected, summary=summary, alerter=alerter)
+                apply_scale_out(exchange, state, trade, action, now,
+                                native_protected=native_protected, summary=summary, alerter=alerter)
             else:
-                _apply_move_stop(exchange, state, trade, action, now,
-                                 native_protected=native_protected, summary=summary, alerter=alerter)
+                apply_move_stop(exchange, state, trade, action, now,
+                                native_protected=native_protected, summary=summary, alerter=alerter)
     return summary
 
 
-def _apply_scale_out(exchange: Exchange, state: StateStore, trade: dict, action: ScaleOut,
-                     now: float, *, native_protected: bool, summary: ManageSummary,
-                     alerter: Alerter | None) -> None:
+def apply_scale_out(exchange: Exchange, state: StateStore, trade: dict, action: ScaleOut,
+                    now: float, *, native_protected: bool, summary: ManageSummary,
+                    alerter: Alerter | None, log_action: str = "scale_out",
+                    extra: dict | None = None) -> None:
+    """Bank a fraction. `log_action`/`extra` let the 6c live pass write `managed_*`
+    audit rows; the idempotency key and `scaled_out` flag are shared with the rule
+    ladder — one partial per trade, whoever banks it."""
     exit_price = action.level
     close_size = action.size
 
@@ -93,7 +100,7 @@ def _apply_scale_out(exchange: Exchange, state: StateStore, trade: dict, action:
         if not result.accepted or filled <= 0:
             state.release_fire(key)
             summary.failed += 1
-            _emit(alerter, "sentry_failed", coin=trade["coin"], action="scale_out",
+            _emit(alerter, "sentry_failed", coin=trade["coin"], action=log_action,
                   reason=result.message or result.status)
             return
         close_size = filled
@@ -107,19 +114,21 @@ def _apply_scale_out(exchange: Exchange, state: StateStore, trade: dict, action:
     trade["size"] -= close_size  # the stop move that may follow guards the remainder
     trade["scaled_out"] = 1
     summary.scaled_out += 1
-    detail = {"size": close_size, "level": exit_price, "r": action.r, "realized": realized}
-    state.log_sentry(now, trade["id"], trade["coin"], "scale_out", detail)
+    detail = {"size": close_size, "level": exit_price, "r": action.r, "realized": realized,
+              **(extra or {})}
+    state.log_sentry(now, trade["id"], trade["coin"], log_action, detail)
     summary.actions.append({"trade_id": trade["id"], "coin": trade["coin"],
-                            "action": "scale_out", **detail})
+                            "action": log_action, **detail})
 
 
-def _apply_move_stop(exchange: Exchange, state: StateStore, trade: dict, action: MoveStop,
-                     now: float, *, native_protected: bool, summary: ManageSummary,
-                     alerter: Alerter | None) -> None:
+def apply_move_stop(exchange: Exchange, state: StateStore, trade: dict, action: MoveStop,
+                    now: float, *, native_protected: bool, summary: ManageSummary,
+                    alerter: Alerter | None, log_action: str = "move_stop",
+                    extra: dict | None = None) -> None:
     if native_protected and not trade["shadow"]:
         if not _sync_native_stop(exchange, trade, action.new_sl):
             summary.failed += 1
-            _emit(alerter, "sentry_failed", coin=trade["coin"], action="move_stop",
+            _emit(alerter, "sentry_failed", coin=trade["coin"], action=log_action,
                   reason="new trigger rejected; old stop kept")
             return
 
@@ -127,10 +136,84 @@ def _apply_move_stop(exchange: Exchange, state: StateStore, trade: dict, action:
     state.update_trade_sl(trade["id"], action.new_sl)
     trade["sl"] = action.new_sl
     summary.stops_moved += 1
-    detail = {"from": old_sl, "to": action.new_sl, "reason": action.reason}
-    state.log_sentry(now, trade["id"], trade["coin"], "move_stop", detail)
+    detail = {"from": old_sl, "to": action.new_sl, "reason": action.reason, **(extra or {})}
+    state.log_sentry(now, trade["id"], trade["coin"], log_action, detail)
     summary.actions.append({"trade_id": trade["id"], "coin": trade["coin"],
-                            "action": "move_stop", **detail})
+                            "action": log_action, **detail})
+
+
+def apply_close(exchange: Exchange, state: StateStore, trade: dict, level: float,
+                now: float, *, native_protected: bool, summary: ManageSummary,
+                alerter: Alerter | None, log_action: str = "managed_close",
+                extra: dict | None = None) -> None:
+    """Flatten the whole position by judgment (6c CLOSE). The outcome is booked by
+    the *sign* of the realized P&L — a deliberate exit in profit is a win, in loss a
+    loss — because this close resolves the entry decision, unlike an external
+    `closed`. Terminal, so the idempotency key is one-shot per trade."""
+    exit_price = level
+
+    if not trade["shadow"]:
+        key = f"sentry:close:{trade['id']}"
+        if state.already_fired(key):
+            return
+        state.record_fire(key, None, now)
+        result = exchange.place_order(_partial_close(trade, trade["size"], level, native_protected))
+        if not result.accepted:
+            state.release_fire(key)
+            summary.failed += 1
+            _emit(alerter, "sentry_failed", coin=trade["coin"], action=log_action,
+                  reason=result.message or result.status)
+            return
+        if native_protected and result.avg_price is not None:
+            exit_price = result.avg_price
+
+    realized, r_multiple = _partial_pnl(trade, trade["size"], exit_price)
+    status = "won" if realized > 0 else "lost" if realized < 0 else "closed"
+    state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now)
+    if native_protected and not trade["shadow"]:
+        cancel_coin_triggers(exchange, trade["coin"])  # the orphaned SL/TP pair
+    summary.closed += 1
+    detail = {"size": trade["size"], "exit": exit_price, "realized": realized,
+              "status": status, **(extra or {})}
+    state.log_sentry(now, trade["id"], trade["coin"], log_action, detail)
+    summary.actions.append({"trade_id": trade["id"], "coin": trade["coin"],
+                            "action": log_action, **detail})
+
+
+def apply_move_tp(exchange: Exchange, state: StateStore, trade: dict, new_tp: float,
+                  now: float, *, native_protected: bool, summary: ManageSummary,
+                  alerter: Alerter | None, log_action: str = "managed_extend_tp",
+                  extra: dict | None = None) -> None:
+    """Extend the target: place-new-then-cancel-old, like the stop. A crash in
+    between leaves two reduce-only take-profits — the *nearer* old one fires first,
+    which is the conservative side of the mistake."""
+    if native_protected and not trade["shadow"]:
+        result = exchange.place_order(Order(
+            coin=trade["coin"], side=_closing(trade), order_type=OrderType.TAKE_PROFIT,
+            size=trade["size"], trigger_price=new_tp, reduce_only=True,
+        ))
+        if not result.accepted:
+            summary.failed += 1
+            _emit(alerter, "sentry_failed", coin=trade["coin"], action=log_action,
+                  reason="new take-profit rejected; old target kept")
+            return
+        for order in exchange.get_open_orders():
+            if (order.coin == trade["coin"] and order.is_trigger and order.reduce_only
+                    and "take" in order.order_type and str(order.oid) != (result.order_id or "")):
+                exchange.cancel(trade["coin"], order.oid)
+
+    old_tp = trade["tp"]
+    state.update_trade_tp(trade["id"], new_tp)
+    trade["tp"] = new_tp
+    summary.tps_moved += 1
+    detail = {"from": old_tp, "to": new_tp, **(extra or {})}
+    state.log_sentry(now, trade["id"], trade["coin"], log_action, detail)
+    summary.actions.append({"trade_id": trade["id"], "coin": trade["coin"],
+                            "action": log_action, **detail})
+
+
+def _closing(trade: dict) -> Side:
+    return Side.SHORT if Side(trade["side"]) is Side.LONG else Side.LONG
 
 
 def _sync_native_stop(exchange: Exchange, trade: dict, new_sl: float) -> bool:

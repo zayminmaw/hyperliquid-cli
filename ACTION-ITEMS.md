@@ -120,11 +120,13 @@ Gate: shadow log shows sane actions; value-add vs 6a baseline measurable. ✅ pa
 ✅ Phase 6b complete — 312 tests pass (29 new). Live-verified on paper: real sonnet call produced a sane, thesis-aware tighten_stop proposal at +0.2R with an idle baseline (judgment-beyond-rules, logged, fired nothing); watch pass managed+resolved and left intake untouched.
 
 ### 6c — Sentry live, risk-reducing only
-Gate: gated actions fire on paper/testnet; churn caps hold.
+Gate: gated actions fire on paper/testnet; churn caps hold. ✅ passed (live-verified on paper)
 
-- [ ] 6c.1 Management gate (first-failure): schema → breaker (↓risk only when tripped) → cooldown/rate caps → action checks → rounding → idempotency
-- [ ] 6c.2 Hard caps in `.env`: actions/position/day, LLM calls/day, min action interval, opposing-action window
-- [ ] 6c.3 HOLD/TIGHTEN_STOP/REDUCE/CLOSE/EXTEND_TP live on paper → testnet
+- [x] 6c.1 `sentry/gate.py` — `evaluate_management` (first-failure): breaker/loss-limit ⇒ ↓risk only → per-position daily budget → cooldown → extend↔bank opposing window → action checks (tighten must ratchet + clear min_move_r + sit off the mark; one partial per trade; close always; extend_tp needs breakeven-or-better and ≤1R per move). Churn clocks read from the sentry log (restart-proof)
+- [x] 6c.2 Hard caps in `.env` (`HL_SENTRY_*`): eval interval (bounds LLM spend), min action interval, actions/position/day, LLM calls/day (rolling 24h), opposing window — documented in .env.example
+- [x] 6c.3 `sentry/live.py` `manage_live` + apply layer grows `apply_close` (books won/lost by realized sign, cancels orphaned triggers) and `apply_move_tp` (place-new-then-cancel-old); real trades only; every evaluation logged (`managed_hold/rejected/dropped` or applied `managed_<action>` with confidence+rationale); `hl sentry manage` + `run --manage` (exclusive with `--shadow`), **mainnet refused until 6d graduation**. Stats: `scaled` counts as a win only when realized > 0. Tests: 24 new (gate matrix, paper apply paths incl. partial-loss banking, eval spacing, budgets, cooldown, shadow-book skip, live TP replace/reject, close trigger cleanup)
+
+✅ Phase 6c complete — 336 tests pass. Live-verified on paper: real LLM pass evaluated the open position and HELD with a sane thesis-aware rationale (logged `managed_hold`); immediate rerun was eval-spaced with zero LLM calls; prior_actions shadow-leak found live and fixed (shadow rows excluded from history).
 
 ### 6d — Pyramiding (ADD)
 Gate: ADDs pass full entry caps; add-risk covered by unrealized P&L; testnet until graduation.

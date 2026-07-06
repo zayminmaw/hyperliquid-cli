@@ -62,6 +62,13 @@ class Caps(BaseSettings):
     # comma-separated in env (HL_ALLOWED_COINS="BTC,ETH,SOL"); use `.coins`
     allowed_coins: str = "BTC,ETH,SOL"
 
+    # --- sentry churn caps (PLAN.md §14 — enforced in code, not prompt; "day" = rolling 24h) ---
+    sentry_eval_interval_minutes: float = 15.0       # a position is LLM-evaluated at most this often
+    sentry_min_action_interval_minutes: float = 30.0  # per-position cooldown after any applied action
+    sentry_max_actions_per_position_per_day: int = 4
+    sentry_max_llm_calls_per_day: int = 200           # backstop across all positions
+    sentry_opposing_window_minutes: float = 120.0     # no extend_tp ↔ reduce flip-flops inside this
+
     # --- graduation checklist (mainnet readiness; risk policy, off-limits to the tuner) ---
     graduation_min_trades: int = 20
     graduation_min_days: int = 7

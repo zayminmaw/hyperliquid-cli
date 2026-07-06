@@ -136,12 +136,14 @@ def test_context_carries_thesis_and_history(tmp_path):
                                             "conviction": 0.8, "rationale": "clean levels"})
     trade = _trade_row(state)
     state.log_sentry(NOW + 60, trade["id"], "BTC", "move_stop", {"from": 90.0, "to": 100.5})
+    state.log_sentry(NOW + 90, trade["id"], "BTC", "shadow", {"proposal": {"action": "close"}})
 
     ctx = build_context(trade, mark=110.0, state=state, tunable=tunable(), now=NOW + 120)
     assert ctx.thesis["reasoning"] == "breakout retest"
     assert ctx.thesis["entry_rationale"] == "clean levels" and ctx.thesis["entry_conviction"] == 0.8
     assert ctx.trade["r_now"] == 1.0 and ctx.trade["age_minutes"] == 2.0
-    assert ctx.prior_actions[0]["action"] == "move_stop"
+    # Shadow proposals are NOT history — only what actually happened is shown.
+    assert [a["action"] for a in ctx.prior_actions] == ["move_stop"]
     assert set(ctx.tunable) == {"trail"}  # never hard caps, never keys
 
 

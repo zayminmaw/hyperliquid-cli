@@ -29,6 +29,7 @@ from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.sentry.apply import manage_open_trades
+from hlcli.sentry.live import manage_live
 from hlcli.sentry.shadow import shadow_pass
 from hlcli.state.store import StateStore, open_state
 
@@ -83,18 +84,47 @@ def shadow(ctx: typer.Context) -> None:
          as_json=g.json_out, title="sentry shadow")
 
 
+@app.command("manage")
+def manage(ctx: typer.Context) -> None:
+    """6c: one LIVE management pass — LLM verdicts through the management gate.
+    Risk-reducing menu only; paper/testnet only until graduation (6d)."""
+    g = state_of(ctx)
+    _refuse_mainnet(g)
+    exchange, state, caps, tunable = _env(g, for_write=True)
+    s = manage_live(exchange, state, caps, tunable,
+                    native_protected=requires_native_protection(g.network),
+                    alerter=_alerter(caps, g.network))
+    emit({"network": g.network.value, "evaluated": s.evaluated, "held": s.held,
+          "applied": s.applied, "rejected": s.rejected, "dropped": s.dropped,
+          "spaced": s.spaced, "failed": s.failed, "actions": s.actions, "note": s.note},
+         as_json=g.json_out, title="sentry manage")
+
+
+def _refuse_mainnet(g: GlobalState) -> None:
+    if g.network is Network.MAINNET:
+        raise typer.BadParameter(
+            "sentry live management is paper/testnet only in Phase 6c "
+            "(mainnet management arrives with graduation in 6d)")
+
+
 @app.command("run")
 def run(
     ctx: typer.Context,
     interval: float = typer.Option(60.0, "--interval", help="seconds between passes"),
     with_shadow: bool = typer.Option(False, "--shadow", help="also log LLM proposals vs the baseline each pass"),
+    with_manage: bool = typer.Option(False, "--manage", help="6c: also apply gated LLM management actions each pass"),
 ) -> None:
     """Continuous watch loop (ctrl-c to stop). Intake stays with `hl exec run`."""
     g = state_of(ctx)
+    if with_shadow and with_manage:
+        raise typer.BadParameter("--shadow and --manage are exclusive: manage already logs "
+                                 "every proposal, so shadowing on top doubles the LLM spend")
+    if with_manage:
+        _refuse_mainnet(g)
     exchange, state, caps, _ = _env(g, for_write=True)
     alerter = _alerter(caps, g.network)
-    note(f"sentry running every {interval}s on {g.network.value}"
-         f"{' (+shadow)' if with_shadow else ''} — ctrl-c to stop")
+    mode = " (+shadow)" if with_shadow else " (+manage)" if with_manage else ""
+    note(f"sentry running every {interval}s on {g.network.value}{mode} — ctrl-c to stop")
     failures = 0
     try:
         while True:
@@ -107,6 +137,14 @@ def run(
                                      breaker_tripped=Breaker(state, caps).tripped())
                     note(f"[dim]shadow[/dim] evaluated={sh.evaluated} proposed={sh.proposed} "
                          f"agreed={sh.agreed} dropped={sh.dropped}")
+                if with_manage:
+                    # Judgment acts on the raw state; the rule pass below then
+                    # guards whatever remains.
+                    lv = manage_live(exchange, state, caps, tunable,
+                                     native_protected=requires_native_protection(g.network),
+                                     alerter=alerter)
+                    note(f"[dim]manage[/dim] evaluated={lv.evaluated} applied={lv.applied} "
+                         f"held={lv.held} rejected={lv.rejected} dropped={lv.dropped}")
                 s = run_once(exchange, state, caps, tunable, include_intake=False, alerter=alerter)
                 failures = 0
                 note(f"[dim]{time.strftime('%H:%M:%S')}[/dim] managed={s.managed} "

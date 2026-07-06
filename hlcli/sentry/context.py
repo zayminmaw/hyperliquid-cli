@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import json
 
+import httpx
 from pydantic import BaseModel
 
 from hlcli.core.config_schema import TunableConfig
-from hlcli.core.types import Side
+from hlcli.core.types import Candle, Side
+from hlcli.exchange.base import Exchange
+from hlcli.executor.regime import summarize
 from hlcli.state.store import StateStore
+
+FAST_INTERVAL = "15m"  # matches the entry-decision tail
+SLOW_INTERVAL = "1h"   # the longer-horizon frame position management needs
 
 
 class ManagementContext(BaseModel):
@@ -95,6 +101,9 @@ def _thesis(state: StateStore, candidate_id: str) -> dict | None:
 
 
 def _prior_actions(state: StateStore, trade_id: int, now: float) -> list[dict]:
+    """Things that actually happened to this trade. Shadow proposals are excluded —
+    a hypothetical that was never applied reads like history to the model (observed
+    live: it described a shadow tighten as 'a prior action that moved the stop')."""
     return [
         {
             "action": row["action"],
@@ -102,6 +111,7 @@ def _prior_actions(state: StateStore, trade_id: int, now: float) -> list[dict]:
             "details": _loads(row["details"]),
         }
         for row in state.sentry_for_trade(trade_id)
+        if not row["action"].startswith("shadow")
     ]
 
 
@@ -109,3 +119,24 @@ def _loads(value):
     if not value:
         return None
     return json.loads(value) if isinstance(value, str) else value
+
+
+def labeled(interval: str, bars: list[Candle]) -> dict | None:
+    """The prompt-facing candle block — bare bars are meaningless without a timeframe."""
+    tail = summarize(bars)
+    return {"interval": interval, "order": "oldest_first", "bars": tail} if tail else None
+
+
+def frames_for(exchange: Exchange, coin: str, cache: dict) -> tuple[list[Candle], list[Candle]]:
+    """Both timescales, once per coin per pass. Best-effort — a feed hiccup means a
+    thinner context for this coin, never an aborted pass."""
+    if coin not in cache:
+        cache[coin] = (_fetch(exchange, coin, FAST_INTERVAL), _fetch(exchange, coin, SLOW_INTERVAL))
+    return cache[coin]
+
+
+def _fetch(exchange: Exchange, coin: str, interval: str) -> list[Candle]:
+    try:
+        return exchange.get_candles(coin, interval=interval)
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        return []

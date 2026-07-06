@@ -16,22 +16,17 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-import httpx
-
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Candle
 from hlcli.exchange.base import Exchange
-from hlcli.executor.regime import classify, summarize
-from hlcli.sentry.context import build_context
+from hlcli.executor.regime import classify
+from hlcli.sentry.context import FAST_INTERVAL, SLOW_INTERVAL, build_context, frames_for, labeled
 from hlcli.sentry.decision import ManagementAction, ManagementResult, decide_management
 from hlcli.sentry.engine import MoveStop, ScaleOut, plan
 from hlcli.state.store import StateStore
 
 ManageFn = Callable[..., ManagementResult]
-
-_FAST_INTERVAL = "15m"  # matches the entry-decision tail
-_SLOW_INTERVAL = "1h"   # the longer-horizon frame position management needs
 
 
 @dataclass
@@ -66,12 +61,12 @@ def shadow_pass(
         mark = marks.get(trade["coin"])
         if mark is None:
             continue
-        fast, slow = _bars(exchange, trade["coin"], bars_cache)
+        fast, slow = frames_for(exchange, trade["coin"], bars_cache)
         baseline = [_serialize(a) for a in plan(trade, mark, fast, tunable.trail)]
         ctx = build_context(
             trade, mark=mark, state=state, tunable=tunable, now=now,
-            regime=classify(fast), candles=_labeled(_FAST_INTERVAL, fast),
-            candles_slow=_labeled(_SLOW_INTERVAL, slow), breaker_tripped=breaker_tripped,
+            regime=classify(fast), candles=labeled(FAST_INTERVAL, fast),
+            candles_slow=labeled(SLOW_INTERVAL, slow), breaker_tripped=breaker_tripped,
         )
         result = decide_fn(ctx, caps, tunable)
         summary.evaluated += 1
@@ -116,21 +111,3 @@ def _serialize(action: ScaleOut | MoveStop) -> dict:
     return {"action": "move_stop", "to": action.new_sl, "reason": action.reason}
 
 
-def _labeled(interval: str, bars: list[Candle]) -> dict | None:
-    tail = summarize(bars)
-    return {"interval": interval, "order": "oldest_first", "bars": tail} if tail else None
-
-
-def _bars(exchange: Exchange, coin: str, cache: dict) -> tuple[list[Candle], list[Candle]]:
-    """Both timescales, once per coin per pass. Best-effort — a feed hiccup means a
-    thinner context for this coin, never an aborted pass."""
-    if coin not in cache:
-        cache[coin] = (_fetch(exchange, coin, _FAST_INTERVAL), _fetch(exchange, coin, _SLOW_INTERVAL))
-    return cache[coin]
-
-
-def _fetch(exchange: Exchange, coin: str, interval: str) -> list[Candle]:
-    try:
-        return exchange.get_candles(coin, interval=interval)
-    except (httpx.HTTPError, KeyError, ValueError, TypeError):
-        return []
