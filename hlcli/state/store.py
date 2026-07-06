@@ -130,6 +130,11 @@ class StateStore:
         rows = self._conn.execute(sql, (self.get_hwm(),)).fetchall()
         return [(r["seq"], _to_candidate(r)) for r in rows]
 
+    def intake_candidate(self, candidate_id: str) -> Candidate | None:
+        """The original intake row for a candidate id — the human's thesis text lives here."""
+        row = self._conn.execute("SELECT * FROM intake WHERE id = ?", (candidate_id,)).fetchone()
+        return _to_candidate(row) if row else None
+
     def get_hwm(self) -> int:
         return int(self._get_meta(_HWM_KEY, "0"))
 
@@ -173,6 +178,16 @@ class StateStore:
             "SELECT * FROM decision_log ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def decision_for(self, candidate_id: str) -> dict | None:
+        """The latest logged *verdict* for a candidate (WAIT re-checks log several rows;
+        the newest one carrying a decision is the one that fired)."""
+        row = self._conn.execute(
+            "SELECT * FROM decision_log WHERE candidate_id = ? AND decision IS NOT NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (candidate_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
     # --- trades (open → resolved; the tuner's cohort source) ---
 
@@ -254,6 +269,14 @@ class StateStore:
     def recent_sentry(self, limit: int = 50) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM sentry_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def sentry_for_trade(self, trade_id: int, limit: int = 10) -> list[dict]:
+        """This trade's management history, newest first — context for the LLM manager."""
+        rows = self._conn.execute(
+            "SELECT * FROM sentry_log WHERE trade_id = ? ORDER BY id DESC LIMIT ?",
+            (trade_id, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 

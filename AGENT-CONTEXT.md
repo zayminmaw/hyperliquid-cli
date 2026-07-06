@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-05 | Session: Sentry planned (PLAN.md §14) + Phase 6a trail engine built; 283 tests pass; next = 6b sentry shadow
+> Last updated: 2026-07-06 | Session: Sentry 6a (committed) + 6b LLM shadow built & live-verified; 312 tests pass; next = 6c gated live ↓risk actions
 
 ---
 
 ## 🎯 CURRENT TASK
 
 - Task: "Sentry" — in-trade manager (Phase 6, PLAN.md §14); scope user-confirmed: manages open positions + enters deferred WAITs, never originates
-- Goal: 6a deterministic mechanics ✅ → 6b LLM shadow vs baseline → 6c gated live ↓risk actions → 6d ADD
-- Status: 6a complete (gate passed: paper trail/scale-out verified live, ratchet-only, restart-safe, 283 tests)
-- Next action: 6b — management decision prompt + strict tool, position-context enrich, shadow logging next to the 6a baseline, deferred re-entry on sentry cadence
-- Blocked by: none
+- Goal: 6a mechanics ✅ → 6b LLM shadow vs baseline ✅ → 6c gated live ↓risk actions → 6d ADD
+- Status: 6b complete, uncommitted (6a committed by user). Gates passed; shadow evidence now accumulates operationally via `sentry run --shadow`
+- Next action: 6c — management gate (first-failure: schema → breaker ↓risk-only → cooldown/rate caps → action checks → rounding → idempotency), new `.env` hard caps (actions/position/day, LLM calls/day, min interval, opposing-action window), then live hold/tighten/reduce/close/extend_tp on paper→testnet
+- Blocked by: none (6c go/no-go ideally reads accumulated shadow agreement data first)
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: built Phase 6a — `TunableConfig.trail` (clamped, default off), `sentry/engine.py` (pure R-anchored rules) + `sentry/apply.py` (idempotent scale-out, live stop place-new-then-cancel-old, shadow orderless), `sentry_log` + `initial_sl`/`scaled_out` migrations, `hl sentry once|run|status|log`, runner integration (`PassSummary.managed`), resolver R/win fixes, 33 new tests
-- Result: 283 pass, keyless; verified end-to-end on paper vs real marks (scale-out @+1R, trail ratchet, churn-guard no-op, dry-run clean); PLAN.md §14 + ACTION-ITEMS + docs synced
-- File(s) touched: hlcli/sentry/* (new), core/config_schema.py, state/store.py, executor/{runner,resolve}.py, tuner/stats.py, cli/{app.py,commands/sentry.py,commands/exec_.py}, tests/test_sentry.py (new), PLAN.md, ACTION-ITEMS.md, CLAUDE.md, docs/{modules,decisions}.md
+- Did: built Phase 6b — `sentry/decision.py` (strict `submit_management`, HOLD-default prompt, drop-never-guess validation, no ADD), `sentry/context.py` (thesis via new store getters `intake_candidate`/`decision_for`/`sentry_for_trade`, 15m+1h frames, prior actions), `sentry/shadow.py` (proposal paired with 6a baseline, `agrees`, `shadow_dropped`), watch pass = `run_once(include_intake=False)` (deferred re-entry on sentry cadence, intake untouched), CLI `sentry shadow`/`run --shadow`/status scoreboard; `supports_temperature` → core/llm.py
+- Result: 312 pass (29 new); live sonnet shadow call on paper produced a sane thesis-aware tighten_stop at +0.2R vs idle baseline, fired nothing; docs/ACTION-ITEMS synced
+- File(s) touched: hlcli/sentry/{decision,context,shadow}.py (new), core/llm.py, executor/{decision,runner}.py, state/store.py, cli/commands/sentry.py, tests/test_sentry_shadow.py (new), ACTION-ITEMS.md, docs/{modules,decisions}.md
 
 ---
 
@@ -42,7 +42,8 @@
 | `hlcli/executor/gate.py` | first-failure gate incl. mark sanity; `_size` priced at mark; `infer_side` |
 | `hlcli/executor/{enrich,decision,regime}.py` | context (+resolved outcomes, `followup`) · `decide` + NaN-safe `validate_decision` · ER regime |
 | `hlcli/executor/{intake,execute,runner,resolve,protect}.py` | content-hash batch ids · idempotent fire · `run_once` (ledger-first, shadow book, unmanaged alert) · resolver (vanished-position reconciliation, shadow orderless, trigger cleanup) · protection + `cancel_placed`/`cancel_coin_triggers` |
-| `hlcli/sentry/{engine,apply}.py` | 6a in-trade manager: pure R-anchored rules (ratchet/trail/scale-out) · apply (idempotent partials, live stop place-new-then-cancel-old, shadow orderless) |
+| `hlcli/sentry/{engine,apply}.py` | 6a: pure R-anchored rules (ratchet/trail/scale-out) · apply (idempotent partials, live stop place-new-then-cancel-old, shadow orderless) |
+| `hlcli/sentry/{decision,context,shadow}.py` | 6b: strict `submit_management` (no ADD) · thesis+2-frame context · shadow pass pairing proposal with the 6a baseline (never shown to model) |
 | `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts (`scaled`=win) · tuners · promote consumes proposals, audit records content |
 | `hlcli/safety/{breaker,alerts,graduation}.py` | kill switch + loss-limit (`persist=` for dry-run) · JSONL alerts · graduation verdict |
 
@@ -56,10 +57,10 @@
 - [2026-07-02] Non-finite numbers NEVER clamp: NaN slides through min/max as the UPPER bound, so conviction/recheck are dropped and tunables fall back to defaults (`math.isfinite` everywhere a clamp guards money)
 - [2026-07-02] Gate mark-sanity: the entry is a MARKET order ⇒ mark must exist, sit strictly inside sl/tp, and R:R **at the mark** must clear the floor; sizing + notional/leverage caps priced at the mark, not the proposed entry
 - [2026-07-02] Ledger-first fills: trades row written on fill BEFORE protection; failed protection ⇒ emergency close + cancel placed triggers + row resolved `aborted` (was: no ledger). Positions the ledger doesn't know raise an edge-triggered `unmanaged_position` alert
-- [2026-07-02] Live resolver reconciles against get_positions(): a vanished position (native trigger on a wick / manual close) books won/lost from candle extremes (SL checked first — pessimistic) else `closed` at mark; every live close cancels the coin's surviving reduce-only triggers
 - [2026-07-02] Shadow books hypothetical trades (`trades.shadow=1`, entry at mark) resolved orderlessly — THIS is the tuner/graduation training data; shadow passes never touch real trades; hypothetical book honors one-per-coin
 - [2026-07-05] Sentry (PLAN.md §14): deterministic mechanics FIRST (6a trail engine, all rules default off) → 6b LLM shadow judged vs that baseline → 6c gated live ↓risk → 6d ADD last; sentry never originates trades (user-confirmed: manages positions + enters deferred WAITs)
 - [2026-07-05] R anchors to `initial_sl` once the stop ratchets; a profit-side stop-out books `won`; `scaled` partials count as wins; live stop replace = place-new-then-cancel-old (reject ⇒ old level kept everywhere); scale-out idempotent via `sentry:scale:<id>` recorded before the order
+- [2026-07-06] 6b shadow-only: proposals logged PAIRED with the 6a baseline (baseline never in the model's context — no anchoring); `hl sentry once|run` = `run_once(include_intake=False)` watch pass (deferred re-entry shares attempts/idempotency with exec; intake stays exec's)
 
 ---
 

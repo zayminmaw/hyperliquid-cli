@@ -44,3 +44,14 @@ def make_client():
     import anthropic  # noqa: PLC0415 — lazy by design (paper + tests run without it)
 
     return anthropic.Anthropic(api_key=api_key())
+
+
+# Model families that reject sampling params (temperature/top_p/top_k) with a 400.
+# Sonnet 5 rejects *non-default* values, which a tunable temperature would be.
+_NO_SAMPLING_PARAMS = ("claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-5", "claude-fable", "claude-mythos")
+
+
+def supports_temperature(model: str) -> bool:
+    """Whether `model` accepts an explicit temperature — env-overridable model names
+    make this a runtime question, not a constant."""
+    return not model.startswith(_NO_SAMPLING_PARAMS)

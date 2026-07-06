@@ -110,12 +110,14 @@ Gate: trades trail + scale out on paper, ratchet-only, restart-safe. ✅ passed
 ✅ Phase 6a complete — verified live on paper (real mainnet marks): scale-out banked at the +1R ladder, percent trail ratcheted the stop, second pass a clean no-op (churn guards), dry-run side-effect-free.
 
 ### 6b — Sentry shadow (LLM proposes, logs only)
-Gate: shadow log shows sane actions; value-add vs 6a baseline measurable.
+Gate: shadow log shows sane actions; value-add vs 6a baseline measurable. ✅ passed (live-verified; evidence accumulates operationally)
 
-- [ ] 6b.1 Management decision prompt + strict tool schema (action menu, HOLD default)
-- [ ] 6b.2 Position context enrich (multi-timescale candles, thesis from decision_log, prior sentry actions)
-- [ ] 6b.3 Shadow logging next to baseline actions; comparison in `sentry status`
-- [ ] 6b.4 Deferred WAIT re-entry on sentry cadence (reuses decide + entry gate + followup semantics, shared attempt counters)
+- [x] 6b.1 `sentry/decision.py` — management prompt (HOLD default, anti-churn, thesis-first) + forced strict `submit_management` (hold/tighten_stop/reduce 25·50·75/close/extend_tp; NO ADD until 6d); structural validate/clamp drops-never-guesses (bad action, non-finite confidence, unusable param); `supports_temperature` moved to core/llm.py (shared with entry decision)
+- [x] 6b.2 `sentry/context.py` — `ManagementContext`: position state in R + age, original thesis (intake reasoning/news + entry verdict via new `intake_candidate`/`decision_for`), 15m + 1h candle frames, regime, prior sentry actions (`sentry_for_trade`), trail surface; keyless by construction
+- [x] 6b.3 `sentry/shadow.py` — propose-and-log paired with the 6a baseline at the same instant (baseline never shown to the model), `agrees` alignment, drops → `shadow_dropped`; `hl sentry shadow` + `run --shadow`; scoreboard in `sentry status`
+- [x] 6b.4 Deferred WAIT re-entry on sentry cadence: `run_once(include_intake=False)` = the watch pass (manage + resolve + due deferrals through the normal decision/entry gate; intake untouched, HWM unchanged, shared attempts/idempotency); `hl sentry once|run` use it
+
+✅ Phase 6b complete — 312 tests pass (29 new). Live-verified on paper: real sonnet call produced a sane, thesis-aware tighten_stop proposal at +0.2R with an idle baseline (judgment-beyond-rules, logged, fired nothing); watch pass managed+resolved and left intake untouched.
 
 ### 6c — Sentry live, risk-reducing only
 Gate: gated actions fire on paper/testnet; churn caps hold.

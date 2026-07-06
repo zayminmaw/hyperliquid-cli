@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
-from hlcli.core.llm import make_client
+from hlcli.core.llm import make_client, supports_temperature
 from hlcli.core.types import Action, Decision, Timing
 from hlcli.executor.enrich import EnrichedContext
 
@@ -171,7 +171,7 @@ def decide(
     # `temperature` is rejected (400) by the Opus 4.7+, Sonnet 5, and Fable/Mythos
     # families; the order-path model is env-overridable, so only send it to a model
     # that accepts it.
-    if _supports_temperature(caps.decision_model):
+    if supports_temperature(caps.decision_model):
         kwargs["temperature"] = tunable.decision_temperature
     response = client.messages.create(**kwargs)
 
@@ -198,15 +198,6 @@ def load_decision_prompt(caps: Caps) -> str:
     """The active decision prompt (promoted by the prompt tuner), or the built-in default."""
     path = caps.config_path.with_name("active_prompt.md")
     return path.read_text() if path.exists() else SYSTEM_PROMPT
-
-
-# Model families that reject sampling params (temperature/top_p/top_k) with a 400.
-# Sonnet 5 rejects *non-default* values, which the tunable temperature would be.
-_NO_SAMPLING_PARAMS = ("claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-5", "claude-fable", "claude-mythos")
-
-
-def _supports_temperature(model: str) -> bool:
-    return not model.startswith(_NO_SAMPLING_PARAMS)
 
 
 def _tool_payload(response) -> dict | None:

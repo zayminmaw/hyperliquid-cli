@@ -84,7 +84,13 @@ def run_once(
     decide_fn: DecideFn = decide,
     alerter: Alerter | None = None,
     now: float | None = None,
+    include_intake: bool = True,
 ) -> PassSummary:
+    """One pass. `include_intake=False` is the sentry watch pass (PLAN.md §14): manage
+    open trades, resolve, and re-check due WAIT deferrals on sentry's cadence — but
+    never consume the intake stream, which remains `exec`'s job. Both paths share the
+    deferred table and idempotency keys, so running them side by side can't
+    double-spend a follow-up attempt or double-fire an entry."""
     now = now if now is not None else time.time()
     breaker = Breaker(state, caps)
     protected = requires_native_protection(exchange.network)
@@ -130,7 +136,7 @@ def run_once(
     # re-check can't fire anyway, so don't spend an LLM call or a follow-up attempt on it;
     # parked candidates wait, attempts intact, until the breaker clears).
     due = state.due_deferred(now) if (not dry_run and not breaker_tripped) else []
-    batch = state.pull_new(limit=tunable.max_candidates_per_pass)
+    batch = state.pull_new(limit=tunable.max_candidates_per_pass) if include_intake else []
     if alerter is not None and not dry_run:
         _alert_halt(state, alerter, batch, breaker_tripped, daily_loss)
 

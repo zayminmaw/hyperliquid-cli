@@ -13,7 +13,7 @@ read the module docstrings for the "why."
 | `config_schema.py` | The tunable surface + the clamp that bounds every field before it can reach the order path. Missing file → defaults; malformed → `ConfigError`. | `TunableConfig`, `RegimeGate`, `ConvictionSizing`, `clamp()`, `load_tunable()` |
 | `types.py` | Domain model — all pydantic / `StrEnum`. | `Network`, `Side`, `OrderType`, `Action`, `Timing`, `Candidate`, `Decision`, `Order`, `Position`, `OpenOrder`, `OrderResult` |
 | `network.py` | Network resolution (paper default) + the mainnet gate. | `resolve_network()`, `enforce_mainnet_gate()`, `MainnetGateError` |
-| `llm.py` | The **one** lazy `anthropic` import. | `make_client()` |
+| `llm.py` | The **one** lazy `anthropic` import; also the model-capability knowledge (which families reject sampling params). | `make_client()`, `supports_temperature()` |
 
 `OrderResult` carries `filled_size` / `avg_price` so the executor can reconcile to
 the *actual* fill rather than the intended order.
@@ -26,7 +26,7 @@ the *actual* fill rather than the intended order.
 |------|--------------|
 | `app.py` | Builds the `hl` Typer app, parses global flags (`--network/--account/--json/--dry-run/-y`) into `GlobalState`, wires the command groups. |
 | `context.py` | `GlobalState`; `build_for(state, for_write)` resolves account + key and enforces the mainnet gate (keys loaded only for writes); `typed_confirm`. |
-| `commands/` | `account · markets · asset · trade · exec_ · config · tune` — noun→verb groups. |
+| `commands/` | `account · markets · asset · trade · exec_ · sentry · config · tune` — noun→verb groups. |
 | `output.py` | Rich-table / JSON rendering (`--json` switch). |
 | `watch.py` | Poll-based `rich.Live` refresh for `-w` watch modes (positions/orders/book/price). |
 | `stubs.py` | Phase-labelled placeholders so `hl --help` is fully navigable. |
@@ -34,6 +34,7 @@ the *actual* fill rather than the intended order.
 Command surface: `account add|ls|set-default|remove|positions|orders|balances|portfolio` ·
 `markets ls|prices` · `asset price|book` · `trade order|cancel|cancel-all|set-leverage`
 (Mode A) · `exec propose|once|run|shadow|status|report|breaker` (Mode B) ·
+`sentry once|run|shadow|status|log` (in-trade manager) ·
 `tune run|diff|promote|history` · `config show|set|edit`.
 
 ---
@@ -110,17 +111,25 @@ The HWM + idempotency keys are what make a restart never double-fire.
 
 ---
 
-## `sentry/` — the in-trade manager (Phase 6a: deterministic mechanics)
+## `sentry/` — the in-trade manager (Phase 6a mechanics + 6b LLM shadow)
 
 | File | What it does | Key surface |
 |------|--------------|-------------|
 | `engine.py` | Pure trade-management rules, measured in R against `initial_sl`: breakeven ratchet (`breakeven_trigger_r`/`_buffer_r`), ATR/percent trail (activates at `trail_start_r`), one-shot scale-out ladder. Invariants: the stop only ratchets toward profit, never sits at/past the mark, dust moves (`min_move_r`) are suppressed, missing candle data never moves a stop. | `plan()`, `active()`, `atr()`, `ScaleOut`, `MoveStop` |
 | `apply.py` | Fires the plan: paper scale-out = reduce-only LIMIT at the ladder level (the book realizes it exactly), live = reduce-only MARKET booking the real fill; a live stop moves **place-new-then-cancel-old** (never naked; reject ⇒ old level kept on both exchange and ledger); scale-outs are idempotent (`sentry:scale:<id>` key recorded before the order, like `fire`). Shadow rows are managed identically but orderlessly; a shadow pass never touches real trades. Every action → `sentry_log`. | `manage_open_trades()`, `ManageSummary` |
+| `context.py` | 6b: the management context — position state in R, the original thesis (intake reasoning/news + entry verdict from the decision log), two candle timescales (15m + 1h), regime, the trade's own management history, the trail surface. Keyless by construction. | `build_context()`, `ManagementContext` |
+| `decision.py` | 6b: the LLM manager (order-path model, forced strict rationale-first `submit_management`). Bounded menu — hold (the stated default) / tighten_stop / reduce (25·50·75) / close / extend_tp; **no ADD until 6d**. Structural validation drops (never guesses) a bad action, non-finite confidence, or an action whose own parameter is unusable; direction sanity is the 6c gate's job. | `decide_management()`, `validate_management()`, `ManagementAction`, `ManagementDecision`, `ManagementResult` |
+| `shadow.py` | 6b: propose-and-log over every open trade (real + hypothetical), pairing each LLM proposal with what the 6a rule baseline would do at the same instant (`agrees` = crude alignment), before the rules mutate the book. Fires nothing; drops logged as `shadow_dropped`. This paired log is the value-add evidence that gates 6c. | `shadow_pass()`, `ShadowSummary` |
 
 Config lives on the tunable surface (`TunableConfig.trail`, clamped; all rules
 default **off**, so an unconfigured install behaves exactly as before). `run_once`
-runs the manager just before resolve; `hl sentry once|run|status|log` runs it
-standalone. LLM judgment (Phases 6b–6d) is not built yet — see PLAN.md §14.
+runs the manager just before resolve. `hl sentry once|run` is the **watch pass**
+(`run_once(include_intake=False)`): manage + resolve + re-check due WAIT deferrals
+on sentry's cadence — it may *enter* a parked setup through the normal decision +
+entry gate, but it never consumes the intake stream (that stays with `hl exec`).
+`hl sentry shadow` (or `run --shadow`) runs the 6b propose-and-log pass; `status`
+shows the shadow scoreboard. Live LLM actions (6c) and ADD (6d) are not built yet
+— see PLAN.md §14.
 
 ---
 
@@ -135,7 +144,7 @@ standalone. LLM judgment (Phases 6b–6d) is not built yet — see PLAN.md §14.
 
 ---
 
-## `tests/` — 283 passing, keyless
+## `tests/` — 312 passing, keyless
 
 Highest-risk code first: gate/sizing, the LLM-output validator/clamp, paper
 exchange + monitor, intake idempotency + HWM, config-schema clamping, the mainnet
