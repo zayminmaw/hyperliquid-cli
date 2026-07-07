@@ -137,3 +137,31 @@ Gate: ADDs pass full entry caps; add-risk covered by unrealized P&L; testnet unt
 ✅ Phase 6d complete — 351 tests pass (15 new: validation, gate matrix incl. sizing clamps + sibling-row coin_size, paper add + blended book, crash idempotency, live raise-fire-protect ordering, raise-rejection abort, slice-protection emergency close, graduation verdict). Live-verified: mainnet `sentry manage`/`run --manage` refused with named failing graduation checks on an empty testnet book.
 
 **Phase 6 (sentry) complete** — remaining work is operational: accumulate `sentry run --manage` evidence on paper/testnet, clear graduation, then mainnet management at tiny caps.
+
+## Phase 7: Agent mode — autonomous operation (PLAN.md §15)
+
+Design decided 2026-07-07 (user-confirmed): VPS runtime · watched intake dir (JSON batches, producer-agnostic — repo stays independent of any signal engine) · Mode A adoption alert+skip when stopless · reflection injected bounded · tuner auto-promote paper-only.
+
+### 7a — Supervisor + intake channel
+Gate: batch file dropped → paper trades end-to-end; `kill -9` mid-pass + restart ⇒ no double-fire, file not reprocessed.
+
+- [ ] 7a.1 `hlcli/agent/` supervisor: intake-dir poll (new file → parse → queue → immediate exec pass; processed/ · failed/ + alert), exec cadence, sentry cadence (`--shadow`/`--manage` pass-through, graduation unchanged), daily-job scheduler (UTC), per-loop failure backoff
+- [ ] 7a.2 `hl agent run|status` (status: last-pass times, breaker, positions, day P&L, pending proposals); heartbeat via alerter
+- [ ] 7a.3 `deploy/`: systemd unit (Restart=always) + Dockerfile + VPS ops doc
+
+### 7b — Daily journal
+Gate: a paper-trading day yields a journal reconciling with `exec report`; opus narrative present + logged.
+
+- [ ] 7b.1 Deterministic digest from state store (fires/skips + gate-reason tally, resolves + R, expectancy/PF, sentry actions, breaker events, pending proposals) → `journal/<network>/YYYY-MM-DD.md`; `hl journal write|show|ls`
+- [ ] 7b.2 Opus narrative section — one call/day, out-of-path, logged, cannot touch config
+
+### 7c — Reflection memory + scheduled tuners
+Gate: capped inject visible in decision_log; nightly tuner: paper auto-promotes, testnet/mainnet wait.
+
+- [ ] 7c.1 `reflections` table + daily distill; bounded "recent lessons" block in exec decision prompt + sentry context (last N, token-capped, own-outcomes-only); decision_log records injected rows
+- [ ] 7c.2 Tuner scheduled in agent loop; auto-promote paper only
+
+### 7d — Mode A adoption
+Gate: manual testnet order with a stop gets adopted + trailed; stopless position alerts and stays untouched.
+
+- [ ] 7d.1 Adopt unmanaged position when an exchange stop trigger exists (entry = avg price, initial_sl = trigger, row flagged `adopted`); no stop ⇒ alert + skip, never invent one; `hl sentry adopt`

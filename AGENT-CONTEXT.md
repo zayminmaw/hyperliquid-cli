@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-06 | Session: Sentry COMPLETE (6a–6d); 351 tests pass; 6d ADD + graduation-gated mainnet management built; next = operational evidence runs
+> Last updated: 2026-07-07 | Session: Phase 7 "Agent mode" PLANNED (PLAN.md §15 + ACTION-ITEMS Phase 7 written, user-confirmed design); no code yet
 
 ---
 
 ## 🎯 CURRENT TASK
 
-- Task: "Sentry" — in-trade manager (Phase 6, PLAN.md §14); scope user-confirmed: manages open positions + enters deferred WAITs, never originates
-- Goal: 6a mechanics ✅ → 6b LLM shadow vs baseline ✅ → 6c gated live ↓risk actions ✅ → 6d ADD + graduation ✅
-- Status: Phase 6 COMPLETE, 6d uncommitted (6a–6c committed by user). Full sentry: rules + shadow + gated live menu incl. pyramid; mainnet management graduation-gated on the testnet book
-- Next action: none coding-side. Operational: `hl sentry run --manage` on paper/testnet to accumulate evidence, clear graduation, then mainnet at tiny caps
+- Task: Phase 7 — Agent mode: autonomous supervisor + daily journal + reflection memory + Mode A adoption (PLAN.md §15)
+- Goal: 7a `hl agent run` supervisor + watched intake dir + deploy templates → 7b `hl journal` → 7c reflection inject + scheduled tuners → 7d sentry adopts Mode A
+- Status: planned, not started (design user-confirmed 2026-07-07). Phase 6 complete and fully committed (6d = 079664c)
+- Next action: implement 7a (`hlcli/agent/`)
 - Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: built Phase 6d — ADD in decision schema (nominate + raised stop; code sizes), `gate._check_add` (winners ≥ `HL_SENTRY_ADD_MIN_R`, min(profit-coverage, ½ coin size, notional/leverage room on TOTAL coin size), lifetime `HL_SENTRY_MAX_ADDS_PER_POSITION`), `apply_add` (raise-stop-FIRST → idempotent MARKET by add-ordinal key → child ledger row with own initial_sl → slice protection, failure ⇒ emergency close + `aborted`); `graduation_for_management` gates mainnet `manage`/`run --manage` on the TESTNET book
-- Result: 351 pass (15 new); live-verified: mainnet manage refused naming failing graduation checks
-- File(s) touched: sentry/{decision,gate,apply,live}.py, core/config.py, state/store.py, cli/commands/sentry.py, .env.example, tests/test_sentry_add.py (new), tests/test_sentry_shadow.py, ACTION-ITEMS.md, docs/{modules,decisions}.md
+- Did: researched thirdeye-core (context only — repos stay decoupled; its SuggestionSignal maps 1:1 onto Candidate, external crons trigger its runs) and wrote the Phase 7 spec: PLAN.md §15, ACTION-ITEMS Phase 7, CLAUDE.md phase table + command surface (`hl agent`, `hl journal`, `sentry adopt`)
+- Result: plan on disk; user decisions captured: VPS runtime, intake = watched JSON-batch dir (no HTTP port), adoption alert+skip when stopless, bounded reflection inject, tuner auto-promote paper-only
+- File(s) touched: PLAN.md, ACTION-ITEMS.md, CLAUDE.md, AGENT-CONTEXT.md
 
 ---
 
@@ -52,8 +52,7 @@
 
 ## 🧠 DECISIONS
 
-- [2026-06-27] LLM owns judgment, code owns mechanics + safety; LLM output is gate input, never a bypass
-- [2026-06-27] hard caps in .env; tunable surface clamped on load; anthropic + exchange deps lazy; sonnet-4-6 order path / opus-4-8 tuner; idempotency key recorded BEFORE fire
+- [2026-06-27] LLM owns judgment, code owns mechanics + safety (full statement lives in CLAUDE.md); hard caps in .env; tunable surface clamped on load; anthropic + exchange deps lazy; sonnet-4-6 order path / opus-4-8 tuner; idempotency key recorded BEFORE fire
 - [2026-07-01] wait→follow-up: act+wait DEFERRED not rejected; re-check inside freshness, `HL_FOLLOWUP_MAX_ATTEMPTS`; frozen while breaker tripped; re-checks labeled via `followup` in context
 - [2026-07-02] Non-finite numbers NEVER clamp: NaN slides through min/max as the UPPER bound, so conviction/recheck are dropped and tunables fall back to defaults (`math.isfinite` everywhere a clamp guards money)
 - [2026-07-02] Gate mark-sanity: the entry is a MARKET order ⇒ mark must exist, sit strictly inside sl/tp, and R:R **at the mark** must clear the floor; sizing + notional/leverage caps priced at the mark, not the proposed entry
@@ -62,6 +61,7 @@
 - [2026-07-05] Sentry (PLAN.md §14): deterministic mechanics FIRST (6a trail engine, all rules default off) → 6b LLM shadow judged vs that baseline → 6c gated live ↓risk → 6d ADD last; sentry never originates trades (user-confirmed: manages positions + enters deferred WAITs)
 - [2026-07-05] R anchors to `initial_sl` once the stop ratchets; a profit-side stop-out books `won`; `scaled` partials count as wins; live stop replace = place-new-then-cancel-old (reject ⇒ old level kept everywhere); scale-out idempotent via `sentry:scale:<id>` recorded before the order
 - [2026-07-06] 6b shadow-only: proposals logged PAIRED with the 6a baseline (baseline never in the model's context — no anchoring); `hl sentry once|run` = `run_once(include_intake=False)` watch pass (deferred re-entry shares attempts/idempotency with exec; intake stays exec's)
+- [2026-07-07] Phase 7 (§15): repo stays producer-agnostic + OSS — signal handoff = watched JSON-batch intake dir, NO open port/HTTP; adoption never invents a stop (alert+skip); reflection inject bounded + own-outcomes-only; tuner auto-promote paper ONLY (testnet/mainnet propose→approve)
 
 ---
 

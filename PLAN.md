@@ -100,9 +100,11 @@ hl asset     price <coin> | book <coin>                 # -w for live watch
 hl trade     order limit|market|stop-loss|take-profit
              cancel | cancel-all | set-leverage          # Mode A
 hl exec      propose | once | run | shadow | status | report | breaker   # Mode B
-hl sentry    once | run | shadow | manage | status | log                 # Phase 6 in-trade manager
+hl sentry    once | run | shadow | manage | adopt | status | log         # Phase 6 in-trade manager
 hl tune      run | diff | promote | history
 hl config    show | set | edit
+hl agent     run | status                                # Phase 7 autonomous supervisor
+hl journal   write | show | ls                           # Phase 7 daily journal
 ```
 
 **Global flags:** `--network paper|testnet|mainnet` · `--account <alias>` ·
@@ -437,3 +439,118 @@ verdict + fill), same audit/tuner-fuel role as `decision_log`. Shadow (6b) logs
 LLM proposals *next to* what the 6a baseline did, so the LLM's value-add is
 measured before it can act. Graduation before 6c/6d mirrors §7: sentry actions on
 mainnet only after testnet/shadow evidence clears.
+
+---
+
+## 15. Agent mode — autonomous operation (Phase 7)
+
+Purpose: hl runs unattended on a server. An upstream signal producer drops
+candidate batches on *its* schedule; the agent trades them through the existing
+executor, sentry manages everything open (Mode A and Mode B alike), and the
+system journals and reflects on itself daily.
+
+**Independence is a hard constraint:** this repo is open source and
+producer-agnostic. Signals arrive as JSON batches in the §5 `Candidate` schema
+(`coin/entry/tp/sl/reasoning/news`) — nothing in hl knows or references who
+wrote them. Any private signal engine integrates by writing files (or calling
+`hl exec propose`); the bridge lives on the producer's side, never here.
+
+### 15.1 The handoff: watched intake directory (JSON batch files)
+
+The producer drops `*.json` (a list or a single object of candidate fields)
+into `~/.hyperliquid-cli/intake/<network>/`. The agent polls the directory;
+per new file: parse → queue into the intake stream → move the file to
+`processed/` (parse failure ⇒ `failed/` + alert; never silently deleted).
+
+Files beat an HTTP API here, deliberately:
+
+- **No open port.** The process holding trading keys exposes zero network
+  surface — the right OSS security posture for a trading CLI.
+- **Durable, auditable, replayable.** The raw batch survives on disk; the
+  existing content-hash candidate ids make a re-dropped file a no-op, and the
+  §5 idempotency machinery already guarantees no double-fire across restarts.
+- **Transport-agnostic.** Same host: the producer's cron writes the file.
+  Cross-host: scp/rsync/object-store sync — entirely the producer's concern.
+
+An authenticated HTTP intake (`hl agent serve`) can become a later opt-in
+sub-phase if push-over-network is ever needed; it is not the default.
+
+### 15.2 The supervisor: `hl agent run`
+
+One foreground process; the scheduler is deterministic code (the "agent" is
+the loop — LLM calls stay exactly where they already are: decision, sentry
+manager, tuners, journal narrative):
+
+- **Intake watch** (poll every few seconds): a new batch triggers an exec pass
+  immediately — signals trade while fresh, no cadence wait.
+- **Exec cadence** (periodic `run_once`): catches deferred WAITs and freshness
+  expiry even when no new files arrive.
+- **Sentry cadence**: watch pass per sentry interval; `--shadow` / `--manage`
+  semantics and the §14 graduation rules unchanged.
+- **Daily jobs** (UTC times, tunable): journal write → reflection distill →
+  tuner run → report alert.
+- **Ops surface:** heartbeat + breaker events via the existing JSONL alerter;
+  `hl agent status` = last-pass times, breaker state, open positions, day P&L,
+  pending tuner proposals.
+
+Crash-safety is already built (idempotency keys recorded before fire, intake
+HWM, ledger-first fills); the supervisor adds per-loop failure backoff like
+`exec run`. `deploy/` ships a systemd unit (`Restart=always`), a Dockerfile,
+and a VPS ops doc. Native SL/TP (§7) covers the dead window between crash and
+restart.
+
+### 15.3 Daily journal: `hl journal`
+
+Per network, per day, built deterministically from the state store: fires and
+skips with a gate-reason tally, resolves with R-multiples, expectancy and
+profit factor, sentry actions taken, breaker / loss-limit events, pending
+tuner proposals. Written to `~/.hyperliquid-cli/journal/<network>/YYYY-MM-DD.md`.
+Then **one** opus call appends a narrative reflection section — out-of-path,
+fully logged like tuner calls, and structurally unable to touch config.
+`hl journal write` (idempotent re-run), `show [date]`, `ls`.
+
+### 15.4 Reflection memory (bounded inject)
+
+The daily reflection is also distilled into a one-paragraph row in a
+`reflections` table. The exec decision prompt and the sentry context gain a
+"recent lessons" block: the last N paragraphs (N small, token-capped, both
+clamped). Two rules keep this safe: reflections are generated **only from our
+own logged outcomes**, never from raw external text (prompt-injection
+hygiene); and the block is advisory context — the gate still owns everything
+that touches money. `decision_log` records which reflection rows were in
+context, so the inject's value is measurable the same way 6b measured the
+sentry LLM.
+
+### 15.5 Autonomy boundaries (§1/§9/§10 hold — restated because agent mode tempts violations)
+
+- **Tuner proposals auto-promote on paper only.** Testnet and mainnet stay
+  propose→approve — the journal and `agent status` surface pending diffs so
+  approval is one command. No LLM ever promotes its own tunable surface on a
+  live network.
+- **Mode A adoption:** sentry adopts an unmanaged position into the ledger
+  only when a stop already exists (exchange trigger order): entry = actual avg
+  price, `initial_sl` = trigger price, row flagged `adopted`; thereafter
+  managed identically to Mode B. **No stop anywhere ⇒ alert + skip — never
+  invent one** (an invented stop is an order the human didn't specify).
+  `hl sentry adopt` does the same on demand.
+- **Mainnet:** every existing gate (env flag + `--network` + typed confirm +
+  graduation) is unchanged. Agent mode adds no new path to mainnet.
+
+### 15.6 Config split (§9 holds)
+
+- **`.env` hard caps:** `HL_AGENT_JOURNAL_MODEL` (+ token budget),
+  `HL_AGENT_REFLECT_INJECT_MAX` (N) + token cap, intake dir override,
+  daily-job UTC times.
+- **Tunable surface (clamped):** exec cadence minutes, intake poll seconds,
+  journal narrative on/off, reflection inject on/off.
+
+### 15.7 Sub-phases and gates
+
+| Sub-phase | Scope | Gate |
+| --------- | ----- | ---- |
+| 7a | supervisor + intake dir + deploy templates | drop a batch file → paper trades end-to-end; `kill -9` mid-pass + restart ⇒ no double-fire, file not reprocessed |
+| 7b | journal (deterministic digest + opus narrative) | a day of paper trading yields a journal that reconciles with `exec report`; narrative present + logged |
+| 7c | reflection memory + scheduled tuners | capped inject visible in `decision_log`; nightly tuner: paper auto-promotes, testnet/mainnet wait for approval |
+| 7d | Mode A adoption | manual testnet order with a stop gets adopted + trailed; stopless position alerts and stays untouched |
+
+Order: 7a → 7b → 7c → 7d.

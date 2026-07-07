@@ -45,6 +45,7 @@ Work proceeds **phase by phase** (PLAN.md §12), each phase ending at a review g
 | 4 — Self-tuning              | Stats cohorts, config + prompt tuners, propose→approve         | Tuner proposes from logged outcomes; `promote` works  |
 | 5 — Mainnet hardening        | Native exchange SL/TP, mainnet gate, key review, alerting      | Testnet/shadow expectancy clears → tiny mainnet caps  |
 | 6 — Sentry (a→d)             | In-trade manager: trail engine → LLM shadow → gated live → ADD | Per sub-phase, PLAN.md §14                            |
+| 7 — Agent mode (a→d)         | Supervisor + intake dir, daily journal, reflection, adoption   | Per sub-phase, PLAN.md §15                            |
 
 Don't build ahead of the current phase or skip a gate.
 
@@ -129,9 +130,11 @@ hl markets  ls | prices
 hl asset    price <coin> | book <coin>            # -w for live watch
 hl trade    order limit|market|stop-loss|take-profit | cancel | cancel-all | set-leverage   # Mode A
 hl exec     propose | once | run | shadow | status | report | breaker                        # Mode B
-hl sentry   once | run | shadow | manage | status | log                                      # in-trade manager (§14)
+hl sentry   once | run | shadow | manage | adopt | status | log                              # in-trade manager (§14)
 hl tune     run | diff | promote | history
 hl config   show | set | edit
+hl agent    run | status        # autonomous supervisor (§15)
+hl journal  write | show | ls   # daily journal (§15)
 ```
 
 `exec once` = one full pass (intake → enrich → decision → gate → fire → monitor). `exec run` = continuous loop. `exec shadow` = decide and log but **fire nothing** (pre-mainnet confidence + tuner training data). `exec breaker` = kill switch (halts new fires; open positions still managed). Idempotency + a high-water mark on the intake stream mean a restart never double-fires.
