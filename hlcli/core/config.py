@@ -89,6 +89,8 @@ class Caps(BaseSettings):
     decision_max_tokens: int = 1024
     tuner_model: str = "claude-opus-4-8"
     tuner_max_tokens: int = 4096
+    journal_model: str = "claude-opus-4-8"  # daily narrative — out-of-path, one call/day
+    journal_max_tokens: int = 2048
 
     @property
     def coins(self) -> tuple[str, ...]:

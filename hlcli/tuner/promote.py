@@ -50,6 +50,12 @@ def paths(caps: Caps) -> TunerPaths:
     )
 
 
+def pending_proposals(caps: Caps) -> list[str]:
+    """Proposal files awaiting `tune promote` — surfaced by `agent status` and the journal."""
+    p = paths(caps)
+    return [f.name for f in (p.proposed_config, p.proposed_prompt) if f.exists()]
+
+
 def write_proposed_config(caps: Caps, cfg: TunableConfig) -> Path:
     p = paths(caps).proposed_config
     p.parent.mkdir(parents=True, exist_ok=True)

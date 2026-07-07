@@ -99,3 +99,16 @@ def test_agent_status_paper(isolated_caps):
     assert payload["network"] == "paper"
     assert payload["running"] is False
     assert payload["pending_proposals"] == []
+
+
+def test_journal_write_show_ls_paper(isolated_caps):
+    result = runner.invoke(app, ["--json", "journal", "write", "--no-narrative"])
+    assert result.exit_code == 0
+    day = json.loads(result.output)["date"]
+
+    shown = runner.invoke(app, ["--json", "journal", "show", day])
+    assert shown.exit_code == 0
+    assert "_narrative disabled_" in json.loads(shown.output)["content"]
+
+    listed = runner.invoke(app, ["--json", "journal", "ls"])
+    assert json.loads(listed.output)["days"] == [day]

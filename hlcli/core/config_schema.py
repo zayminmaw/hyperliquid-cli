@@ -70,6 +70,7 @@ class AgentConfig(BaseModel):
     intake_poll_seconds: float = 5.0     # also the supervisor's tick granularity
     exec_interval_minutes: float = 5.0   # full intake pass; new files trigger one immediately
     sentry_interval_seconds: float = 60.0
+    journal_narrative: bool = True       # the one daily opus reflection in `hl journal`
 
 
 class TunableConfig(BaseModel):

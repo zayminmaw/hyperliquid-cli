@@ -152,10 +152,12 @@ Gate: batch file dropped → paper trades end-to-end; `kill -9` mid-pass + resta
 ✅ Phase 7a complete — 368 tests pass (17 new). Live-verified on paper: dropped batch → detected in ≤5s → enqueued → immediate exec pass → real sonnet decision (skip, thesis-aware on live candles) → archived; `kill -9` + restart re-processed nothing; identical re-drop deduped (`enqueued=0 duplicates=1`); `agent status` live from a second process.
 
 ### 7b — Daily journal
-Gate: a paper-trading day yields a journal reconciling with `exec report`; opus narrative present + logged.
+Gate: a paper-trading day yields a journal reconciling with `exec report`; opus narrative present + logged. ✅ passed (live-verified on paper)
 
-- [ ] 7b.1 Deterministic digest from state store (fires/skips + gate-reason tally, resolves + R, expectancy/PF, sentry actions, breaker events, pending proposals) → `journal/<network>/YYYY-MM-DD.md`; `hl journal write|show|ls`
-- [ ] 7b.2 Opus narrative section — one call/day, out-of-path, logged, cannot touch config
+- [x] 7b.1 Deterministic digest from state store (per-verdict lines incl. the model's rationale, gate-reason tally, resolves + R/expectancy/PF, sentry actions, warning+ alert events, pending proposals, `exec report`-reconciling snapshot) → `journal/<network>/YYYY-MM-DD.md`; `hl journal write|show|ls`; `decisions_between`/`sentry_between` range queries added to the store; agent daily job writes yesterday's journal
+- [x] 7b.2 Opus narrative — one call/day (`HL_JOURNAL_MODEL`/`HL_JOURNAL_MAX_TOKENS` caps, `agent.journal_narrative` tunable switch), cached per-date in state meta (re-writes never re-roll/re-bill), failure ⇒ placeholder + `journal_narrative_failed` alert, digest always writes
+
+✅ Phase 7b complete — 377 tests pass (9 new). Live-verified on paper: journal reconciled with `exec report` (2 decisions, 2 skips, flat book); real opus reflection landed and immediately flagged that skips lacked rationale — digest enriched with per-verdict rationale lines in response; re-write reused the cached narrative.
 
 ### 7c — Reflection memory + scheduled tuners
 Gate: capped inject visible in decision_log; nightly tuner: paper auto-promotes, testnet/mainnet wait.

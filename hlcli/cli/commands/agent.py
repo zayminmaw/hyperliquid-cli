@@ -21,17 +21,18 @@ from hlcli.agent.supervisor import (
 from hlcli.cli.commands.sentry import check_mainnet_graduation
 from hlcli.cli.context import open_env, state_of
 from hlcli.cli.output import emit, note
-from hlcli.core.config import Caps
 from hlcli.core.config_schema import load_tunable
 from hlcli.executor.protect import requires_native_protection
 from hlcli.executor.runner import run_once
+from hlcli.journal.digest import utc_date
+from hlcli.journal.writer import write_journal
 from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.safety.graduation import assess
 from hlcli.sentry.live import manage_live
 from hlcli.sentry.shadow import shadow_pass
 from hlcli.state.store import StateStore
-from hlcli.tuner.promote import paths
+from hlcli.tuner.promote import pending_proposals
 
 app = typer.Typer(no_args_is_help=True, help="Autonomous supervisor (agent mode).")
 
@@ -72,17 +73,25 @@ def run(
         run_once(exchange, state, caps, t, include_intake=False, alerter=alerter)
 
     def daily_pass() -> None:
-        # 7a ships the daily report; 7b adds the journal write here.
+        # Journal the day that just ended (the job runs shortly after UTC midnight);
+        # narrative honors the tunable and degrades gracefully without a key.
+        yesterday = utc_date(time.time() - 86_400)
+        journal = write_journal(
+            exchange, state, caps, g.network, yesterday,
+            narrative=load_tunable().agent.journal_narrative,
+            alerter=alerter, pending_proposals=pending_proposals(caps),
+        )
         positions = exchange.get_positions()
         alerter.alert(
             "agent_daily_report",
+            journal=str(journal),
             equity=exchange.equity(),
             open_positions=len(positions),
             unrealized_pnl=round(sum(p.unrealized_pnl for p in positions), 4),
             breaker="tripped" if Breaker(state, caps).tripped() else "clear",
             deferred=state.deferred_count(),
             graduation=assess(state.resolved_trades(), caps),
-            pending_proposals=_pending_proposals(caps),
+            pending_proposals=pending_proposals(caps),
         )
 
     supervisor = Supervisor(
@@ -134,7 +143,7 @@ def status(ctx: typer.Context) -> None:
             "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
             "realized_today": _realized_today(state, now),
             "deferred": state.deferred_count(),
-            "pending_proposals": _pending_proposals(caps),
+            "pending_proposals": pending_proposals(caps),
             "intake_dir": str(intake_dir(caps, g.network)),
         },
         as_json=g.json_out, title="agent status",
@@ -151,8 +160,3 @@ def _realized_today(state: StateStore, now: float) -> float:
         hour=0, minute=0, second=0, microsecond=0).timestamp()
     return round(sum(t["realized"] or 0.0 for t in state.resolved_trades()
                      if not t["shadow"] and (t["closed_at"] or 0) >= midnight), 4)
-
-
-def _pending_proposals(caps: Caps) -> list[str]:
-    p = paths(caps)
-    return [f.name for f in (p.proposed_config, p.proposed_prompt) if f.exists()]

@@ -162,7 +162,21 @@ tunable surface (`TunableConfig.agent`, clamped); deploy templates in `deploy/`.
 
 ---
 
-## `tests/` — 368 passing, keyless
+## `journal/` — the daily trade journal (Phase 7b)
+
+| File | What it does | Key surface |
+|------|--------------|-------------|
+| `digest.py` | One UTC day of the state store, tallied deterministically: per-verdict lines (coin/action/conviction/**rationale** — a skip without its rationale is unauditable), gate-reason tally, opened/resolved trades with realized/R/expectancy/profit factor, sentry action counts, warning+ alert events, and a write-time snapshot that reconciles with `exec report`. | `build_digest()`, `render()`, `DayDigest`, `day_bounds()`, `utc_date()` |
+| `narrative.py` | The LLM half: one opus call ("senior discretionary trader" persona) reflecting on the digest — judge process not just P&L. Out-of-path; input is our own tallied outcomes, never raw external text. | `narrate()` |
+| `writer.py` | Digest + reflection → `journal/<network>/YYYY-MM-DD.md`. The narrative is cached per-date in state meta (one call per day, ever); a narrative failure degrades to a placeholder + `journal_narrative_failed` alert — the deterministic digest always writes. | `write_journal()`, `journal_path()` |
+
+Wired by `hl journal write|show|ls` and the agent's daily job (writes yesterday).
+`agent.journal_narrative` (tunable) switches the LLM section; `HL_JOURNAL_MODEL` /
+`HL_JOURNAL_MAX_TOKENS` cap it.
+
+---
+
+## `tests/` — 377 passing, keyless
 
 Highest-risk code first: gate/sizing, the LLM-output validator/clamp, paper
 exchange + monitor, intake idempotency + HWM, config-schema clamping, the mainnet

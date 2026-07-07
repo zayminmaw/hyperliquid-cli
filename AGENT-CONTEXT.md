@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-07 | Session: Phase 7 planned (PLAN.md §15) + 7a BUILT (supervisor + intake dir + deploy templates); 368 tests pass; live-verified incl. kill-9 restart; uncommitted
+> Last updated: 2026-07-07 | Session: 7a committed; 7b BUILT (hl journal digest + cached opus narrative, wired into agent daily job); 377 tests pass; live-verified; 7b uncommitted
 
 ---
 
 ## 🎯 CURRENT TASK
 
 - Task: Phase 7 — Agent mode: autonomous supervisor + daily journal + reflection memory + Mode A adoption (PLAN.md §15)
-- Goal: 7a supervisor + intake dir ✅ → 7b `hl journal` → 7c reflection inject + scheduled tuners → 7d sentry adopts Mode A
-- Status: 7a complete, uncommitted. Gate live-verified on paper (drop→trade-path→archive; kill -9 + restart = no reprocess/double-queue)
-- Next action: commit 7a, then build 7b (`hl journal` deterministic digest + opus narrative into the daily job slot)
+- Goal: 7a supervisor + intake dir ✅ → 7b `hl journal` ✅ → 7c reflection inject + scheduled tuners → 7d sentry adopts Mode A
+- Status: 7b complete, uncommitted (7a committed by user). Gate live-verified: journal reconciles with `exec report`; real opus reflection written + cached
+- Next action: commit 7b, then build 7c (`reflections` table + bounded "recent lessons" inject into decision prompt + sentry context; tuner scheduled in agent loop, auto-promote paper only)
 - Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: built 7a — `agent/intake_watch.py` (poll → parse → enqueue-BEFORE-move → `processed/`|`failed/`+alert, 2s settle window), `agent/supervisor.py` (tick loop: intake every tick w/ new-batch⇒immediate exec, exec/sentry cadences from clamped `TunableConfig.agent`, daily job at `HL_AGENT_DAILY_UTC` meta-persisted, hourly heartbeat, failure backoff), `hl agent run|status`, deploy/ (systemd+Dockerfile+ops doc); extracted shared `context.open_env` + `alerts.network_alerter` (were triplicated); `sentry.check_mainnet_graduation` now public
-- Result: 368 pass (17 new); live paper run: batch → sonnet skip (thesis-aware) → archived; restart reprocessed nothing; re-drop deduped; status live cross-process
-- File(s) touched: agent/{__init__,intake_watch,supervisor}.py, cli/{context,app}.py, cli/commands/{agent,exec_,sentry}.py, core/{config,config_schema}.py, safety/alerts.py, .env.example, deploy/*, tests/test_agent_{intake,supervisor}.py (new), tests/test_{cli,config_schema}.py, docs/{cli,modules}.md, ACTION-ITEMS.md
+- Did: built 7b — `journal/digest.py` (day slice via new `decisions_between`/`sentry_between`; per-verdict rationale lines, gate-reason tally, R/expectancy/PF, sentry+alert tallies, report-reconciling snapshot), `journal/narrative.py` (opus, trader persona, judge-process-not-P&L), `journal/writer.py` (narrative cached per-date in meta — one call/day ever; failure ⇒ placeholder + alert, digest always writes), `hl journal write|show|ls`, agent daily job now writes YESTERDAY's journal; `tuner.promote.pending_proposals()` shared helper; caps `HL_JOURNAL_MODEL/MAX_TOKENS`, tunable `agent.journal_narrative`
+- Result: 377 pass (9 new); live: journal reconciled with report; real opus reflection flagged unauditable skips → digest enriched with rationale lines same session; rewrite reused cache
+- File(s) touched: journal/* (new), cli/commands/{journal(new),agent}.py, cli/app.py, state/store.py, core/{config,config_schema}.py, tuner/promote.py, .env.example, tests/test_journal.py (new), tests/test_cli.py, docs/{cli,modules}.md, ACTION-ITEMS.md
 
 ---
 
@@ -46,6 +46,7 @@
 | `hlcli/sentry/{decision,context,shadow}.py` | 6b: strict `submit_management` (no ADD) · thesis+2-frame context (prior_actions excludes shadow rows) · shadow pass pairing proposal with the 6a baseline (never shown to model) |
 | `hlcli/sentry/{gate,live}.py` | 6c/6d: management gate (churn clocks FROM sentry_log; ↓risk-only when halted; ADD = winners-only, code-sized, raise-stop-first) · live pass (eval spacing, 24h budgets, real book only) · `graduation_for_management` gates mainnet on the TESTNET book |
 | `hlcli/agent/{intake_watch,supervisor}.py` | 7a: watched intake dir (enqueue-before-move, settle window) · tick loop (cadences, daily job, heartbeat, backoff); `cli/context.open_env` + `alerts.network_alerter` shared by exec/sentry/agent |
+| `hlcli/journal/{digest,narrative,writer}.py` | 7b: day digest (verdict rationales, R/PF, report-reconciling) · opus reflection · writer (narrative meta-cached per date; failure degrades, never blocks) |
 | `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts (`scaled`=win) · tuners · promote consumes proposals, audit records content |
 | `hlcli/safety/{breaker,alerts,graduation}.py` | kill switch + loss-limit (`persist=` for dry-run) · JSONL alerts · graduation verdict |
 

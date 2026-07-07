@@ -320,3 +320,30 @@ hl agent run                       # paper by default, like everything else
 hl --network testnet -y agent run --manage
 hl --json agent status
 ```
+
+---
+
+## `hl journal` — the daily trade journal (Phase 7)
+
+One markdown file per UTC day per network at `<data_dir>/journal/<network>/`.
+The digest half is deterministic (decisions with the model's own rationale,
+gate-reason tally, trades + R/expectancy/profit factor, sentry actions,
+warning+ alerts, a snapshot reconciling with `exec report`); the reflection
+half is **one** opus call, cached in state meta so rebuilding a day never
+re-rolls or re-bills it. The agent's daily job writes yesterday's journal
+automatically.
+
+### `journal write`
+
+`--date YYYY-MM-DD` (default today) · `--no-narrative` skips the LLM section
+(also switchable via the tunable `agent.journal_narrative`). A missing API key
+degrades to a placeholder + `journal_narrative_failed` alert — the digest
+always writes.
+
+### `journal show [date]` · `journal ls`
+
+```bash
+hl journal write                   # today, with reflection
+hl journal show 2026-07-07
+hl --json journal ls
+```

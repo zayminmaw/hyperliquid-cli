@@ -179,6 +179,13 @@ class StateStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def decisions_between(self, t0: float, t1: float) -> list[dict]:
+        """Decision-log rows with `t0 <= ts < t1`, oldest first — the journal's day slice."""
+        rows = self._conn.execute(
+            "SELECT * FROM decision_log WHERE ts >= ? AND ts < ? ORDER BY id", (t0, t1)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def decision_for(self, candidate_id: str) -> dict | None:
         """The latest logged *verdict* for a candidate (WAIT re-checks log several rows;
         the newest one carrying a decision is the one that fired)."""
@@ -273,6 +280,13 @@ class StateStore:
     def recent_sentry(self, limit: int = 50) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM sentry_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def sentry_between(self, t0: float, t1: float) -> list[dict]:
+        """Sentry-log rows with `t0 <= ts < t1`, oldest first — the journal's day slice."""
+        rows = self._conn.execute(
+            "SELECT * FROM sentry_log WHERE ts >= ? AND ts < ? ORDER BY id", (t0, t1)
         ).fetchall()
         return [dict(r) for r in rows]
 
