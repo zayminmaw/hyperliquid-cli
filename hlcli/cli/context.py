@@ -13,11 +13,14 @@ import typer
 
 from hlcli.accounts.keystore import Keystore
 from hlcli.accounts.store import Account, AccountType, open_store
-from hlcli.core.config import get_caps
+from hlcli.core.config import Caps, get_caps
+from hlcli.core.config_schema import TunableConfig, load_tunable
 from hlcli.core.network import enforce_mainnet_gate
 from hlcli.core.types import Network
 from hlcli.exchange.base import Exchange
 from hlcli.exchange.factory import build_exchange
+from hlcli.exchange.paper import PaperExchange
+from hlcli.state.store import StateStore, open_state
 
 
 @dataclass
@@ -49,6 +52,19 @@ def resolve_account(state: GlobalState) -> Account | None:
     if state.network is Network.PAPER:
         return None
     return open_store(get_caps()).resolve(state.account, state.network)
+
+
+def open_env(state: GlobalState, *, for_write: bool) -> tuple[Exchange, StateStore, Caps, TunableConfig]:
+    """The executor-side working set (exchange, state, caps, tunable) for the current
+    network. Shared by `exec`, `sentry`, and `agent` so paper wiring stays identical."""
+    caps = get_caps()
+    store = open_state(caps, state.network)
+    tunable = load_tunable()
+    if state.network is Network.PAPER:
+        exchange: Exchange = PaperExchange(caps.starting_equity, state=store)
+    else:
+        exchange = build_for(state, for_write=for_write)
+    return exchange, store, caps, tunable
 
 
 def build_for(state: GlobalState, *, for_write: bool) -> Exchange:

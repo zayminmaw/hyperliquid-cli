@@ -13,7 +13,7 @@ from typing import Optional
 
 import typer
 
-from hlcli.cli.commands import account, asset, config, exec_, markets, sentry, trade, tune
+from hlcli.cli.commands import account, agent, asset, config, exec_, markets, sentry, trade, tune
 from hlcli.cli.context import GlobalState
 from hlcli.core.config import get_caps
 from hlcli.core.network import resolve_network
@@ -50,3 +50,4 @@ app.add_typer(exec_.app, name="exec")
 app.add_typer(sentry.app, name="sentry")
 app.add_typer(config.app, name="config")
 app.add_typer(tune.app, name="tune")
+app.add_typer(agent.app, name="agent")

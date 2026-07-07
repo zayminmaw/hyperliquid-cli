@@ -95,3 +95,17 @@ def test_malformed_file_is_surfaced(tmp_path: Path):
     p.write_text("{ not json ")
     with pytest.raises(ConfigError):
         load_tunable(p)
+
+
+def test_clamp_bounds_agent_cadences():
+    from hlcli.core.config_schema import AgentConfig
+
+    wild = TunableConfig(agent=AgentConfig(
+        intake_poll_seconds=0.01, exec_interval_minutes=10_000, sentry_interval_seconds=1))
+    a = clamp(wild).agent
+    assert a.intake_poll_seconds == 1.0
+    assert a.exec_interval_minutes == 120.0
+    assert a.sentry_interval_seconds == 10.0
+
+    nan = TunableConfig(agent=AgentConfig(intake_poll_seconds=float("nan")))
+    assert clamp(nan).agent.intake_poll_seconds == AgentConfig().intake_poll_seconds

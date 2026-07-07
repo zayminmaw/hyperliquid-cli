@@ -17,16 +17,14 @@ import time
 
 import typer
 
-from hlcli.cli.context import GlobalState, build_for, state_of
+from hlcli.cli.context import GlobalState, open_env, state_of
 from hlcli.cli.output import emit, emit_rows, note
-from hlcli.core.config import Caps, get_caps
-from hlcli.core.config_schema import TunableConfig, load_tunable
+from hlcli.core.config import get_caps
+from hlcli.core.config_schema import load_tunable
 from hlcli.core.types import Network, Side
-from hlcli.exchange.base import Exchange
-from hlcli.exchange.paper import PaperExchange
 from hlcli.executor.protect import requires_native_protection
 from hlcli.executor.runner import run_once
-from hlcli.safety.alerts import Alerter
+from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.sentry.apply import manage_open_trades
 from hlcli.sentry.live import graduation_for_management, manage_live
@@ -38,26 +36,11 @@ app = typer.Typer(no_args_is_help=True, help="In-trade manager (sentry).")
 _MAX_BACKOFF_SECONDS = 600.0
 
 
-def _env(g: GlobalState, *, for_write: bool) -> tuple[Exchange, StateStore, Caps, TunableConfig]:
-    caps = get_caps()
-    state = open_state(caps, g.network)
-    tunable = load_tunable()
-    if g.network is Network.PAPER:
-        exchange: Exchange = PaperExchange(caps.starting_equity, state=state)
-    else:
-        exchange = build_for(g, for_write=for_write)
-    return exchange, state, caps, tunable
-
-
-def _alerter(caps: Caps, network: Network) -> Alerter:
-    return Alerter(caps.data_dir / f"alerts-{network.value}.log")
-
-
 @app.command("once")
 def once(ctx: typer.Context) -> None:
     """One watch pass: manage open trades, resolve, re-check due WAIT deferrals."""
     g = state_of(ctx)
-    exchange, state, caps, tunable = _env(g, for_write=not g.dry_run)
+    exchange, state, caps, tunable = open_env(g, for_write=not g.dry_run)
     if g.dry_run:
         # A dry-run pass through the runner is fully side-effect-free and therefore
         # silent about the trail rules; previewing the engine's plan is more useful.
@@ -67,7 +50,7 @@ def once(ctx: typer.Context) -> None:
               "note": "dry-run (no state changes)"}, as_json=g.json_out, title="sentry once")
         return
     summary = run_once(exchange, state, caps, tunable, include_intake=False,
-                       alerter=_alerter(caps, g.network))
+                       alerter=network_alerter(caps, g.network))
     emit(summary.model_dump(), as_json=g.json_out, title="sentry once")
 
 
@@ -75,7 +58,7 @@ def once(ctx: typer.Context) -> None:
 def shadow(ctx: typer.Context) -> None:
     """6b: LLM management proposals per open position, logged vs the 6a baseline. Fires nothing."""
     g = state_of(ctx)
-    exchange, state, caps, tunable = _env(g, for_write=False)
+    exchange, state, caps, tunable = open_env(g, for_write=False)
     breaker = Breaker(state, caps)
     s = shadow_pass(exchange, state, caps, tunable, breaker_tripped=breaker.tripped())
     emit({"network": g.network.value, "evaluated": s.evaluated, "held": s.held,
@@ -89,18 +72,18 @@ def manage(ctx: typer.Context) -> None:
     """One LIVE management pass — LLM verdicts through the management gate
     (tighten/reduce/close/extend_tp, plus gated ADD). Mainnet requires graduation."""
     g = state_of(ctx)
-    _check_mainnet_graduation(g)
-    exchange, state, caps, tunable = _env(g, for_write=True)
+    check_mainnet_graduation(g)
+    exchange, state, caps, tunable = open_env(g, for_write=True)
     s = manage_live(exchange, state, caps, tunable,
                     native_protected=requires_native_protection(g.network),
-                    alerter=_alerter(caps, g.network))
+                    alerter=network_alerter(caps, g.network))
     emit({"network": g.network.value, "evaluated": s.evaluated, "held": s.held,
           "applied": s.applied, "rejected": s.rejected, "dropped": s.dropped,
           "spaced": s.spaced, "failed": s.failed, "actions": s.actions, "note": s.note},
          as_json=g.json_out, title="sentry manage")
 
 
-def _check_mainnet_graduation(g: GlobalState) -> None:
+def check_mainnet_graduation(g: GlobalState) -> None:
     """Mainnet management must be EARNED on the testnet book (§14): enough resolved
     trades, over enough days, with positive expectancy — the same graduation that
     gates the executor's first real order."""
@@ -128,9 +111,9 @@ def run(
         raise typer.BadParameter("--shadow and --manage are exclusive: manage already logs "
                                  "every proposal, so shadowing on top doubles the LLM spend")
     if with_manage:
-        _check_mainnet_graduation(g)
-    exchange, state, caps, _ = _env(g, for_write=True)
-    alerter = _alerter(caps, g.network)
+        check_mainnet_graduation(g)
+    exchange, state, caps, _ = open_env(g, for_write=True)
+    alerter = network_alerter(caps, g.network)
     mode = " (+shadow)" if with_shadow else " (+manage)" if with_manage else ""
     note(f"sentry running every {interval}s on {g.network.value}{mode} — ctrl-c to stop")
     failures = 0
@@ -172,7 +155,7 @@ def run(
 def status(ctx: typer.Context) -> None:
     """Open trades through the manager's eyes, plus the shadow value-add tally."""
     g = state_of(ctx)
-    exchange, state, _, tunable = _env(g, for_write=False)
+    exchange, state, _, tunable = open_env(g, for_write=False)
     marks = exchange.get_marks()
     rows = []
     for t in state.open_trades():

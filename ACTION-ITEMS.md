@@ -143,11 +143,13 @@ Gate: ADDs pass full entry caps; add-risk covered by unrealized P&L; testnet unt
 Design decided 2026-07-07 (user-confirmed): VPS runtime · watched intake dir (JSON batches, producer-agnostic — repo stays independent of any signal engine) · Mode A adoption alert+skip when stopless · reflection injected bounded · tuner auto-promote paper-only.
 
 ### 7a — Supervisor + intake channel
-Gate: batch file dropped → paper trades end-to-end; `kill -9` mid-pass + restart ⇒ no double-fire, file not reprocessed.
+Gate: batch file dropped → paper trades end-to-end; `kill -9` mid-pass + restart ⇒ no double-fire, file not reprocessed. ✅ passed (live-verified on paper)
 
-- [ ] 7a.1 `hlcli/agent/` supervisor: intake-dir poll (new file → parse → queue → immediate exec pass; processed/ · failed/ + alert), exec cadence, sentry cadence (`--shadow`/`--manage` pass-through, graduation unchanged), daily-job scheduler (UTC), per-loop failure backoff
-- [ ] 7a.2 `hl agent run|status` (status: last-pass times, breaker, positions, day P&L, pending proposals); heartbeat via alerter
-- [ ] 7a.3 `deploy/`: systemd unit (Restart=always) + Dockerfile + VPS ops doc
+- [x] 7a.1 `hlcli/agent/` supervisor: intake-dir poll (new file → parse → queue → immediate exec pass; `processed/` · `failed/` + alert, nothing deleted; 2s settle window; enqueue-before-move so a crash re-parses into dedupe, never double-queue), exec cadence, sentry cadence (`--shadow`/`--manage` pass-through, graduation unchanged), daily job at `HL_AGENT_DAILY_UTC` (meta-persisted: restart-proof + misfire recovery), hourly heartbeat, exponential failure backoff. Cadences on the tunable surface (`TunableConfig.agent`, clamped); passes injected for tests
+- [x] 7a.2 `hl agent run|status` (status reads state meta cross-process: running/pass ages, breaker, book, realized-today, deferred, pending tuner proposals, intake dir); shared `open_env`/`network_alerter` extracted (exec/sentry/agent no longer triplicate them)
+- [x] 7a.3 `deploy/`: systemd unit (Restart=always) + Dockerfile (`[exchange,llm]`, `/data` volume) + VPS ops doc incl. the producer file-drop contract (atomic rename)
+
+✅ Phase 7a complete — 368 tests pass (17 new). Live-verified on paper: dropped batch → detected in ≤5s → enqueued → immediate exec pass → real sonnet decision (skip, thesis-aware on live candles) → archived; `kill -9` + restart re-processed nothing; identical re-drop deduped (`enqueued=0 duplicates=1`); `agent status` live from a second process.
 
 ### 7b — Daily journal
 Gate: a paper-trading day yields a journal reconciling with `exec report`; opus narrative present + logged.

@@ -9,40 +9,20 @@ from typing import Optional
 
 import typer
 
-from hlcli.cli.context import GlobalState, build_for, state_of
+from hlcli.cli.context import open_env, state_of
 from hlcli.cli.output import emit, emit_rows, note
 from hlcli.cli.watch import watch_rows
-from hlcli.core.config import Caps, get_caps
-from hlcli.core.config_schema import TunableConfig, load_tunable
-from hlcli.core.types import Network
-from hlcli.exchange.base import Exchange
-from hlcli.exchange.paper import PaperExchange
+from hlcli.core.config import get_caps
+from hlcli.core.config_schema import load_tunable
 from hlcli.executor.intake import make_candidate, parse_batch
 from hlcli.executor.monitor import position_health
 from hlcli.executor.runner import run_once
-from hlcli.safety.alerts import Alerter
+from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.safety.graduation import assess
-from hlcli.state.store import StateStore, open_state
+from hlcli.state.store import open_state
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
-
-
-def _env(g: GlobalState, *, for_write: bool) -> tuple[Exchange, StateStore, Caps, TunableConfig]:
-    """Build the executor's (exchange, state, caps, tunable) for the current network."""
-    caps = get_caps()
-    state = open_state(caps, g.network)
-    tunable = load_tunable()
-    if g.network is Network.PAPER:
-        exchange: Exchange = PaperExchange(caps.starting_equity, state=state)
-    else:
-        exchange = build_for(g, for_write=for_write)
-    return exchange, state, caps, tunable
-
-
-def _alerter(caps: Caps, network: Network) -> Alerter:
-    """Network-scoped alert sink: JSONL log beside the data dir + stderr."""
-    return Alerter(caps.data_dir / f"alerts-{network.value}.log")
 
 
 @app.command("propose")
@@ -83,8 +63,8 @@ def propose(
 def once(ctx: typer.Context) -> None:
     """One full executor pass (intake → enrich → LLM decision → gate → fire → log)."""
     g = state_of(ctx)
-    exchange, state, caps, tunable = _env(g, for_write=True)
-    summary = run_once(exchange, state, caps, tunable, dry_run=g.dry_run, alerter=_alerter(caps, g.network))
+    exchange, state, caps, tunable = open_env(g, for_write=True)
+    summary = run_once(exchange, state, caps, tunable, dry_run=g.dry_run, alerter=network_alerter(caps, g.network))
     emit(summary.model_dump(), as_json=g.json_out, title="exec once")
 
 
@@ -92,7 +72,7 @@ def once(ctx: typer.Context) -> None:
 def shadow(ctx: typer.Context) -> None:
     """Decide + gate + log a full pass but fire nothing (pre-mainnet confidence + tuner data)."""
     g = state_of(ctx)
-    exchange, state, caps, tunable = _env(g, for_write=False)
+    exchange, state, caps, tunable = open_env(g, for_write=False)
     summary = run_once(exchange, state, caps, tunable, fire_enabled=False, dry_run=g.dry_run)
     emit(summary.model_dump(), as_json=g.json_out, title="exec shadow")
 
@@ -105,8 +85,8 @@ _MAX_BACKOFF_SECONDS = 60.0
 def run(ctx: typer.Context, interval: float = typer.Option(5.0, "--interval", help="seconds between passes")) -> None:
     """Continuous executor loop (ctrl-c to stop)."""
     g = state_of(ctx)
-    exchange, state, caps, _ = _env(g, for_write=True)
-    alerter = _alerter(caps, g.network)
+    exchange, state, caps, _ = open_env(g, for_write=True)
+    alerter = network_alerter(caps, g.network)
     note(f"executor running every {interval}s on {g.network.value} — ctrl-c to stop")
     failures = 0
     try:
@@ -152,7 +132,7 @@ def breaker(
 def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch")) -> None:
     """Live position health for the executor's book."""
     g = state_of(ctx)
-    exchange, state, _caps, _tunable = _env(g, for_write=False)
+    exchange, state, _caps, _tunable = open_env(g, for_write=False)
 
     def rows() -> list[dict]:
         return position_health(exchange)
@@ -169,7 +149,7 @@ def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch"
 def report(ctx: typer.Context) -> None:
     """Account summary: equity, open positions, unrealized P&L, breaker + graduation readiness."""
     g = state_of(ctx)
-    exchange, state, caps, _tunable = _env(g, for_write=False)
+    exchange, state, caps, _tunable = open_env(g, for_write=False)
     positions = exchange.get_positions()
     emit(
         {

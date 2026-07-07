@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-07 | Session: Phase 7 "Agent mode" PLANNED (PLAN.md §15 + ACTION-ITEMS Phase 7 written, user-confirmed design); no code yet
+> Last updated: 2026-07-07 | Session: Phase 7 planned (PLAN.md §15) + 7a BUILT (supervisor + intake dir + deploy templates); 368 tests pass; live-verified incl. kill-9 restart; uncommitted
 
 ---
 
 ## 🎯 CURRENT TASK
 
 - Task: Phase 7 — Agent mode: autonomous supervisor + daily journal + reflection memory + Mode A adoption (PLAN.md §15)
-- Goal: 7a `hl agent run` supervisor + watched intake dir + deploy templates → 7b `hl journal` → 7c reflection inject + scheduled tuners → 7d sentry adopts Mode A
-- Status: planned, not started (design user-confirmed 2026-07-07). Phase 6 complete and fully committed (6d = 079664c)
-- Next action: implement 7a (`hlcli/agent/`)
+- Goal: 7a supervisor + intake dir ✅ → 7b `hl journal` → 7c reflection inject + scheduled tuners → 7d sentry adopts Mode A
+- Status: 7a complete, uncommitted. Gate live-verified on paper (drop→trade-path→archive; kill -9 + restart = no reprocess/double-queue)
+- Next action: commit 7a, then build 7b (`hl journal` deterministic digest + opus narrative into the daily job slot)
 - Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: researched thirdeye-core (context only — repos stay decoupled; its SuggestionSignal maps 1:1 onto Candidate, external crons trigger its runs) and wrote the Phase 7 spec: PLAN.md §15, ACTION-ITEMS Phase 7, CLAUDE.md phase table + command surface (`hl agent`, `hl journal`, `sentry adopt`)
-- Result: plan on disk; user decisions captured: VPS runtime, intake = watched JSON-batch dir (no HTTP port), adoption alert+skip when stopless, bounded reflection inject, tuner auto-promote paper-only
-- File(s) touched: PLAN.md, ACTION-ITEMS.md, CLAUDE.md, AGENT-CONTEXT.md
+- Did: built 7a — `agent/intake_watch.py` (poll → parse → enqueue-BEFORE-move → `processed/`|`failed/`+alert, 2s settle window), `agent/supervisor.py` (tick loop: intake every tick w/ new-batch⇒immediate exec, exec/sentry cadences from clamped `TunableConfig.agent`, daily job at `HL_AGENT_DAILY_UTC` meta-persisted, hourly heartbeat, failure backoff), `hl agent run|status`, deploy/ (systemd+Dockerfile+ops doc); extracted shared `context.open_env` + `alerts.network_alerter` (were triplicated); `sentry.check_mainnet_graduation` now public
+- Result: 368 pass (17 new); live paper run: batch → sonnet skip (thesis-aware) → archived; restart reprocessed nothing; re-drop deduped; status live cross-process
+- File(s) touched: agent/{__init__,intake_watch,supervisor}.py, cli/{context,app}.py, cli/commands/{agent,exec_,sentry}.py, core/{config,config_schema}.py, safety/alerts.py, .env.example, deploy/*, tests/test_agent_{intake,supervisor}.py (new), tests/test_{cli,config_schema}.py, docs/{cli,modules}.md, ACTION-ITEMS.md
 
 ---
 
@@ -45,6 +45,7 @@
 | `hlcli/sentry/{engine,apply}.py` | 6a: pure R-anchored rules (ratchet/trail/scale-out) · apply (idempotent partials, live stop place-new-then-cancel-old, shadow orderless) |
 | `hlcli/sentry/{decision,context,shadow}.py` | 6b: strict `submit_management` (no ADD) · thesis+2-frame context (prior_actions excludes shadow rows) · shadow pass pairing proposal with the 6a baseline (never shown to model) |
 | `hlcli/sentry/{gate,live}.py` | 6c/6d: management gate (churn clocks FROM sentry_log; ↓risk-only when halted; ADD = winners-only, code-sized, raise-stop-first) · live pass (eval spacing, 24h budgets, real book only) · `graduation_for_management` gates mainnet on the TESTNET book |
+| `hlcli/agent/{intake_watch,supervisor}.py` | 7a: watched intake dir (enqueue-before-move, settle window) · tick loop (cadences, daily job, heartbeat, backoff); `cli/context.open_env` + `alerts.network_alerter` shared by exec/sentry/agent |
 | `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts (`scaled`=win) · tuners · promote consumes proposals, audit records content |
 | `hlcli/safety/{breaker,alerts,graduation}.py` | kill switch + loss-limit (`persist=` for dry-run) · JSONL alerts · graduation verdict |
 

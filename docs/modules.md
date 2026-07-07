@@ -150,7 +150,19 @@ honest R) → slice protection (failure ⇒ emergency close, `aborted`).
 
 ---
 
-## `tests/` — 351 passing, keyless
+## `agent/` — the autonomous supervisor (Phase 7a)
+
+| File | What it does | Key surface |
+|------|--------------|-------------|
+| `intake_watch.py` | The producer-agnostic signal handoff: polls `<intake_dir>/<network>/` for `*.json` candidate batches → parse → enqueue → archive to `processed/` (`failed/` + alert on bad content; nothing deleted). Enqueue happens **before** the move, so a crash in between re-parses into content-hash duplicates, never a double-queue. A 2s settle window skips files still being written. | `poll()`, `intake_dir()`, `IntakeResult` |
+| `supervisor.py` | One deterministic loop owning all cadences: intake poll every tick (new candidates trigger an exec pass immediately), exec + sentry passes on their intervals, the daily job at `HL_AGENT_DAILY_UTC` (meta-persisted — a restart never re-runs it; a start after the scheduled time still runs it), hourly heartbeat alert, exponential failure backoff. Passes are injected callables; LLM calls stay inside them. Last-run timestamps persist in state meta for cross-process `agent status`. | `Supervisor` (`tick()`, `run_forever()`), `Cadence`, meta keys `LAST_*` |
+
+Wired by `hl agent run|status` (`cli/commands/agent.py`); cadences live on the
+tunable surface (`TunableConfig.agent`, clamped); deploy templates in `deploy/`.
+
+---
+
+## `tests/` — 368 passing, keyless
 
 Highest-risk code first: gate/sizing, the LLM-output validator/clamp, paper
 exchange + monitor, intake idempotency + HWM, config-schema clamping, the mainnet

@@ -289,3 +289,34 @@ as rich tables / styled notes. Watch (`-w`) modes fall back to a single rendered
 table under `--json` (no live loop). See [setup.md](./setup.md) for end-to-end
 examples and [architecture.md](./architecture.md) for what each `exec` verb does
 inside the pipeline.
+
+---
+
+## `hl agent` — the autonomous supervisor (Phase 7)
+
+One process owning all cadences: intake-directory watch, exec passes, sentry
+passes, daily jobs. The loop is deterministic code; LLM calls stay inside the
+existing decision/management/tuner paths. See [deploy/README.md](../deploy/README.md)
+for running it under systemd/Docker and the producer file-drop contract.
+
+### `agent run`
+
+`--shadow` / `--manage` carry the sentry semantics (exclusive; `--manage` on
+mainnet requires testnet graduation). Cadences come from the tunable surface
+(`agent.intake_poll_seconds`, `agent.exec_interval_minutes`,
+`agent.sentry_interval_seconds` — read at start); the daily-job time is
+`HL_AGENT_DAILY_UTC`. A new batch file in `<data_dir>/intake/<network>/`
+triggers an exec pass immediately; ingested files archive to `processed/`,
+unparseable ones to `failed/` plus an alert.
+
+### `agent status`
+
+Cross-process pulse from the state store: `running` (a tick within 3 poll
+intervals), pass ages, last daily date, breaker, equity/book, realized-today,
+deferred count, pending tuner proposals, and the intake dir.
+
+```bash
+hl agent run                       # paper by default, like everything else
+hl --network testnet -y agent run --manage
+hl --json agent status
+```

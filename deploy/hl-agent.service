@@ -1,0 +1,24 @@
+# systemd unit for the hl agent supervisor (PLAN.md §15).
+# Install: see deploy/README.md. Edit User/paths/--network to taste.
+
+[Unit]
+Description=hl agent — Hyperliquid CLI autonomous supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hl
+WorkingDirectory=/opt/hyperliquid-cli
+# Hard caps + keys config; HL_DATA_DIR in it controls where state/keys/intake live.
+EnvironmentFile=/opt/hyperliquid-cli/.env
+# -y skips prompts for unattended runs; mainnet STILL requires HL_ENABLE_MAINNET=1
+# in the EnvironmentFile plus cleared graduation — the gate is unchanged.
+ExecStart=/opt/hyperliquid-cli/.venv/bin/hl --network testnet -y agent run
+Restart=always
+RestartSec=5
+# Crash-safety lives in the CLI (idempotency keys, intake high-water mark,
+# ledger-first fills) — restarting hard is always safe.
+
+[Install]
+WantedBy=multi-user.target

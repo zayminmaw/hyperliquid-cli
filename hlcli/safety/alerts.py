@@ -15,6 +15,14 @@ import time
 from pathlib import Path
 from typing import TextIO
 
+from hlcli.core.config import Caps
+from hlcli.core.types import Network
+
+
+def network_alerter(caps: Caps, network: Network) -> Alerter:
+    """Network-scoped alert sink: JSONL log beside the data dir + stderr."""
+    return Alerter(caps.data_dir / f"alerts-{network.value}.log")
+
 
 class Alerter:
     """Sink for operational alerts. A `None` path skips the file; a `None` stream skips stderr."""

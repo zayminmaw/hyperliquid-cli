@@ -90,3 +90,12 @@ def test_trade_rejects_notional_over_cap():
 def test_trade_rejects_disallowed_coin():
     result = runner.invoke(app, ["trade", "order", "limit", "DOGE", "long", "1", "1"])
     assert result.exit_code != 0
+
+
+def test_agent_status_paper(isolated_caps):
+    result = runner.invoke(app, ["--json", "agent", "status"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["network"] == "paper"
+    assert payload["running"] is False
+    assert payload["pending_proposals"] == []

@@ -41,10 +41,17 @@ class Caps(BaseSettings):
     # from any working directory; set an absolute HL_CONFIG_PATH to opt out.
     config_path: Path = Path("config/active_config.json")
 
+    # --- agent mode (PLAN.md §15) ---
+    # Producers drop candidate-batch JSON files here (per-network subdir appended).
+    agent_intake_dir: Path | None = None  # default: <data_dir>/intake
+    agent_daily_utc: str = "00:10"        # HH:MM UTC — when the daily jobs run
+
     @model_validator(mode="after")
     def _anchor_config_path(self) -> "Caps":
         if not self.config_path.is_absolute():
             self.config_path = self.data_dir / self.config_path
+        if self.agent_intake_dir is not None and not self.agent_intake_dir.is_absolute():
+            self.agent_intake_dir = self.data_dir / self.agent_intake_dir
         return self
 
     # --- risk ceilings (the order path can never exceed these) ---

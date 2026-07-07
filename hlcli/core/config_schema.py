@@ -63,6 +63,15 @@ class TrailConfig(BaseModel):
     min_move_r: float = 0.1           # suppress SL moves smaller than this (churn guard)
 
 
+class AgentConfig(BaseModel):
+    """Agent-mode cadences (PLAN.md §15). Bounds keep a bad tune from spinning the
+    loop hot (LLM spend) or stalling it past usefulness."""
+
+    intake_poll_seconds: float = 5.0     # also the supervisor's tick granularity
+    exec_interval_minutes: float = 5.0   # full intake pass; new files trigger one immediately
+    sentry_interval_seconds: float = 60.0
+
+
 class TunableConfig(BaseModel):
     risk_per_trade_pct: float = 0.5
     regime: RegimeGate = Field(default_factory=RegimeGate)
@@ -71,6 +80,7 @@ class TunableConfig(BaseModel):
     decision_temperature: float = 0.2  # low temp for the hot decision loop
     max_hold_minutes: int = 0  # auto-expire an open trade after this long; 0 disables
     trail: TrailConfig = Field(default_factory=TrailConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
 
 
 class ConfigError(RuntimeError):
@@ -115,8 +125,19 @@ def clamp(cfg: TunableConfig) -> TunableConfig:
         }
     )
 
+    a = cfg.agent
+    da = _DEFAULTS.agent
+    agent = a.model_copy(
+        update={
+            "intake_poll_seconds": _bound(a.intake_poll_seconds, 1.0, 60.0, da.intake_poll_seconds),
+            "exec_interval_minutes": _bound(a.exec_interval_minutes, 0.5, 120.0, da.exec_interval_minutes),
+            "sentry_interval_seconds": _bound(a.sentry_interval_seconds, 10.0, 3600.0, da.sentry_interval_seconds),
+        }
+    )
+
     return cfg.model_copy(
         update={
+            "agent": agent,
             "risk_per_trade_pct": _bound(cfg.risk_per_trade_pct, 0.0, _RISK_PCT_MAX, _DEFAULTS.risk_per_trade_pct),
             "max_candidates_per_pass": int(
                 _bound(cfg.max_candidates_per_pass, 1, _MAX_CANDIDATES_CEILING, _DEFAULTS.max_candidates_per_pass)
