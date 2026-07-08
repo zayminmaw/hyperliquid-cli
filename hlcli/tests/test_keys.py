@@ -37,4 +37,4 @@ def test_decision_log_context_stays_within_a_keyless_allowlist(tmp_path):
     assert rows
     for row in rows:
         context = json.loads(row["context"])
-        assert set(context) <= {"coin", "equity", "open_coins", "regime", "lessons"}
+        assert set(context) <= {"coin", "outcome", "equity", "open_coins", "regime", "lessons"}

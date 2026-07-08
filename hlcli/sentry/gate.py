@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Side
+from hlcli.executor.rmath import favorable_move, initial_risk
 from hlcli.sentry.decision import ManagementAction, ManagementDecision
 from hlcli.sentry.engine import MoveStop, ScaleOut
 
@@ -87,6 +88,11 @@ def evaluate_management(decision: ManagementDecision, trade: dict, ctx: ManageGa
     if decision.action is ManagementAction.HOLD:
         return ManageOutcome(approved=True, reason="hold")
 
+    # A full CLOSE ends all risk, so it clears even when halted and is never blocked by
+    # the churn caps — the caps stop flip-flopping, not the one action that ends flopping.
+    if decision.action is ManagementAction.CLOSE:
+        return ManageOutcome(True, plan=CloseAll(level=ctx.mark))
+
     halted = ctx.breaker_tripped or ctx.daily_loss_hit
     if halted and decision.action in (ManagementAction.EXTEND_TP, ManagementAction.ADD):
         return ManageOutcome(False, "halted: risk may only go down")
@@ -102,7 +108,7 @@ def evaluate_management(decision: ManagementDecision, trade: dict, ctx: ManageGa
         return ManageOutcome(False, "opposing window: extended recently, no reduce")
 
     side = Side(trade["side"])
-    risk = abs(trade["entry"] - (trade["initial_sl"] or trade["sl"]))
+    risk = initial_risk(trade)
     if risk <= 0:
         return ManageOutcome(False, "no measurable initial risk")
 
@@ -110,8 +116,6 @@ def evaluate_management(decision: ManagementDecision, trade: dict, ctx: ManageGa
         return _check_tighten(decision.new_stop, trade, side, risk, ctx)
     if decision.action is ManagementAction.REDUCE:
         return _check_reduce(decision.reduce_pct, trade, ctx)
-    if decision.action is ManagementAction.CLOSE:
-        return ManageOutcome(True, plan=CloseAll(level=ctx.mark))
     if decision.action is ManagementAction.ADD:
         return _check_add(decision.new_stop, trade, side, risk, ctx)
     return _check_extend(decision.new_tp, trade, side, risk)
@@ -136,9 +140,8 @@ def _check_reduce(pct: float, trade: dict, ctx: ManageGateContext) -> ManageOutc
     if trade["scaled_out"]:
         return ManageOutcome(False, "already scaled once (close remains available)")
     close_size = trade["size"] * pct / 100.0
-    risk = abs(trade["entry"] - (trade["initial_sl"] or trade["sl"]))
-    favorable = (ctx.mark - trade["entry"]) if Side(trade["side"]) is Side.LONG else (trade["entry"] - ctx.mark)
-    r_now = round(favorable / risk, 4) if risk > 0 else 0.0
+    risk = initial_risk(trade)
+    r_now = round(favorable_move(trade, ctx.mark) / risk, 4) if risk > 0 else 0.0
     return ManageOutcome(True, plan=ScaleOut(size=close_size, level=ctx.mark, r=r_now))
 
 
@@ -151,7 +154,7 @@ def _check_add(new_stop: float, trade: dict, side: Side, risk: float,
     if ctx.coin_adds >= ctx.caps.sentry_max_adds_per_position:
         return ManageOutcome(False, "per-position add budget exhausted")
 
-    favorable = (ctx.mark - trade["entry"]) if side is Side.LONG else (trade["entry"] - ctx.mark)
+    favorable = favorable_move(trade, ctx.mark)
     if favorable / risk < ctx.caps.sentry_add_min_r:
         return ManageOutcome(False, f"adds only to winners at ≥ {ctx.caps.sentry_add_min_r}R")
 

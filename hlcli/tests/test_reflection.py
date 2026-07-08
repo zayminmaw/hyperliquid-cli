@@ -139,3 +139,26 @@ def test_run_daily_testnet_leaves_proposals_pending(tmp_path):
 
     assert report["tuner"]["promoted"] == []
     assert report["pending_proposals"] == ["proposed_config.json"]  # §15.5: human approves
+
+
+def test_run_daily_tuner_failure_is_isolated(tmp_path, monkeypatch):
+    # A tuner fault must degrade the tuner stage, not abort the whole daily job — else
+    # the supervisor re-runs it every backoff cycle, re-paying for journal + tuners.
+    import hlcli.agent.daily as daily
+
+    state = StateStore(tmp_path / "s.db")
+    c = caps(data_dir=tmp_path)
+    stream = io.StringIO()
+
+    def boom(*a, **k):
+        raise RuntimeError("cohort blew up")
+
+    monkeypatch.setattr(daily, "propose_config", boom)
+    report = run_daily(PaperExchange(10_000.0, marks=FakeMarks(), state=state), state, c,
+                       Network.PAPER, Alerter(stream=stream),
+                       client=FakeJournalTool(), tunable=tunable())
+
+    assert "cohort blew up" in report["tuner"]["error"]
+    assert "agent_tuner_failed" in stream.getvalue()   # failure surfaced
+    assert "agent_daily_report" in stream.getvalue()   # report still emitted
+    assert report["journal"].endswith(".md")           # journal still written

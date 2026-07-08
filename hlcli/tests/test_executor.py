@@ -345,7 +345,7 @@ def test_no_mark_rejects_without_spending_an_llm_call(tmp_path):
     s = run_once(ex, state, caps(), tunable(), decide_fn=boom, now=NOW)
     assert (s.rejected, s.fired) == (1, 0)
     context = json.loads(state.recent_decisions(1)[0]["context"])
-    assert context == {"coin": "BTC", "rejected": "no mark for coin"}
+    assert context == {"coin": "BTC", "outcome": "rejected", "rejected": "no mark for coin"}
 
 
 def test_candle_context_is_labeled_with_interval_and_order():

@@ -80,10 +80,23 @@ def cancel_placed(exchange: Exchange, coin: str, placed: list[OrderResult]) -> i
 
 
 def cancel_coin_triggers(exchange: Exchange, coin: str) -> int:
-    """Cancel every resting reduce-only trigger for `coin` — called after a position
-    closes so the surviving half of an SL/TP pair can't ambush a future position."""
+    """Cancel every resting reduce-only trigger for `coin` — the last-resort sweep when
+    a coin has no open ledger row left, so the surviving half of an SL/TP pair can't
+    ambush a future position. Never call this while a sibling slice is still open (it
+    would strip that slice's protection); use `cancel_trade_triggers` for one row."""
     canceled = 0
     for order in exchange.get_open_orders():
         if order.coin == coin and order.is_trigger and order.reduce_only:
             canceled += int(exchange.cancel(coin, order.oid).accepted)
+    return canceled
+
+
+def cancel_trade_triggers(exchange: Exchange, trade: dict) -> int:
+    """Cancel only the native SL/TP triggers this ledger row placed (by recorded oid),
+    leaving any sibling slice's protection intact — the slice-scoped cancel a coin that
+    has been added to (§14 ADD) requires. A row with no recorded oids cancels nothing."""
+    canceled = 0
+    for oid in (trade.get("sl_oid"), trade.get("tp_oid")):
+        if oid and str(oid).isdigit():
+            canceled += int(exchange.cancel(trade["coin"], int(oid)).accepted)
     return canceled

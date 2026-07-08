@@ -43,7 +43,7 @@ from hlcli.executor.protect import (
     place_protection,
     requires_native_protection,
 )
-from hlcli.executor.regime import classify, summarize
+from hlcli.executor.regime import DECISION_INTERVAL, classify, summarize
 from hlcli.executor.resolve import resolve_open_trades
 from hlcli.journal.lessons import recent_lessons
 from hlcli.safety.alerts import Alerter
@@ -224,6 +224,12 @@ class _Step:
 def _process_deferred(exchange: Exchange, state: StateStore, d: DeferredCandidate, common: _PassContext) -> None:
     """Re-check a due deferral against fresh data. This re-check consumes one attempt;
     a repeat WAIT reschedules with what's left, anything else is terminal."""
+    # A concurrent pass (e.g. `exec run` beside `sentry run`) may have already fired
+    # this candidate — the atomic fire-claim blocks a double-fire, but re-deciding it
+    # would still burn an LLM call and could re-park a candidate that already fired.
+    if state.already_fired(d.candidate.id):
+        state.drop_deferred(d.candidate.id)
+        return
     attempts_left = d.attempts_remaining - 1
     expires_in = (d.candidate.created_at + common.caps.max_signal_age_minutes * 60 - common.now) / 60
     followup = {"attempts_remaining": attempts_left, "expires_in_minutes": round(max(0.0, expires_in), 1)}
@@ -246,8 +252,8 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
     if common.marks.get(candidate.coin) is None:
         common.tally.rejected += 1
         if not common.dry_run:
-            state.log_decision(candidate.id, common.now,
-                               context={"coin": candidate.coin, "rejected": "no mark for coin"})
+            state.log_decision(candidate.id, common.now, context={
+                "coin": candidate.coin, "outcome": "rejected", "rejected": "no mark for coin"})
             _emit(common.alerter, "reject", level="warning", coin=candidate.coin, reason="no mark for coin")
         return _Step("rejected")
 
@@ -263,8 +269,8 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         common.tally.dropped += 1
         if not common.dry_run:
             state.log_decision(candidate.id, common.now, context={
-                "coin": candidate.coin, "dropped": result.note, "raw": result.raw,
-                "stop_reason": result.stop_reason,
+                "coin": candidate.coin, "outcome": "dropped", "dropped": result.note,
+                "raw": result.raw, "stop_reason": result.stop_reason,
             })
         return _Step("dropped")
 
@@ -302,7 +308,7 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
 
     state.log_decision(
         candidate.id, common.now, decision=decision, gate=outcome, fill=fill,
-        context={"coin": candidate.coin, "equity": common.equity,
+        context={"coin": candidate.coin, "outcome": status, "equity": common.equity,
                  "open_coins": sorted(common.open_coins), "regime": regime,
                  # which reflection rows were in the model's context — makes the
                  # inject's value measurable (§15.4), like 6b measured the manager
@@ -334,13 +340,16 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
         candidate.sl, candidate.tp, filled, decision.conviction, regime, common.now,
     )
     if common.protected:
-        close = _secure(exchange, candidate, filled, common.alerter)
+        close, sl_oid, tp_oid = _secure(exchange, candidate, filled, common.alerter)
         if close is not None:  # protection failed — position flattened, trade aborted
             common.tally.failed += 1
             exit_price = close.avg_price if close.avg_price is not None else entry_price
             realized, r_multiple = _abort_pnl(candidate.side, entry_price, candidate.sl, exit_price, filled)
             state.resolve_trade(trade_id, "aborted", exit_price, realized, r_multiple, common.now)
             return "aborted", fill
+        # Record the triggers so sentry (and the resolver) later cancel this position's
+        # protection by oid, never a sibling slice's.
+        state.update_trade_triggers(trade_id, sl_oid=sl_oid, tp_oid=tp_oid)
     common.tally.fired += 1
     common.open_coins.add(candidate.coin)
     _emit(common.alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
@@ -378,14 +387,15 @@ def _wait(state: StateStore, candidate: Candidate, decision, regime, common: _Pa
         reason = "wait: out of attempts" if attempts_left < 1 else "wait: would be stale before re-check"
         if not common.dry_run:
             state.log_decision(candidate.id, common.now, decision=decision,
-                               context={"coin": candidate.coin, "wait": reason, "regime": regime})
+                               context={"coin": candidate.coin, "outcome": "rejected",
+                                        "wait": reason, "regime": regime})
         return _Step("rejected")
     common.tally.deferred += 1
     if not common.dry_run:
         state.log_decision(
             candidate.id, common.now, decision=decision,
-            context={"coin": candidate.coin, "wait": "deferred", "next_check_at": next_at,
-                     "attempts_remaining": attempts_left, "regime": regime},
+            context={"coin": candidate.coin, "outcome": "deferred", "wait": "deferred",
+                     "next_check_at": next_at, "attempts_remaining": attempts_left, "regime": regime},
         )
     return _Step("deferred", next_check_at=next_at, attempts_remaining=attempts_left)
 
@@ -409,16 +419,12 @@ def _market_context(exchange: Exchange, coins: set[str]) -> dict[str, tuple]:
     return {coin: _coin_context(exchange, coin) for coin in coins}
 
 
-# The interval the decision context's candle tail is fetched at. Passed explicitly to
-# `get_candles` AND labeled in the prompt payload — bare OHLC bars are meaningless to
-# the model without their timeframe.
-_CANDLE_INTERVAL = "15m"
-
-
 def _coin_context(exchange: Exchange, coin: str) -> tuple:
+    # The candle tail is fetched at DECISION_INTERVAL and labeled with it in the prompt
+    # payload — bare OHLC bars are meaningless to the model without their timeframe.
     bars = _fetch_candles(exchange, coin)
     tail = summarize(bars)
-    candles = {"interval": _CANDLE_INTERVAL, "order": "oldest_first", "bars": tail} if tail else None
+    candles = {"interval": DECISION_INTERVAL, "order": "oldest_first", "bars": tail} if tail else None
     return candles, classify(bars)
 
 
@@ -430,24 +436,26 @@ def _fetch_candles(exchange: Exchange, coin: str):
     # unexpected response shape; an unexpected bug (e.g. a programming error) still
     # surfaces rather than masquerading as "no candles".
     try:
-        return exchange.get_candles(coin, interval=_CANDLE_INTERVAL)
+        return exchange.get_candles(coin, interval=DECISION_INTERVAL)
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         return []
 
 
-def _secure(exchange: Exchange, candidate, size: float, alerter: Alerter | None) -> OrderResult | None:
+def _secure(exchange: Exchange, candidate, size: float,
+            alerter: Alerter | None) -> tuple[OrderResult | None, str | None, str | None]:
     """Place native protective triggers; if that fails, flatten the position rather than
     leave it naked — and cancel whichever trigger DID place, so no stray reduce-only
-    order survives to ambush the next position. Returns None when protected, else the
-    emergency-close result (for the abort ledger entry)."""
+    order survives to ambush the next position. Returns (None, sl_oid, tp_oid) when
+    protected, else (emergency-close result, None, None) for the abort ledger entry."""
     protection = place_protection(exchange, candidate, size)
     if protection.ok:
-        return None
+        sl, tp = protection.placed  # place_protection orders SL then TP
+        return None, sl.order_id, tp.order_id
     closed = emergency_close(exchange, candidate, size)
     canceled = cancel_placed(exchange, candidate.coin, protection.placed)
     _emit(alerter, "protection_failed", level="critical", coin=candidate.coin,
           reason=protection.failed, emergency_closed=closed.accepted, triggers_canceled=canceled)
-    return closed
+    return closed, None, None
 
 
 def _emit(alerter: Alerter | None, event: str, **fields) -> None:

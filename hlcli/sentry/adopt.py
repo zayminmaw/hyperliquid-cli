@@ -59,18 +59,24 @@ def adopt_unmanaged(
             summary.skipped.append({"coin": position.coin, "reason": "no stop trigger"})
             continue
 
-        # Several stops = several risk slices; anchor R at the farthest one (the
-        # true worst-case risk). The nearest take-profit is the first target.
-        sl = max(stops, key=lambda o: abs(o.price - position.entry_price)).price
+        # Several stops = several risk slices; anchor R at the worst case — the stop
+        # farthest on the LOSING side of entry (the lowest for a long, the highest for
+        # a short), which is not the abs-farthest once one has ratcheted past entry.
+        stop = (min if position.side is Side.LONG else max)(stops, key=lambda o: o.price)
+        sl = stop.price
         tps = [o for o in protective if not _is_stop(o, position)]
-        tp = (min(tps, key=lambda o: abs(o.price - position.entry_price)).price
-              if tps else _unbounded_tp(position, sl))
+        target = min(tps, key=lambda o: abs(o.price - position.entry_price)) if tps else None
+        tp = target.price if target is not None else _unbounded_tp(position, sl)
 
         trade_id = state.open_trade(
             f"adopted:{position.coin}:{int(now)}", position.coin, position.side,
             position.entry_price, sl, tp, position.size,
             0.0,  # no LLM verdict behind this entry — conviction is honestly zero
             None, now, adopted=True,
+            # Record the anchor stop's oid (and the target's, if any) so sentry manages
+            # this row through those triggers alone — never restructuring the human's
+            # other resting orders.
+            sl_oid=str(stop.oid), tp_oid=str(target.oid) if target is not None else None,
         )
         detail = {"entry": position.entry_price, "size": position.size, "sl": sl, "tp": tp,
                   "tp_from_trigger": bool(tps)}

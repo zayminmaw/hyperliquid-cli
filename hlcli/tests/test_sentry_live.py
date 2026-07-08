@@ -60,14 +60,23 @@ def test_halted_allows_only_risk_reduction():
 
 
 def test_action_budget_and_cooldown():
-    out = evaluate_management(_decision("close"), _trade(),
+    # tighten (a risk-reducing action that still churns) is what the caps throttle.
+    out = evaluate_management(_decision("tighten_stop", new_stop=101.0), _trade(),
                               _gctx(actions_today=caps().sentry_max_actions_per_position_per_day))
     assert not out.approved and "budget" in out.reason
-    out = evaluate_management(_decision("close"), _trade(), _gctx(last_applied_ts=NOW - 60))
+    out = evaluate_management(_decision("tighten_stop", new_stop=101.0), _trade(), _gctx(last_applied_ts=NOW - 60))
     assert not out.approved and "cooldown" in out.reason
     # Cooldown elapsed → fine.
     old = NOW - caps().sentry_min_action_interval_minutes * 60 - 1
-    assert evaluate_management(_decision("close"), _trade(), _gctx(last_applied_ts=old)).approved
+    assert evaluate_management(_decision("tighten_stop", new_stop=101.0), _trade(), _gctx(last_applied_ts=old)).approved
+
+
+def test_close_bypasses_churn_caps():
+    # A thesis-invalidated CLOSE ends all risk, so budget/cooldown/halted never block it.
+    budget = _gctx(actions_today=caps().sentry_max_actions_per_position_per_day,
+                   last_applied_ts=NOW - 60, breaker_tripped=True)
+    out = evaluate_management(_decision("close"), _trade(), budget)
+    assert out.approved and isinstance(out.plan, CloseAll)
 
 
 def test_opposing_window_blocks_flip_flops():

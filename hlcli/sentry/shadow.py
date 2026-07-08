@@ -29,6 +29,11 @@ from hlcli.state.store import StateStore
 
 ManageFn = Callable[..., ManagementResult]
 
+# Shadow log rows count against the same throttles as the live pass, so `sentry run
+# --shadow` left running for weeks can't exceed the .env LLM-call hard cap.
+_SHADOW_EVALUATED = ("shadow", "shadow_dropped")
+_DAY_SECONDS = 86_400.0
+
 
 @dataclass
 class ShadowSummary:
@@ -37,6 +42,8 @@ class ShadowSummary:
     proposed: int = 0   # non-hold proposals
     dropped: int = 0
     agreed: int = 0     # proposal matches what the rule baseline would do
+    spaced: int = 0     # skipped: inside the per-position eval interval
+    note: str = "ok"
     actions: list[dict] = field(default_factory=list)
 
 
@@ -58,11 +65,19 @@ def shadow_pass(
     summary = ShadowSummary()
     bars_cache: dict[str, tuple[list[Candle], list[Candle]]] = {}
     lessons = recent_lessons(state, caps, tunable)
+    calls_today = state.sentry_count_since(now - _DAY_SECONDS, _SHADOW_EVALUATED)
 
     for trade in state.open_trades():
         mark = marks.get(trade["coin"])
         if mark is None:
             continue
+        last_eval = state.last_sentry_ts(trade["id"], _SHADOW_EVALUATED)
+        if last_eval is not None and (now - last_eval) < caps.sentry_eval_interval_minutes * 60:
+            summary.spaced += 1
+            continue
+        if calls_today >= caps.sentry_max_llm_calls_per_day:
+            summary.note = "daily LLM call budget exhausted"
+            break
         fast, slow = frames_for(exchange, trade["coin"], bars_cache)
         baseline = [_serialize(a) for a in plan(trade, mark, fast, tunable.trail)]
         ctx = build_context(
@@ -72,6 +87,7 @@ def shadow_pass(
             breaker_tripped=breaker_tripped,
         )
         result = decide_fn(ctx, caps, tunable)
+        calls_today += 1
         summary.evaluated += 1
 
         if result.dropped:
@@ -112,5 +128,3 @@ def _serialize(action: ScaleOut | MoveStop) -> dict:
     if isinstance(action, ScaleOut):
         return {"action": "scale_out", "size": action.size, "level": action.level, "r": action.r}
     return {"action": "move_stop", "to": action.new_sl, "reason": action.reason}
-
-

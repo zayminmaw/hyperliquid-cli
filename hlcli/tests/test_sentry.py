@@ -14,7 +14,7 @@ from hlcli.core.types import Candle, Network, OpenOrder, OrderResult, OrderType,
 from hlcli.exchange.paper import PaperExchange
 from hlcli.executor.resolve import resolve_open_trades
 from hlcli.executor.runner import run_once
-from hlcli.sentry.apply import manage_open_trades
+from hlcli.sentry.apply import ManageSummary, apply_close, apply_move_stop, manage_open_trades
 from hlcli.sentry.engine import MoveStop, ScaleOut, active, atr, plan
 from hlcli.state.store import StateStore
 from hlcli.tests._helpers import FakeMarks, caps, tunable
@@ -371,6 +371,43 @@ def test_live_stop_rejection_keeps_old_level(tmp_path):
     assert s.stops_moved == 0 and s.failed == 1
     assert ex.canceled == []                        # old protection stays put
     assert state.open_trades()[0]["sl"] == 90.0     # ledger agrees with the exchange
+
+
+# --- apply: slice-scoped trigger cancellation (a coin with sibling rows) -------------
+
+
+def _sibling_book(tmp_path):
+    """A coin with two ledger rows (a parent + an added slice), each carrying its own
+    recorded SL/TP oids — the post-ADD shape earlier code stripped."""
+    state = StateStore(tmp_path / "s.db")
+    ex = FakeLive([_resting(1, "stop market", 90.0), _resting(2, "take profit market", 130.0),
+                   _resting(3, "stop market", 95.0), _resting(4, "take profit market", 130.0)])
+    state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 1.0, 0.8, None, NOW,
+                     sl_oid="1", tp_oid="2")
+    child = state.open_trade("c1", "BTC", Side.LONG, 105.0, 95.0, 130.0, 0.5, 0.7, None, NOW,
+                             sl_oid="3", tp_oid="4")
+    return state, ex, child
+
+
+def test_tighten_cancels_only_this_rows_stop_not_a_sibling(tmp_path):
+    state, ex, child = _sibling_book(tmp_path)
+    parent = dict(state.open_trades()[0])
+    apply_move_stop(ex, state, parent, MoveStop(new_sl=101.0, reason="llm"), NOW,
+                    native_protected=True, summary=ManageSummary(), alerter=None)
+    assert ex.canceled == [1]                          # the parent's old stop ONLY
+    rows = {t["id"]: t for t in state.open_trades()}
+    assert rows[child]["sl_oid"] == "3"                # the slice's stop is untouched
+    assert rows[parent["id"]]["sl_oid"] == "101"       # parent now points at the new trigger
+
+
+def test_close_cancels_only_this_rows_pair_keeping_the_slice(tmp_path):
+    state, ex, child = _sibling_book(tmp_path)
+    parent = dict(state.open_trades()[0])
+    apply_close(ex, state, parent, 95.0, NOW, native_protected=True,
+                summary=ManageSummary(), alerter=None)
+    assert sorted(ex.canceled) == [1, 2]               # the parent's pair; the slice's 3/4 survive
+    remaining = state.open_trades()
+    assert len(remaining) == 1 and remaining[0]["id"] == child
 
 
 # --- resolver interplay -----------------------------------------------------------

@@ -98,8 +98,10 @@ def manage_live(
     applied = ManageSummary()  # the apply helpers tally into this; folded in below
     book = state.open_trades(shadow=False)
     coin_sizes: dict[str, float] = {}
+    coin_open_since: dict[str, float] = {}
     for t in book:
         coin_sizes[t["coin"]] = coin_sizes.get(t["coin"], 0.0) + t["size"]
+        coin_open_since[t["coin"]] = min(coin_open_since.get(t["coin"], t["opened_at"]), t["opened_at"])
 
     for trade in book:
         mark = marks.get(trade["coin"])
@@ -140,7 +142,11 @@ def manage_live(
             last_bank_ts=state.last_sentry_ts(trade["id"], _BANK_SIDE),
             last_extend_ts=state.last_sentry_ts(trade["id"], _EXTEND_SIDE),
             equity=equity,
-            coin_adds=state.sentry_count_since(0.0, ("managed_add",), coin=trade["coin"]),
+            # Adds are capped per open position, not per coin forever: count only those
+            # logged since this coin's current position opened, so a flat-then-reopened
+            # coin starts fresh.
+            coin_adds=state.sentry_count_since(coin_open_since.get(trade["coin"], 0.0),
+                                               ("managed_add",), coin=trade["coin"]),
             coin_size=coin_sizes.get(trade["coin"], trade["size"]),
         )
         outcome = evaluate_management(decision, trade, gate_ctx)

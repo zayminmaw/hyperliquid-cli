@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from hlcli.core.config_schema import TrailConfig
 from hlcli.core.types import Candle, Side
+from hlcli.executor.rmath import initial_risk
 
 _ATR_PERIOD = 14
 
@@ -51,7 +52,7 @@ def plan(trade: dict, mark: float, bars: list[Candle], cfg: TrailConfig) -> list
     guards the remainder."""
     side = Side(trade["side"])
     entry = trade["entry"]
-    risk = abs(entry - (trade["initial_sl"] or trade["sl"]))
+    risk = initial_risk(trade)
     if risk <= 0 or mark <= 0:
         return []
     favorable = (mark - entry) if side is Side.LONG else (entry - mark)

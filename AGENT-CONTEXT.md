@@ -1,6 +1,6 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-08 | Session: 7d BUILT (Mode A adoption) — PHASE 7 CODE-COMPLETE; 395 tests pass; 7d uncommitted; 7d live-testnet check pending (no account on this machine)
+> Last updated: 2026-07-08 | Session: fresh-eyes review of 154ee47..HEAD (phase 6+7) — all findings fixed; 408 tests pass; uncommitted
 
 ---
 
@@ -16,9 +16,9 @@
 
 ## 📍 LAST ACTION
 
-- Did: built 7d — `sentry/adopt.py` `adopt_unmanaged`: unmanaged position + exchange stop trigger ⇒ ledger row (entry = actual avg price, `initial_sl` = trigger; farthest stop anchors R; nearest tp is the target else 100R out-of-reach park — ledger tp is NOT NULL; `adopted` flag column added additively, conviction 0, `adopted` sentry-log row + `position_adopted` alert); stop-vs-tp via frontend order type, side-of-entry fallback fails safe; stopless ⇒ skip (runner's edge `unmanaged_position` alert persists) — never invents a stop, places no orders; auto-runs before every watch pass + `hl sentry adopt`
-- Result: 395 pass (9 new: labeled/ratcheted/unlabeled triggers, multi-stop R anchor, short mirror, idempotency, stopless skip)
-- File(s) touched: sentry/adopt.py (new), state/store.py (adopted col + open_trade kw), cli/commands/{sentry,agent}.py, tests/test_adopt.py (new), docs/{cli,modules}.md, ACTION-ITEMS.md
+- Did: fixed all fresh-eyes review findings on 154ee47..HEAD. Big ones: (1) native SL/TP triggers now carry per-row oids (`trades.sl_oid/tp_oid`), so a post-ADD coin's sibling slice keeps its protection — every cancel is slice-scoped (`cancel_trade_triggers`), coin-wide sweep only when no open row remains; (2) `shadow_pass` now throttled by eval spacing + `sentry_max_llm_calls_per_day`; (3) ADD budget is per-position (counts since the coin's current position opened) + idempotency key is trade-id-scoped with an alert on crash-replay skip; (4) CLOSE bypasses churn caps + halted; (5) journal excludes `scaled` children from opened tally + graduation excludes them from `n`; (6) adopt anchors R at the loss-side extreme, not abs-distance; records the anchor stop's oid. Plus: atomic `record_fire` claim (kills exec/sentry double-fire race), deferred re-check drops already-fired, first-class `outcome` in decision log, tuner stage isolated in daily job, journal defers narrative for an incomplete day, `prior_actions` excludes holds, supervisor stamps LAST_TICK on failing ticks. New shared modules `executor/rmath.py` + `core/backoff.py`; centralized `alerts_path`, `DECISION_INTERVAL`, `require_exclusive_modes`.
+- Result: 408 pass (12 new). CLI smoke + legacy-DB migration verified.
+- File(s) touched: state/store.py, executor/{rmath(new),protect,resolve,execute,runner,regime}.py, sentry/{apply,gate,live,shadow,context,adopt,engine}.py, journal/{digest,writer,narrative}.py, agent/{daily,supervisor}.py, safety/{alerts,graduation}.py, core/{backoff(new),config}.py, cli/commands/{exec_,sentry,agent,journal}.py, tests/*
 
 ---
 
@@ -45,7 +45,9 @@
 | `hlcli/sentry/{engine,apply}.py` | 6a: pure R-anchored rules (ratchet/trail/scale-out) · apply (idempotent partials, live stop place-new-then-cancel-old, shadow orderless) |
 | `hlcli/sentry/{decision,context,shadow}.py` | 6b: strict `submit_management` (no ADD) · thesis+2-frame context (prior_actions excludes shadow rows) · shadow pass pairing proposal with the 6a baseline (never shown to model) |
 | `hlcli/sentry/{gate,live}.py` | 6c/6d: management gate (churn clocks FROM sentry_log; ↓risk-only when halted; ADD = winners-only, code-sized, raise-stop-first) · live pass (eval spacing, 24h budgets, real book only) · `graduation_for_management` gates mainnet on the TESTNET book |
-| `hlcli/sentry/adopt.py` | 7d: Mode A adoption — stop trigger required (never invented), records only, auto-runs before watch passes |
+| `hlcli/sentry/adopt.py` | 7d: Mode A adoption — loss-side R anchor, records anchor stop's oid; never invents a stop |
+| `hlcli/executor/rmath.py` | ONE home for initial-risk anchoring: `initial_risk/r_now/initial_stop/favorable_move` (was duplicated ~7 sites) |
+| `hlcli/core/backoff.py` | `backoff_delay(base, failures, max)` — shared by exec/sentry/agent retry loops |
 | `hlcli/agent/{intake_watch,supervisor}.py` | 7a: watched intake dir (enqueue-before-move, settle window) · tick loop (cadences, daily job, heartbeat, backoff); `cli/context.open_env` + `alerts.network_alerter` shared by exec/sentry/agent |
 | `hlcli/journal/{digest,narrative,writer,lessons}.py` | 7b/7c: day digest (verdict rationales, R/PF) · opus `submit_journal` tool (reflection + lesson) · writer (meta-cached; failure degrades) · bounded lessons inject |
 | `hlcli/agent/daily.py` | 7c: run_daily — journal yesterday → tuners → PAPER-only auto-promote → report alert |
@@ -82,6 +84,10 @@
 - Executor tests inject `run_once(..., decide_fn=...)`; real `decide`/tuners tested via fakes. `exec`/`tune run` need ANTHROPIC_API_KEY.
 - `resolved_trades(limit=N)` = most recent N (newest-closed first) — don't assume oldest-first.
 - FakeLiveExchange (test_protect) models positions/open_orders/canceled; `fail_triggers="tp"` = partial-protection case.
+- Native SL/TP cancels are now BY OID (`trades.sl_oid/tp_oid`): use `cancel_trade_triggers` for one row; `cancel_coin_triggers` is the last-row-only sweep — never call it while a sibling slice is open. Legacy/oid-less rows fall back to the type-match cancel (safe: they have no sibling). Entry path + adopt + `apply_add` all record oids.
+- `record_fire` now returns bool (atomic claim). `fire()` and the sentry apply helpers claim-then-act; don't reintroduce a separate `already_fired` check before it.
+- Graduation counts positions, not partials (`assess` drops `status='scaled'`); the tuner's `summary`/cohorts still COUNT scaled (banked profit is a real outcome). Don't unify them.
+- CLOSE is exempt from the sentry churn caps + halted gate (ends all risk); the budget/cooldown tests probe with `tighten_stop`, not `close`.
 
 ---
 

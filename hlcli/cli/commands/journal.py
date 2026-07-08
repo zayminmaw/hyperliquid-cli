@@ -16,7 +16,7 @@ from hlcli.cli.context import open_env, state_of
 from hlcli.cli.output import emit, note
 from hlcli.core.config import get_caps
 from hlcli.journal.digest import utc_date
-from hlcli.journal.writer import journal_path, write_journal
+from hlcli.journal.writer import journal_dir, journal_path, write_journal
 from hlcli.safety.alerts import network_alerter
 from hlcli.tuner.promote import pending_proposals
 
@@ -66,7 +66,7 @@ def show(
 def ls(ctx: typer.Context) -> None:
     """List journaled days for the current network."""
     g = state_of(ctx)
-    directory = journal_path(get_caps(), g.network, "x").parent
+    directory = journal_dir(get_caps(), g.network)
     days = sorted(p.stem for p in directory.glob("*.md")) if directory.exists() else []
     if g.json_out:
         emit({"network": g.network.value, "days": days}, as_json=True)

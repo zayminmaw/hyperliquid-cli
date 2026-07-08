@@ -12,6 +12,7 @@ import typer
 from hlcli.cli.context import open_env, state_of
 from hlcli.cli.output import emit, emit_rows, note
 from hlcli.cli.watch import watch_rows
+from hlcli.core.backoff import backoff_delay
 from hlcli.core.config import get_caps
 from hlcli.core.config_schema import load_tunable
 from hlcli.executor.intake import make_candidate, parse_batch
@@ -106,7 +107,7 @@ def run(ctx: typer.Context, interval: float = typer.Option(5.0, "--interval", he
                     alerter.alert("pass_failed", level="warning", consecutive=failures, error=str(exc))
             # Repeated failures back off exponentially — a hard-down API isn't retried
             # every 5 seconds forever at full LLM cost.
-            time.sleep(min(interval * (2 ** min(failures, 10)), _MAX_BACKOFF_SECONDS) if failures else interval)
+            time.sleep(backoff_delay(interval, failures, _MAX_BACKOFF_SECONDS))
     except KeyboardInterrupt:
         note("stopped")
 

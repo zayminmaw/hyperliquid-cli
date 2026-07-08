@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import pytest
 
 from hlcli.agent.intake_watch import IntakeResult
-from hlcli.agent.supervisor import LAST_DAILY, LAST_EXEC, Cadence, Supervisor
+from hlcli.agent.supervisor import LAST_DAILY, LAST_EXEC, LAST_TICK, Cadence, Supervisor
 from hlcli.safety.alerts import Alerter
 from hlcli.state.store import StateStore
 
@@ -177,3 +177,6 @@ def test_run_forever_backs_off_and_alerts_on_failing_ticks(tmp_path):
     assert errors == [1, 2, 3]
     assert sleeps == [10.0, 20.0, 40.0]  # 5s poll base doubling per consecutive failure
     assert "agent_tick_failed" in stream.getvalue()
+    # A failing tick still stamps LAST_TICK, so `agent status` reads "running (backing
+    # off)" rather than "stopped" — no one restarts a live process.
+    assert state.meta_get(LAST_TICK) == str(utc(12, 0))

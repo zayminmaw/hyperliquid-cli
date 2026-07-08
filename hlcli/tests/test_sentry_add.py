@@ -142,14 +142,27 @@ def test_paper_add_raises_stop_and_books_child_slice(tmp_path):
 def test_add_idempotency_key_prevents_double_fire(tmp_path):
     state, ex = _paper(tmp_path, {"BTC": 112.0})
     state.upsert_paper_position("BTC", Side.LONG, 2.0, 100.0)
-    state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 2.0, 0.8, None, NOW)
-    state.record_fire("sentry:add:BTC:0", None, NOW)  # crash left the key behind
+    tid = state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 2.0, 0.8, None, NOW)
+    state.record_fire(f"sentry:add:{tid}:0", None, NOW)  # crash left the key behind
 
     manage_live(ex, state, _fast_caps(), tunable(), now=NOW,
                 decide_fn=ScriptedManager(_payload("add", new_stop=105.0)))
     assert len(state.open_trades()) == 1              # no child slice
     assert ex.get_positions()[0].size == 2.0          # no market order
     assert state.open_trades()[0]["sl"] == 105.0      # the raise still applied — safe direction
+
+
+def test_add_budget_counts_only_this_positions_adds(tmp_path):
+    # A `managed_add` from a PRIOR (since-closed) BTC position must not consume this
+    # fresh position's add budget — the cap is per open position, not per coin forever.
+    state, ex = _paper(tmp_path, {"BTC": 112.0})
+    state.log_sentry(NOW - 1000, 999, "BTC", "managed_add", {})  # a prior position's add
+    state.upsert_paper_position("BTC", Side.LONG, 2.0, 100.0)
+    state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 2.0, 0.8, None, NOW)
+
+    s = manage_live(ex, state, _fast_caps(sentry_max_adds_per_position=1), tunable(), now=NOW,
+                    decide_fn=ScriptedManager(_payload("add", new_stop=105.0)))
+    assert s.applied == 1 and len(state.open_trades()) == 2  # the add went through
 
 
 # --- apply on a live backend ----------------------------------------------------------

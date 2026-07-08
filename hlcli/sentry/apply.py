@@ -19,12 +19,12 @@ import httpx
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Candle, Order, OrderType, Side
 from hlcli.exchange.base import Exchange
-from hlcli.executor.protect import cancel_coin_triggers, cancel_placed
+from hlcli.executor.protect import cancel_coin_triggers, cancel_placed, cancel_trade_triggers
+from hlcli.executor.regime import DECISION_INTERVAL
+from hlcli.executor.rmath import initial_risk
 from hlcli.safety.alerts import Alerter
 from hlcli.sentry.engine import MoveStop, ScaleOut, active, plan
 from hlcli.state.store import StateStore
-
-_CANDLE_INTERVAL = "15m"  # matches the executor's decision-context tail
 
 
 @dataclass
@@ -93,9 +93,8 @@ def apply_scale_out(exchange: Exchange, state: StateStore, trade: dict, action: 
 
     if not trade["shadow"]:
         key = f"sentry:scale:{trade['id']}"
-        if state.already_fired(key):
+        if not state.record_fire(key, None, now):
             return  # a crash between order and ledger split must not double-close
-        state.record_fire(key, None, now)
         result = exchange.place_order(_partial_close(trade, close_size, exit_price, native_protected))
         filled = result.filled_size if result.filled_size is not None else close_size
         if not result.accepted or filled <= 0:
@@ -128,11 +127,15 @@ def apply_move_stop(exchange: Exchange, state: StateStore, trade: dict, action: 
                     extra: dict | None = None) -> bool:
     """Returns True when the stop actually moved — `apply_add` aborts on False."""
     if native_protected and not trade["shadow"]:
-        if not _sync_native_stop(exchange, trade, action.new_sl):
+        ok, new_oid = _sync_native_stop(exchange, trade, action.new_sl)
+        if not ok:
             summary.failed += 1
             _emit(alerter, "sentry_failed", coin=trade["coin"], action=log_action,
                   reason="new trigger rejected; old stop kept")
             return False
+        if new_oid:
+            state.update_trade_triggers(trade["id"], sl_oid=new_oid)
+            trade["sl_oid"] = new_oid
 
     old_sl = trade["sl"]
     state.update_trade_sl(trade["id"], action.new_sl)
@@ -157,9 +160,8 @@ def apply_close(exchange: Exchange, state: StateStore, trade: dict, level: float
 
     if not trade["shadow"]:
         key = f"sentry:close:{trade['id']}"
-        if state.already_fired(key):
+        if not state.record_fire(key, None, now):
             return
-        state.record_fire(key, None, now)
         result = exchange.place_order(_partial_close(trade, trade["size"], level, native_protected))
         if not result.accepted:
             state.release_fire(key)
@@ -174,7 +176,7 @@ def apply_close(exchange: Exchange, state: StateStore, trade: dict, level: float
     status = "won" if realized > 0 else "lost" if realized < 0 else "closed"
     state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now)
     if native_protected and not trade["shadow"]:
-        cancel_coin_triggers(exchange, trade["coin"])  # the orphaned SL/TP pair
+        _cancel_after_close(exchange, state, trade)  # this row's triggers; siblings kept
     summary.closed += 1
     detail = {"size": trade["size"], "exit": exit_price, "realized": realized,
               "status": status, **(extra or {})}
@@ -200,10 +202,10 @@ def apply_move_tp(exchange: Exchange, state: StateStore, trade: dict, new_tp: fl
             _emit(alerter, "sentry_failed", coin=trade["coin"], action=log_action,
                   reason="new take-profit rejected; old target kept")
             return
-        for order in exchange.get_open_orders():
-            if (order.coin == trade["coin"] and order.is_trigger and order.reduce_only
-                    and "take" in order.order_type and str(order.oid) != (result.order_id or "")):
-                exchange.cancel(trade["coin"], order.oid)
+        _cancel_old_trigger(exchange, trade, "take", trade.get("tp_oid"), result.order_id)
+        if result.order_id:
+            state.update_trade_triggers(trade["id"], tp_oid=result.order_id)
+            trade["tp_oid"] = result.order_id
 
     old_tp = trade["tp"]
     state.update_trade_tp(trade["id"], new_tp)
@@ -231,11 +233,17 @@ def apply_add(exchange: Exchange, state: StateStore, trade: dict, size: float, n
                            native_protected=native_protected, summary=summary, alerter=alerter):
         return  # stop refused to move ⇒ there is no add
 
-    ordinal = state.sentry_count_since(0.0, (log_action,), coin=trade["coin"])
-    key = f"sentry:add:{trade['coin']}:{ordinal}"
-    if state.already_fired(key):
+    # Key on the managed row's id (globally unique, never reused) + the count of adds
+    # already logged against it, so a fresh position in the same coin is never blocked
+    # by a stale key, and the ordinal advances only when an add actually lands.
+    ordinal = state.sentry_count_since(0.0, (log_action,), trade_id=trade["id"])
+    key = f"sentry:add:{trade['id']}:{ordinal}"
+    if not state.record_fire(key, None, now):
+        # A consumed-but-unlogged key means a crash landed between claim and ledger last
+        # time; erring safe (never double-add) leaves this row's adds parked — surface it.
+        _emit(alerter, "sentry_add_skipped", coin=trade["coin"], action=log_action,
+              reason="idempotent skip (prior add attempt unresolved)")
         return
-    state.record_fire(key, None, now)
     result = exchange.place_order(Order(
         coin=trade["coin"], side=side, order_type=OrderType.MARKET, size=size,
     ))
@@ -266,7 +274,8 @@ def _protect_slice(exchange: Exchange, state: StateStore, trade: dict, child_id:
                    entry: float, new_stop: float, filled: float, now: float,
                    summary: ManageSummary, alerter: Alerter | None) -> bool:
     """Native SL/TP for an added slice — the same hard prerequisite as an entry:
-    unprotectable ⇒ flattened, never left naked."""
+    unprotectable ⇒ flattened, never left naked. On success the slice's own trigger
+    oids are recorded so a later cancel touches this slice, never the parent's."""
     closing = _closing(trade)
     placed = []
     for order_type, trigger in ((OrderType.STOP_LOSS, new_stop), (OrderType.TAKE_PROFIT, trade["tp"])):
@@ -287,6 +296,7 @@ def _protect_slice(exchange: Exchange, state: StateStore, trade: dict, child_id:
             _emit(alerter, "sentry_failed", coin=trade["coin"], action="managed_add",
                   reason=f"slice protection rejected; emergency-closed (triggers_canceled={canceled})")
             return False
+    state.update_trade_triggers(child_id, sl_oid=placed[0].order_id, tp_oid=placed[1].order_id)
     return True
 
 
@@ -294,12 +304,12 @@ def _closing(trade: dict) -> Side:
     return Side.SHORT if Side(trade["side"]) is Side.LONG else Side.LONG
 
 
-def _sync_native_stop(exchange: Exchange, trade: dict, new_sl: float) -> bool:
+def _sync_native_stop(exchange: Exchange, trade: dict, new_sl: float) -> tuple[bool, str | None]:
     """Replace the exchange-side stop: place the tighter trigger first, cancel the old
-    one only once the new one rests. If placing fails the old (wider) stop stays — the
-    ledger keeps the old level too, so the two never disagree in the risky direction.
-    A crash in between leaves two reduce-only stops; the tighter fires first and the
-    resolver's post-close trigger cleanup removes the survivor."""
+    one only once the new one rests. Returns (accepted, new_oid). If placing fails the
+    old (wider) stop stays — the ledger keeps the old level too, so the two never
+    disagree in the risky direction. Cancels the old stop by its recorded oid so a
+    sibling slice's stop survives; falls back to the type match for pre-identity rows."""
     side = Side(trade["side"])
     result = exchange.place_order(Order(
         coin=trade["coin"], side=Side.SHORT if side is Side.LONG else Side.LONG,
@@ -307,12 +317,31 @@ def _sync_native_stop(exchange: Exchange, trade: dict, new_sl: float) -> bool:
         trigger_price=new_sl, reduce_only=True,
     ))
     if not result.accepted:
-        return False
+        return False, None
+    _cancel_old_trigger(exchange, trade, "stop", trade.get("sl_oid"), result.order_id)
+    return True, result.order_id
+
+
+def _cancel_old_trigger(exchange: Exchange, trade: dict, kind: str, old_oid: str | None,
+                        new_oid: str | None) -> None:
+    """Cancel the stop/take-profit trigger being replaced. Prefer the row's recorded
+    oid (slice-scoped — never a sibling's); fall back to the type match for legacy
+    rows with no oid, which by construction have no sibling to strip."""
+    if old_oid and str(old_oid).isdigit():
+        exchange.cancel(trade["coin"], int(old_oid))
+        return
     for order in exchange.get_open_orders():
         if (order.coin == trade["coin"] and order.is_trigger and order.reduce_only
-                and "stop" in order.order_type and str(order.oid) != (result.order_id or "")):
+                and kind in order.order_type and str(order.oid) != (new_oid or "")):
             exchange.cancel(trade["coin"], order.oid)
-    return True
+
+
+def _cancel_after_close(exchange: Exchange, state: StateStore, trade: dict) -> None:
+    """Drop a closed row's SL/TP triggers by oid (siblings kept); sweep the coin only
+    when no open ledger row remains — mirrors the resolver's post-close cleanup."""
+    cancel_trade_triggers(exchange, trade)
+    if not any(t["coin"] == trade["coin"] for t in state.open_trades(shadow=False)):
+        cancel_coin_triggers(exchange, trade["coin"])
 
 
 def _partial_close(trade: dict, size: float, level: float, native_protected: bool) -> Order:
@@ -332,7 +361,7 @@ def _partial_pnl(trade: dict, size: float, exit_price: float) -> tuple[float, fl
     stop can't inflate the R-multiple the tuner learns from."""
     side = Side(trade["side"])
     per_unit = (exit_price - trade["entry"]) if side is Side.LONG else (trade["entry"] - exit_price)
-    risk = abs(trade["entry"] - (trade["initial_sl"] or trade["sl"]))
+    risk = initial_risk(trade)
     realized = round(per_unit * size, 6)
     r_multiple = round(per_unit / risk, 4) if risk > 0 else 0.0
     return realized, r_multiple
@@ -344,7 +373,7 @@ def _bars(exchange: Exchange, coin: str, cache: dict[str, list[Candle]]) -> list
     the rest of the book."""
     if coin not in cache:
         try:
-            cache[coin] = exchange.get_candles(coin, interval=_CANDLE_INTERVAL)
+            cache[coin] = exchange.get_candles(coin, interval=DECISION_INTERVAL)
         except (httpx.HTTPError, KeyError, ValueError, TypeError):
             cache[coin] = []
     return cache[coin]

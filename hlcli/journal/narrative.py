@@ -28,6 +28,7 @@ SYSTEM_PROMPT = (
 JOURNAL_TOOL = {
     "name": "submit_journal",
     "description": "Submit tonight's journal entry.",
+    "strict": True,  # forced tool call; same discipline as the decision/management tools
     "input_schema": {
         "type": "object",
         "properties": {
@@ -35,6 +36,7 @@ JOURNAL_TOOL = {
             "lesson": {"type": "string", "description": "one distilled, decision-time-actionable lesson; a single sentence"},
         },
         "required": ["reflection", "lesson"],
+        "additionalProperties": False,
     },
 }
 

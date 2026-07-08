@@ -6,24 +6,27 @@ reflection section. The narrative for a date is cached in state meta, so re-runn
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
-
-import time
 
 from hlcli.core.config import Caps
 from hlcli.core.types import Network
 from hlcli.exchange.base import Exchange
-from hlcli.journal.digest import build_digest, render
+from hlcli.journal.digest import build_digest, render, utc_date
 from hlcli.journal.narrative import JournalNarrative, narrate
-from hlcli.safety.alerts import Alerter
+from hlcli.safety.alerts import Alerter, alerts_path
 from hlcli.state.store import StateStore
 
 _META_PREFIX = "journal_narrative_"
 
 
+def journal_dir(caps: Caps, network: Network) -> Path:
+    return caps.data_dir / "journal" / network.value
+
+
 def journal_path(caps: Caps, network: Network, date: str) -> Path:
-    return caps.data_dir / "journal" / network.value / f"{date}.md"
+    return journal_dir(caps, network) / f"{date}.md"
 
 
 def write_journal(
@@ -37,13 +40,18 @@ def write_journal(
     narrate_fn: Callable[[str, Caps], JournalNarrative | None] = narrate,
     alerter: Alerter | None = None,
     pending_proposals: list[str] | None = None,
+    now: float | None = None,
 ) -> Path:
     digest_md = render(build_digest(
         exchange, state, network, date,
-        alerts_path=caps.data_dir / f"alerts-{network.value}.log",
+        alerts_path=alerts_path(caps, network),
         pending_proposals=pending_proposals,
     ))
-    reflection = _reflection(state, caps, date, digest_md, narrative, narrate_fn, alerter)
+    # A day still in progress gets no reflection: journaling it now would cache a
+    # partial-day narrative and distil a partial-day lesson that the nightly job for
+    # this date would then reuse forever (one reflection per day, ever).
+    complete = date < utc_date(now if now is not None else time.time())
+    reflection = _reflection(state, caps, date, digest_md, narrative, complete, narrate_fn, alerter)
     path = journal_path(caps, network, date)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{digest_md}\n## Reflection\n\n{reflection}\n")
@@ -56,11 +64,14 @@ def _reflection(
     date: str,
     digest_md: str,
     narrative: bool,
+    complete: bool,
     narrate_fn: Callable[[str, Caps], JournalNarrative | None],
     alerter: Alerter | None,
 ) -> str:
     if not narrative:
         return "_narrative disabled_"
+    if not complete:
+        return "_narrative deferred until the day closes (UTC)_"
     cached = state.meta_get(_META_PREFIX + date)
     if cached:
         return cached  # the lesson was stored alongside it on the fresh call

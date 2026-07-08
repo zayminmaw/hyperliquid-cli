@@ -154,6 +154,19 @@ def test_context_survives_missing_thesis(tmp_path):
     assert ctx.thesis is None and ctx.prior_actions == []
 
 
+def test_prior_actions_excludes_holds_so_applied_actions_survive(tmp_path):
+    # A long hold streak must not evict the applied tighten from the manager's window.
+    state = StateStore(tmp_path / "s.db")
+    trade = _trade_row(state)
+    state.log_sentry(NOW, trade["id"], "BTC", "managed_tighten_stop", {"to": 100.5})
+    for i in range(12):
+        state.log_sentry(NOW + i + 1, trade["id"], "BTC", "managed_hold", {"mark": 110.0})
+
+    ctx = build_context(trade, mark=110.0, state=state, tunable=tunable(), now=NOW + 100)
+    actions = [a["action"] for a in ctx.prior_actions]
+    assert "managed_tighten_stop" in actions and "managed_hold" not in actions
+
+
 # --- shadow pass --------------------------------------------------------------------
 
 
@@ -218,6 +231,27 @@ def test_shadow_covers_hypothetical_book(tmp_path):
     assert s.evaluated == 1  # the shadow book gets the same judgment
 
 
+def test_shadow_respects_eval_spacing(tmp_path):
+    # A shadow evaluated moments ago is skipped, so an unattended `--shadow` loop can't
+    # re-call the model every pass (it once had no spacing at all).
+    state, ex = _paper(tmp_path, {"BTC": 112.0})
+    trade = _trade_row(state)
+    state.log_sentry(NOW - 60, trade["id"], "BTC", "shadow", {})
+    s = shadow_pass(ex, state, caps(sentry_eval_interval_minutes=15), tunable(),
+                    decide_fn=_mgmt(_good()), now=NOW)
+    assert s.evaluated == 0 and s.spaced == 1
+
+
+def test_shadow_stops_at_the_daily_llm_budget(tmp_path):
+    state, ex = _paper(tmp_path, {"BTC": 112.0})
+    _trade_row(state)
+    for i in range(3):  # today's shadow rows already at the cap
+        state.log_sentry(NOW - i, 999, "OLD", "shadow", {})
+    s = shadow_pass(ex, state, caps(sentry_eval_interval_minutes=0, sentry_max_llm_calls_per_day=3),
+                    tunable(), decide_fn=_mgmt(_good()), now=NOW)
+    assert s.evaluated == 0 and "budget" in s.note
+
+
 # --- sentry watch pass: deferred re-entry without intake ----------------------------
 
 
@@ -238,6 +272,24 @@ def test_watch_pass_recheks_deferred_but_never_consumes_intake(tmp_path):
     assert len(state.pull_new()) == 1             # candidate still there for `exec`
     assert state.deferred_count() == 0            # parked entry consumed
     assert {t["coin"] for t in state.open_trades()} == {"BTC"}
+
+
+def test_due_deferral_already_fired_elsewhere_is_dropped_not_redecided(tmp_path):
+    # A concurrent pass may have fired this parked candidate; the re-check must skip it
+    # (no wasted LLM call, no re-parking a fired candidate) rather than decide it again.
+    state, ex = _paper(tmp_path, {"BTC": 100.0})
+    parked = Candidate(id="w1", coin="BTC", side=Side.LONG, entry=100, tp=120, sl=90,
+                       created_at=NOW - 60)
+    state.defer_candidate(parked, next_check_at=NOW, attempts_remaining=2)
+    state.record_fire("w1", None, NOW)  # a sibling process already fired it
+
+    def boom(ctx, caps_, tunable_):
+        raise AssertionError("must not re-decide an already-fired deferral")
+
+    s = run_once(ex, state, caps(), tunable(), decide_fn=boom, now=NOW, include_intake=False)
+    assert s.rechecked == 1 and s.fired == 0
+    assert state.deferred_count() == 0            # dropped, not re-parked
+    assert state.open_trades() == []
 
 
 def test_watch_pass_manages_and_resolves_too(tmp_path):

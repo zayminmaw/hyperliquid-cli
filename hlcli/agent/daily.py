@@ -54,26 +54,12 @@ def run_daily(
         pending_proposals=pending_proposals(caps),
     )
 
-    # Both tuners are sample-gated — a thin record means no model call at all.
-    cfg = propose_config(state, caps, tunable, client=client)
-    prompt = propose_prompt(state, caps, load_decision_prompt(caps), client=client)
-    written = []
-    if cfg.proposed is not None:
-        write_proposed_config(caps, cfg.proposed)
-        written.append("config")
-    if prompt.proposed is not None:
-        write_proposed_prompt(caps, prompt.proposed)
-        written.append("prompt")
-
-    promoted = []
-    if network is Network.PAPER and pending_proposals(caps):
-        promoted = [p["kind"] for p in promote_proposals(caps)]
+    tuner = _run_tuners(state, caps, network, tunable, client, alerter)
 
     positions = exchange.get_positions()
     report = {
         "journal": str(journal),
-        "tuner": {"config": cfg.note, "prompt": prompt.note,
-                  "written": written, "promoted": promoted},
+        "tuner": tuner,
         "equity": exchange.equity(),
         "open_positions": len(positions),
         "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
@@ -84,3 +70,30 @@ def run_daily(
     }
     alerter.alert("agent_daily_report", **report)
     return report
+
+
+def _run_tuners(state, caps, network, tunable, client, alerter: Alerter) -> dict:
+    """Propose from the day's outcomes, then paper-only auto-promote. Isolated so a
+    tuner fault (bad cohort, API hiccup after the sample gate) degrades this stage
+    without failing the daily job — otherwise the whole job would re-run every backoff
+    cycle, re-paying for the journal and re-calling the tuners all day."""
+    try:
+        # Both tuners are sample-gated — a thin record means no model call at all.
+        cfg = propose_config(state, caps, tunable, client=client)
+        prompt = propose_prompt(state, caps, load_decision_prompt(caps), client=client)
+        written = []
+        if cfg.proposed is not None:
+            write_proposed_config(caps, cfg.proposed)
+            written.append("config")
+        if prompt.proposed is not None:
+            write_proposed_prompt(caps, prompt.proposed)
+            written.append("prompt")
+
+        promoted = []
+        if network is Network.PAPER and pending_proposals(caps):
+            promoted = [p["kind"] for p in promote_proposals(caps)]
+        return {"config": cfg.note, "prompt": prompt.note,
+                "written": written, "promoted": promoted}
+    except Exception as exc:
+        alerter.alert("agent_tuner_failed", level="warning", error=str(exc))
+        return {"error": str(exc)}

@@ -19,10 +19,10 @@ from hlcli.state.store import StateStore
 
 
 def fire(exchange: Exchange, state: StateStore, candidate: Candidate, order: Order, when: float) -> OrderResult:
-    if state.already_fired(candidate.id):
+    # One atomic claim marks intent AND detects a duplicate: two passes racing on the
+    # same candidate (e.g. `exec run` beside `sentry run`) can't both win the insert.
+    if not state.record_fire(candidate.id, None, when):
         return OrderResult(accepted=False, status="duplicate", message="already fired (idempotent skip)")
-
-    state.record_fire(candidate.id, None, when)  # mark intent first
     result = exchange.place_order(order)
     if not result.accepted:
         state.release_fire(candidate.id)  # nothing filled — don't leave a false "fired" mark

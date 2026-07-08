@@ -19,7 +19,7 @@ from hlcli.agent.supervisor import (
     LAST_DAILY, LAST_EXEC, LAST_INTAKE, LAST_SENTRY, LAST_TICK,
     Cadence, Supervisor,
 )
-from hlcli.cli.commands.sentry import check_mainnet_graduation
+from hlcli.cli.commands.sentry import check_mainnet_graduation, require_exclusive_modes
 from hlcli.cli.context import open_env, state_of
 from hlcli.cli.output import emit, note
 from hlcli.core.config_schema import load_tunable
@@ -45,9 +45,7 @@ def run(
     """Run the supervisor until interrupted. Cadences come from the tunable surface
     (read at start; pass behavior reloads every pass as usual)."""
     g = state_of(ctx)
-    if with_shadow and with_manage:
-        raise typer.BadParameter("--shadow and --manage are exclusive: manage already logs "
-                                 "every proposal, so shadowing on top doubles the LLM spend")
+    require_exclusive_modes(with_shadow, with_manage)
     if with_manage:
         check_mainnet_graduation(g)
     exchange, state, caps, tunable = open_env(g, for_write=True)

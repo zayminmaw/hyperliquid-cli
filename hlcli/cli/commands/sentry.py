@@ -19,6 +19,7 @@ import typer
 
 from hlcli.cli.context import GlobalState, open_env, state_of
 from hlcli.cli.output import emit, emit_rows, note
+from hlcli.core.backoff import backoff_delay
 from hlcli.core.config import get_caps
 from hlcli.core.config_schema import load_tunable
 from hlcli.core.types import Network, Side
@@ -35,6 +36,14 @@ from hlcli.state.store import StateStore, open_state
 app = typer.Typer(no_args_is_help=True, help="In-trade manager (sentry).")
 
 _MAX_BACKOFF_SECONDS = 600.0
+
+
+def require_exclusive_modes(with_shadow: bool, with_manage: bool) -> None:
+    """`--shadow` and `--manage` can't run together: manage already logs every proposal,
+    so shadowing on top just doubles the LLM spend. Shared by `sentry run` and `agent run`."""
+    if with_shadow and with_manage:
+        raise typer.BadParameter("--shadow and --manage are exclusive: manage already logs "
+                                 "every proposal, so shadowing on top doubles the LLM spend")
 
 
 @app.command("once")
@@ -65,7 +74,7 @@ def shadow(ctx: typer.Context) -> None:
     s = shadow_pass(exchange, state, caps, tunable, breaker_tripped=breaker.tripped())
     emit({"network": g.network.value, "evaluated": s.evaluated, "held": s.held,
           "proposed": s.proposed, "agreed": s.agreed, "dropped": s.dropped,
-          "actions": s.actions, "note": "shadow (logged, fired nothing)"},
+          "spaced": s.spaced, "actions": s.actions, "note": s.note},
          as_json=g.json_out, title="sentry shadow")
 
 
@@ -109,9 +118,7 @@ def run(
 ) -> None:
     """Continuous watch loop (ctrl-c to stop). Intake stays with `hl exec run`."""
     g = state_of(ctx)
-    if with_shadow and with_manage:
-        raise typer.BadParameter("--shadow and --manage are exclusive: manage already logs "
-                                 "every proposal, so shadowing on top doubles the LLM spend")
+    require_exclusive_modes(with_shadow, with_manage)
     if with_manage:
         check_mainnet_graduation(g)
     exchange, state, caps, _ = open_env(g, for_write=True)
@@ -151,7 +158,7 @@ def run(
                 note(f"[yellow]{time.strftime('%H:%M:%S')} pass failed ({failures}x): {exc}[/yellow]")
                 if failures == 1:
                     alerter.alert("pass_failed", level="warning", consecutive=failures, error=str(exc))
-            time.sleep(min(interval * (2 ** min(failures, 10)), _MAX_BACKOFF_SECONDS) if failures else interval)
+            time.sleep(backoff_delay(interval, failures, _MAX_BACKOFF_SECONDS))
     except KeyboardInterrupt:
         note("stopped")
 

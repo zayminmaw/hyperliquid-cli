@@ -19,9 +19,15 @@ from hlcli.core.config import Caps
 from hlcli.core.types import Network
 
 
+def alerts_path(caps: Caps, network: Network) -> Path:
+    """The network's JSONL alert log. One definition so the writer that reads it and
+    the alerter that writes it can never drift onto different filenames."""
+    return caps.data_dir / f"alerts-{network.value}.log"
+
+
 def network_alerter(caps: Caps, network: Network) -> Alerter:
     """Network-scoped alert sink: JSONL log beside the data dir + stderr."""
-    return Alerter(caps.data_dir / f"alerts-{network.value}.log")
+    return Alerter(alerts_path(caps, network))
 
 
 class Alerter:

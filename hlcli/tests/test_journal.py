@@ -71,6 +71,38 @@ def test_digest_reconciles_and_slices_by_day(tmp_path):
     assert d.equity == PaperExchange(10_000.0, state=state).equity()
 
 
+def test_scaled_partials_are_not_counted_as_opened(tmp_path):
+    # One real fire that scales out becomes a parent + a `scaled` child sharing its
+    # opened_at; only the entry should count as fired/opened.
+    state = StateStore(tmp_path / "s.db")
+    parent = state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 2.0, 0.8, "trend", IN_DAY)
+    state.split_trade(parent, 1.0, 110.0, 10.0, 2.0, IN_DAY + 100)  # bank half → `scaled` child
+
+    d = build_digest(PaperExchange(10_000.0, state=state), state, Network.PAPER, DAY)
+    assert d.fired == 1 and len(d.opened) == 1           # the entry only, not the partial
+    assert [t["status"] for t in d.resolved] == ["scaled"]  # the partial shows up as an exit
+
+
+def test_journal_write_today_defers_the_narrative(tmp_path):
+    # Journaling a still-open day must not cache a partial-day reflection/lesson that the
+    # nightly job would then reuse forever.
+    state = seeded_state(tmp_path)
+    c = caps(data_dir=tmp_path)
+    today = utc_date(IN_DAY)
+    calls = []
+
+    def fake_narrate(md, caps_):
+        calls.append(md)
+        return JournalNarrative(reflection="partial", lesson="partial lesson")
+
+    path = write_journal(PaperExchange(10_000.0, state=state), state, c, Network.PAPER, today,
+                         narrate_fn=fake_narrate, now=IN_DAY)
+    assert calls == []                                   # the model was never called
+    assert "deferred until the day closes" in path.read_text()
+    assert state.meta_get("journal_narrative_" + today) is None
+    assert state.recent_reflections(1) == []             # no partial-day lesson stored
+
+
 def test_render_contains_every_section(tmp_path):
     d = build_digest(PaperExchange(10_000.0), StateStore(tmp_path / "s.db"), Network.PAPER, DAY)
     text = render(d)

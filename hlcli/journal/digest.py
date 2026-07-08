@@ -106,33 +106,43 @@ def _tally_decisions(d: DayDigest, rows: list[dict]) -> None:
                 "conviction": decision.get("conviction"),
                 "rationale": (decision.get("rationale") or "")[:240],
             })
-        if context.get("dropped"):
+        outcome = context.get("outcome") or _legacy_outcome(gate, context)
+        if outcome == "dropped":
             d.dropped += 1
-        elif context.get("wait") == "deferred":
+        elif outcome == "deferred":
             d.deferred += 1
-        elif gate.get("approved") is False:
+        elif outcome == "rejected":
             d.rejected += 1
-            _bump(d.reject_reasons, gate.get("reason") or "unknown")
-        elif "rejected" in context or "wait" in context:
-            # pre-gate rejects (no mark) and expired WAITs log the reason in context
-            d.rejected += 1
-            _bump(d.reject_reasons, context.get("rejected") or context.get("wait") or "unknown")
+            reason = gate.get("reason") or context.get("rejected") or context.get("wait")
+            d.reject_reasons[reason or "unknown"] = d.reject_reasons.get(reason or "unknown", 0) + 1
+
+
+def _legacy_outcome(gate: dict, context: dict) -> str | None:
+    """Classify a decision-log row written before the `outcome` field existed."""
+    if context.get("dropped"):
+        return "dropped"
+    if context.get("wait") == "deferred":
+        return "deferred"
+    if gate.get("approved") is False or "rejected" in context or "wait" in context:
+        return "rejected"
+    return None
 
 
 def _tally_trades(d: DayDigest, state: StateStore, t0: float, t1: float) -> None:
-    opened = [t for t in state.open_trades()] + state.resolved_trades()
-    for t in opened:
-        if t0 <= t["opened_at"] < t1:
-            d.opened.append({"coin": t["coin"], "side": t["side"], "size": t["size"],
-                             "entry": t["entry"], "conviction": t["conviction"],
-                             "shadow": bool(t["shadow"])})
-            if t["shadow"]:
-                d.shadow_fired += 1
-            else:
-                d.fired += 1
+    for t in state.trades_opened_between(t0, t1):
+        # A `scaled` row is a partial *exit* of a trade opened earlier, sharing its
+        # `opened_at` — counting it as opened/fired would double-count the entry.
+        if t["status"] == "scaled":
+            continue
+        d.opened.append({"coin": t["coin"], "side": t["side"], "size": t["size"],
+                         "entry": t["entry"], "conviction": t["conviction"],
+                         "shadow": bool(t["shadow"])})
+        if t["shadow"]:
+            d.shadow_fired += 1
+        else:
+            d.fired += 1
 
-    day_resolved = [t for t in state.resolved_trades()
-                    if not t["shadow"] and t["closed_at"] is not None and t0 <= t["closed_at"] < t1]
+    day_resolved = [t for t in state.resolved_between(t0, t1) if not t["shadow"]]
     gross_win = gross_loss = 0.0
     r_values = []
     for t in day_resolved:
@@ -230,7 +240,3 @@ def render(d: DayDigest) -> str:
 
 def _loads(value) -> dict:
     return json.loads(value) if value else {}
-
-
-def _bump(counter: dict[str, int], key: str) -> None:
-    counter[key] = counter.get(key, 0) + 1

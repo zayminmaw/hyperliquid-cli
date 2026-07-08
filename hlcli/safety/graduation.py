@@ -14,9 +14,14 @@ from hlcli.tuner.stats import summary
 
 
 def assess(trades: list[dict], caps: Caps) -> dict:
-    """Pass/fail readiness verdict plus the numbers behind each check."""
-    stats = summary(trades)
-    span_days = _span_days(trades)
+    """Pass/fail readiness verdict plus the numbers behind each check.
+
+    `scaled` rows are partial exits of a position, not distinct trading decisions —
+    excluded here so `min_trades` counts positions, not banked partials (which would
+    let a scale-out ladder inflate the track record and unlock mainnet early)."""
+    graded = [t for t in trades if t.get("status") != "scaled"]
+    stats = summary(graded)
+    span_days = _span_days(graded)
     checks = {
         "min_trades": stats["n"] >= caps.graduation_min_trades,
         "min_days": span_days >= caps.graduation_min_days,

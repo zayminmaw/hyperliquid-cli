@@ -110,6 +110,21 @@ def test_farthest_stop_anchors_r_nearest_tp_is_the_target(tmp_path):
     adopt_unmanaged(ex, state, now=NOW)
     t = state.open_trades()[0]
     assert (t["sl"], t["tp"]) == (94.0, 108.0)
+    # The anchor stop's oid is recorded so sentry manages this row's stop alone.
+    assert (t["sl_oid"], t["tp_oid"]) == ("2", "3")
+
+
+def test_worst_case_stop_is_the_losing_side_not_the_farthest_by_distance(tmp_path):
+    # A long whose stop has ratcheted above entry (105) still holds a slice stop below
+    # (98): abs-distance would wrongly anchor R at 105 (profit side); the worst case is
+    # the lowest stop.
+    state = StateStore(tmp_path / "s.db")
+    ex = FakeExchange([long_btc(entry=100.0)], [
+        trigger(105.0, order_type="stop market"), trigger(98.0, order_type="stop market", oid=2),
+    ])
+    adopt_unmanaged(ex, state, now=NOW)
+    t = state.open_trades()[0]
+    assert t["sl"] == 98.0 and t["sl_oid"] == "2"
 
 
 def test_adoption_is_idempotent_and_leaves_known_coins_alone(tmp_path):

@@ -16,6 +16,10 @@ from hlcli.core.types import Candle
 
 # Kaufman efficiency ratio = net move / total path length. ~1.0 is a clean directional
 # move; ~0.0 is chop. At or above the threshold we call it a trend, below it a range.
+# The fast candle frame the decision + sentry contexts are read at. One definition so
+# the executor tail, the sentry ATR feed, and the sentry fast frame can't drift apart.
+DECISION_INTERVAL = "15m"
+
 _ER_TREND_THRESHOLD = 0.35
 _MIN_CANDLES = 20  # below this the ratio is too noisy to trust → unknown (None)
 _SUMMARY_TAIL = 12  # recent bars handed to the model — enough to read the swing, cheap on tokens

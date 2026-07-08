@@ -44,3 +44,12 @@ def test_negative_expectancy_blocks():
 def test_empty_ledger_is_not_ready():
     g = assess([], caps())
     assert not g["ready"] and g["n"] == 0 and g["span_days"] == 0.0
+
+
+def test_scaled_partials_do_not_count_toward_graduation():
+    # 4 real positions + 6 scale-out partials must NOT reach a 5-trade bar: partials
+    # are exits of a position, not distinct decisions that could unlock mainnet.
+    trades = _record(4, r=1.0, span_days=10)
+    trades += [_trade("scaled", r=0.5, closed_at=i * DAY) for i in range(6)]
+    g = assess(trades, caps(graduation_min_trades=5, graduation_min_days=7))
+    assert g["n"] == 4 and not g["checks"]["min_trades"]

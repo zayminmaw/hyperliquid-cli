@@ -29,7 +29,8 @@ from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Order, OrderType, Side
 from hlcli.exchange.base import Exchange
-from hlcli.executor.protect import cancel_coin_triggers
+from hlcli.executor.protect import cancel_coin_triggers, cancel_trade_triggers
+from hlcli.executor.rmath import initial_risk
 from hlcli.state.store import StateStore
 
 
@@ -87,10 +88,20 @@ def resolve_open_trades(
         realized, r_multiple = _pnl(trade, side, exit_price)
         state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now)
         if native_protected:
-            cancel_coin_triggers(exchange, trade["coin"])  # the surviving half of the SL/TP pair
+            _cancel_after_close(exchange, state, trade)
         closed += 1
 
     return closed
+
+
+def _cancel_after_close(exchange: Exchange, state: StateStore, trade: dict) -> None:
+    """Drop the closed row's surviving SL/TP trigger. Cancel by this row's oids so a
+    sibling slice (a coin that was added to) keeps its protection; fall back to the
+    coin-wide sweep only once no open ledger row remains for the coin."""
+    cancel_trade_triggers(exchange, trade)
+    still_open = any(t["coin"] == trade["coin"] for t in state.open_trades(shadow=False))
+    if not still_open:
+        cancel_coin_triggers(exchange, trade["coin"])
 
 
 def _resolve_shadow(state: StateStore, trade: dict, marks: dict[str, float], now: float,
@@ -181,7 +192,7 @@ def _pnl(trade: dict, side: Side, exit_price: float) -> tuple[float, float]:
     Risk anchors to `initial_sl`: once sentry has ratcheted the working `sl` toward
     profit, |entry − sl| shrinks and would inflate the R the tuner learns from."""
     per_unit = (exit_price - trade["entry"]) if side is Side.LONG else (trade["entry"] - exit_price)
-    risk = abs(trade["entry"] - (trade["initial_sl"] or trade["sl"]))
+    risk = initial_risk(trade)
     realized = round(per_unit * trade["size"], 6)
     r_multiple = round(per_unit / risk, 4) if risk > 0 else 0.0
     return realized, r_multiple

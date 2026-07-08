@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from hlcli.agent.intake_watch import IntakeResult
+from hlcli.core.backoff import backoff_delay
 from hlcli.safety.alerts import Alerter
 from hlcli.state.store import StateStore
 
@@ -149,10 +150,12 @@ class Supervisor:
                     on_tick(ran)
             except Exception as exc:  # keep the loop alive across transient LLM/feed faults
                 failures += 1
+                # Mark the loop alive even on a failing tick, so `agent status` reports
+                # "running" (backing off) rather than "stopped" and no one restarts it.
+                self._state.meta_set(LAST_TICK, str(self._now()))
                 if failures == 1 or failures % _FAILURE_ALERT_EVERY == 0:
                     self._alerter.alert("agent_tick_failed", level="warning",
                                         consecutive=failures, error=str(exc))
                 if on_error is not None:
                     on_error(failures, exc)
-            base = self._cadence.intake_poll_seconds
-            sleep_fn(min(base * (2 ** min(failures, 10)), _MAX_BACKOFF_SECONDS) if failures else base)
+            sleep_fn(backoff_delay(self._cadence.intake_poll_seconds, failures, _MAX_BACKOFF_SECONDS))

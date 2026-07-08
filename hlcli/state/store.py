@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS trades (
     shadow INTEGER NOT NULL DEFAULT 0,     -- 1 = hypothetical (shadow mode); no order behind it
     initial_sl REAL,                       -- the SL at entry; sentry ratchets `sl`, R math stays anchored here
     scaled_out INTEGER NOT NULL DEFAULT 0, -- 1 = the one-shot scale-out already happened
-    adopted INTEGER NOT NULL DEFAULT 0     -- 1 = a Mode A position sentry adopted (PLAN.md §15.5)
+    adopted INTEGER NOT NULL DEFAULT 0,    -- 1 = a Mode A position sentry adopted (PLAN.md §15.5)
+    sl_oid TEXT,                           -- exchange oid of this row's native stop trigger (§14 slice-scoped cancel)
+    tp_oid TEXT                            -- exchange oid of this row's native take-profit trigger
 );
 CREATE TABLE IF NOT EXISTS sentry_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +113,10 @@ class StateStore:
             self._conn.execute("ALTER TABLE trades ADD COLUMN scaled_out INTEGER NOT NULL DEFAULT 0")
         if "adopted" not in cols:
             self._conn.execute("ALTER TABLE trades ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0")
+        if "sl_oid" not in cols:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN sl_oid TEXT")
+        if "tp_oid" not in cols:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN tp_oid TEXT")
         # Pre-sentry rows never had their SL moved, so today's `sl` IS the initial one.
         self._conn.execute("UPDATE trades SET initial_sl = sl WHERE initial_sl IS NULL")
 
@@ -159,12 +165,16 @@ class StateStore:
     def already_fired(self, key: str) -> bool:
         return self._conn.execute("SELECT 1 FROM idempotency WHERE key = ?", (key,)).fetchone() is not None
 
-    def record_fire(self, key: str, order_id: str | None, when: float) -> None:
-        self._conn.execute(
+    def record_fire(self, key: str, order_id: str | None, when: float) -> bool:
+        """Claim a fire key. Returns True if this call inserted it, False if it already
+        existed — an atomic claim (INSERT OR IGNORE + rowcount) so two passes racing on
+        the same candidate can't both fire it, without a check-then-act window."""
+        cur = self._conn.execute(
             "INSERT OR IGNORE INTO idempotency(key, order_id, created_at) VALUES(?, ?, ?)",
             (key, order_id, when),
         )
         self._conn.commit()
+        return cur.rowcount > 0
 
     def release_fire(self, key: str) -> None:
         """Undo a recorded intent after a *definitive* reject (the order did not fill),
@@ -210,13 +220,14 @@ class StateStore:
         self, candidate_id: str, coin: str, side: Side, entry: float, sl: float, tp: float,
         size: float, conviction: float, regime: str | None, opened_at: float,
         *, shadow: bool = False, adopted: bool = False,
+        sl_oid: str | None = None, tp_oid: str | None = None,
     ) -> int:
         cur = self._conn.execute(
             "INSERT INTO trades(candidate_id, coin, side, entry, sl, tp, size, conviction,"
-            " regime, opened_at, shadow, initial_sl, adopted)"
-            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " regime, opened_at, shadow, initial_sl, adopted, sl_oid, tp_oid)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (candidate_id, coin, side.value, entry, sl, tp, size, conviction, regime,
-             opened_at, int(shadow), sl, int(adopted)),
+             opened_at, int(shadow), sl, int(adopted), sl_oid, tp_oid),
         )
         self._conn.commit()
         return cur.lastrowid
@@ -248,6 +259,16 @@ class StateStore:
         self._conn.execute("UPDATE trades SET tp = ? WHERE id = ?", (new_tp, trade_id))
         self._conn.commit()
 
+    def update_trade_triggers(self, trade_id: int, *, sl_oid: str | None = None,
+                              tp_oid: str | None = None) -> None:
+        """Record the exchange oids of this row's native SL/TP triggers, so later
+        cancels target only this position's orders — never a sibling slice's (§14)."""
+        if sl_oid is not None:
+            self._conn.execute("UPDATE trades SET sl_oid = ? WHERE id = ?", (sl_oid, trade_id))
+        if tp_oid is not None:
+            self._conn.execute("UPDATE trades SET tp_oid = ? WHERE id = ?", (tp_oid, trade_id))
+        self._conn.commit()
+
     def split_trade(
         self, trade_id: int, close_size: float, exit_price: float, realized: float,
         r_multiple: float, closed_at: float,
@@ -277,6 +298,22 @@ class StateStore:
             sql += f" LIMIT {int(limit)}"
         return [dict(r) for r in self._conn.execute(sql).fetchall()]
 
+    def trades_opened_between(self, t0: float, t1: float) -> list[dict]:
+        """Trades (open or resolved) whose `opened_at` falls in `[t0, t1)` — the
+        journal's opened-today slice, without scanning the whole ledger."""
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE opened_at >= ? AND opened_at < ? ORDER BY id", (t0, t1)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolved_between(self, t0: float, t1: float) -> list[dict]:
+        """Resolved rows whose `closed_at` falls in `[t0, t1)`, oldest-closed first."""
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE status != 'open' AND closed_at >= ? AND closed_at < ?"
+            " ORDER BY closed_at", (t0, t1)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # --- sentry log (in-trade management audit trail; PLAN.md §14) ---
 
     def log_sentry(self, ts: float, trade_id: int, coin: str, action: str, details=None) -> None:
@@ -299,13 +336,19 @@ class StateStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def sentry_for_trade(self, trade_id: int, limit: int = 10) -> list[dict]:
-        """This trade's management history, newest first — context for the LLM manager."""
-        rows = self._conn.execute(
-            "SELECT * FROM sentry_log WHERE trade_id = ? ORDER BY id DESC LIMIT ?",
-            (trade_id, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+    def sentry_for_trade(self, trade_id: int, limit: int = 10,
+                         exclude: tuple[str, ...] = ()) -> list[dict]:
+        """This trade's management history, newest first — context for the LLM manager.
+        `exclude` filters out noise actions (holds, shadow proposals) in SQL so the
+        window carries the applied actions the manager actually needs to see."""
+        sql = "SELECT * FROM sentry_log WHERE trade_id = ?"
+        params: list = [trade_id]
+        if exclude:
+            sql += f" AND action NOT IN ({','.join('?' * len(exclude))})"
+            params.extend(exclude)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
     def last_sentry_ts(self, trade_id: int, actions: tuple[str, ...]) -> float | None:
         """When this trade last saw one of `actions` — the cooldown / eval-spacing clock."""

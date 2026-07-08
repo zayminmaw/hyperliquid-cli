@@ -16,13 +16,14 @@ import httpx
 from pydantic import BaseModel
 
 from hlcli.core.config_schema import TunableConfig
-from hlcli.core.types import Candle, Side
+from hlcli.core.types import Candle
 from hlcli.exchange.base import Exchange
-from hlcli.executor.regime import summarize
+from hlcli.executor.regime import DECISION_INTERVAL, summarize
+from hlcli.executor.rmath import initial_stop, r_now
 from hlcli.state.store import StateStore
 
-FAST_INTERVAL = "15m"  # matches the entry-decision tail
-SLOW_INTERVAL = "1h"   # the longer-horizon frame position management needs
+FAST_INTERVAL = DECISION_INTERVAL  # matches the entry-decision tail
+SLOW_INTERVAL = "1h"               # the longer-horizon frame position management needs
 
 
 class ManagementContext(BaseModel):
@@ -55,9 +56,8 @@ def build_context(
     lessons: list[dict] | None = None,
     breaker_tripped: bool = False,
 ) -> ManagementContext:
-    initial_sl = trade["initial_sl"] or trade["sl"]
-    risk = abs(trade["entry"] - initial_sl)
-    favorable = (mark - trade["entry"]) if Side(trade["side"]) is Side.LONG else (trade["entry"] - mark)
+    initial_sl = initial_stop(trade)
+    r = r_now(trade, mark)
 
     return ManagementContext(
         trade={
@@ -69,7 +69,7 @@ def build_context(
             "sl": trade["sl"],
             "initial_sl": initial_sl,
             "tp": trade["tp"],
-            "r_now": round(favorable / risk, 3) if risk > 0 else None,
+            "r_now": round(r, 3) if r is not None else None,
             "age_minutes": round((now - trade["opened_at"]) / 60, 1),
             "scaled_out": bool(trade["scaled_out"]),
         },
@@ -105,18 +105,23 @@ def _thesis(state: StateStore, candidate_id: str) -> dict | None:
     return out or None
 
 
+# Rows that carry no material history for the manager: shadow proposals (never
+# applied — a hypothetical reads like history to the model) and holds (a wall of
+# them would evict the applied tightens/banks the manager actually needs to see).
+_PRIOR_ACTION_NOISE = ("shadow", "shadow_dropped", "managed_hold")
+
+
 def _prior_actions(state: StateStore, trade_id: int, now: float) -> list[dict]:
-    """Things that actually happened to this trade. Shadow proposals are excluded —
-    a hypothetical that was never applied reads like history to the model (observed
-    live: it described a shadow tighten as 'a prior action that moved the stop')."""
+    """The applied management actions on this trade, newest first — the manager's own
+    track record, with holds and shadow proposals filtered out so they can't crowd the
+    window (observed live: a shadow tighten was described as 'a prior stop move')."""
     return [
         {
             "action": row["action"],
             "minutes_ago": round((now - row["ts"]) / 60, 1),
             "details": _loads(row["details"]),
         }
-        for row in state.sentry_for_trade(trade_id)
-        if not row["action"].startswith("shadow")
+        for row in state.sentry_for_trade(trade_id, exclude=_PRIOR_ACTION_NOISE)
     ]
 
 
