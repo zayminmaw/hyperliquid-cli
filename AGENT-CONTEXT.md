@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-08 | Session: 7c BUILT (reflection memory: reflections table + bounded lessons inject into exec+sentry contexts; run_daily w/ paper-only auto-promote); 386 tests pass; live-verified; 7c uncommitted
+> Last updated: 2026-07-08 | Session: 7d BUILT (Mode A adoption) — PHASE 7 CODE-COMPLETE; 395 tests pass; 7d uncommitted; 7d live-testnet check pending (no account on this machine)
 
 ---
 
 ## 🎯 CURRENT TASK
 
-- Task: Phase 7 — Agent mode: autonomous supervisor + daily journal + reflection memory + Mode A adoption (PLAN.md §15)
-- Goal: 7a supervisor ✅ → 7b `hl journal` ✅ → 7c reflection inject + scheduled tuners ✅ → 7d sentry adopts Mode A
-- Status: 7c complete, uncommitted (7a/7b committed by user). Gate live-verified: opus `submit_journal` distilled a lesson; next `exec once` logged `lessons: ["2026-07-08"]` in decision context
-- Next action: commit 7c, then build 7d (sentry adopts Mode A positions: exchange stop ⇒ ledger row flagged `adopted`; stopless ⇒ alert+skip, never invent; `hl sentry adopt`)
-- Blocked by: none
+- Task: Phase 7 — Agent mode (PLAN.md §15) — CODE-COMPLETE (7a–7d)
+- Goal: 7a supervisor ✅ → 7b `hl journal` ✅ → 7c reflection memory + tuners ✅ → 7d Mode A adoption ✅ (mechanics)
+- Status: 7d complete + test-verified, uncommitted (7a–7c committed by user). 7d gate's live half pending: `hl account ls` is empty on this machine — needs a testnet account, a manual order + stop, then `hl --network testnet sentry once`
+- Next action: commit 7d. Then operational: VPS deploy (`deploy/`), `hl agent run` on paper/testnet to accumulate graduation evidence; close 7d live check when a testnet account exists
+- Blocked by: none (live 7d check waits on a testnet account)
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: built 7c — `reflections` table (upsert/date) + narrative now forced `submit_journal` tool (reflection + ONE lesson; no tool ⇒ dropped); `journal/lessons.py` bounded inject (caps `HL_AGENT_REFLECT_INJECT_MAX`/`_MAX_CHARS`, tunable `agent.reflection_inject`) → `EnrichedContext.recent_lessons` (runner, logged as dates in decision context) + `ManagementContext.recent_lessons` (shadow + live passes); both system prompts note the block is advisory-never-override; `agent/daily.py` `run_daily` (journal yesterday → sample-gated tuners → PAPER-only auto-promote → report alert), agent daily_pass wired to it
-- Result: 386 pass (18 new); live: real opus lesson stored; exec pass carried it (decision_log `lessons: ["2026-07-08"]`); paper-promotes/testnet-waits test-verified
-- File(s) touched: journal/{narrative,writer,lessons}.py, agent/daily.py (new), executor/{enrich,runner,decision}.py, sentry/{context,shadow,live,decision}.py, state/store.py, core/{config,config_schema}.py, cli/commands/agent.py, .env.example, tests/test_reflection.py (new), tests/test_{journal,keys}.py, docs/modules.md, ACTION-ITEMS.md
+- Did: built 7d — `sentry/adopt.py` `adopt_unmanaged`: unmanaged position + exchange stop trigger ⇒ ledger row (entry = actual avg price, `initial_sl` = trigger; farthest stop anchors R; nearest tp is the target else 100R out-of-reach park — ledger tp is NOT NULL; `adopted` flag column added additively, conviction 0, `adopted` sentry-log row + `position_adopted` alert); stop-vs-tp via frontend order type, side-of-entry fallback fails safe; stopless ⇒ skip (runner's edge `unmanaged_position` alert persists) — never invents a stop, places no orders; auto-runs before every watch pass + `hl sentry adopt`
+- Result: 395 pass (9 new: labeled/ratcheted/unlabeled triggers, multi-stop R anchor, short mirror, idempotency, stopless skip)
+- File(s) touched: sentry/adopt.py (new), state/store.py (adopted col + open_trade kw), cli/commands/{sentry,agent}.py, tests/test_adopt.py (new), docs/{cli,modules}.md, ACTION-ITEMS.md
 
 ---
 
@@ -45,6 +45,7 @@
 | `hlcli/sentry/{engine,apply}.py` | 6a: pure R-anchored rules (ratchet/trail/scale-out) · apply (idempotent partials, live stop place-new-then-cancel-old, shadow orderless) |
 | `hlcli/sentry/{decision,context,shadow}.py` | 6b: strict `submit_management` (no ADD) · thesis+2-frame context (prior_actions excludes shadow rows) · shadow pass pairing proposal with the 6a baseline (never shown to model) |
 | `hlcli/sentry/{gate,live}.py` | 6c/6d: management gate (churn clocks FROM sentry_log; ↓risk-only when halted; ADD = winners-only, code-sized, raise-stop-first) · live pass (eval spacing, 24h budgets, real book only) · `graduation_for_management` gates mainnet on the TESTNET book |
+| `hlcli/sentry/adopt.py` | 7d: Mode A adoption — stop trigger required (never invented), records only, auto-runs before watch passes |
 | `hlcli/agent/{intake_watch,supervisor}.py` | 7a: watched intake dir (enqueue-before-move, settle window) · tick loop (cadences, daily job, heartbeat, backoff); `cli/context.open_env` + `alerts.network_alerter` shared by exec/sentry/agent |
 | `hlcli/journal/{digest,narrative,writer,lessons}.py` | 7b/7c: day digest (verdict rationales, R/PF) · opus `submit_journal` tool (reflection + lesson) · writer (meta-cached; failure degrades) · bounded lessons inject |
 | `hlcli/agent/daily.py` | 7c: run_daily — journal yesterday → tuners → PAPER-only auto-promote → report alert |

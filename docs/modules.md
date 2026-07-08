@@ -121,6 +121,7 @@ The HWM + idempotency keys are what make a restart never double-fire.
 | `decision.py` | 6b: the LLM manager (order-path model, forced strict rationale-first `submit_management`). Bounded menu — hold (the stated default) / tighten_stop / reduce (25·50·75) / close / extend_tp; **no ADD until 6d**. Structural validation drops (never guesses) a bad action, non-finite confidence, or an action whose own parameter is unusable; direction sanity is the 6c gate's job. | `decide_management()`, `validate_management()`, `ManagementAction`, `ManagementDecision`, `ManagementResult` |
 | `shadow.py` | 6b: propose-and-log over every open trade (real + hypothetical), pairing each LLM proposal with what the 6a rule baseline would do at the same instant (`agrees` = crude alignment), before the rules mutate the book. Fires nothing; drops logged as `shadow_dropped`. This paired log is the value-add evidence that gates 6c. | `shadow_pass()`, `ShadowSummary` |
 | `gate.py` | 6c/6d: the management gate — deterministic, first-failure, the verdict is input never bypass. Breaker/loss-limit ⇒ only ↓risk actions pass (ADD included in the ban); per-position daily action budget; cooldown; extend↔bank opposing window; tighten must ratchet, clear `min_move_r`, and sit off the mark; one partial per trade; extend_tp requires breakeven-or-better and moves ≤ 1R per action. ADD (6d): winners only (≥ `sentry_add_min_r`), the stop must rise with it, and the CODE sizes it — min(unrealized-profit coverage, ½ the coin's total size, notional room, leverage room), lifetime per-coin add budget. | `evaluate_management()`, `ManageGateContext`, `ManageOutcome`, `CloseAll`, `MoveTP`, `AddTo` |
+| `adopt.py` | 7d: adopts Mode A positions the ledger doesn't know — requires an existing exchange stop trigger (entry = actual avg price, `initial_sl` = trigger price, farthest stop anchors R, nearest tp is the target or a 100R out-of-reach park; row flagged `adopted`, conviction 0). **Never invents a stop** — stopless positions stay skipped and keep the `unmanaged_position` alert. Records only; places no orders. Runs before every watch pass + `hl sentry adopt`. | `adopt_unmanaged()`, `AdoptSummary` |
 | `live.py` | 6c: the live pass — real trades only (the shadow book keeps rules + proposals). Eval spacing (`sentry_eval_interval_minutes`) and the rolling-24h LLM call budget throttle spend; churn clocks are read from the sentry log itself, so a restart can't reset them. Every evaluation logged: `managed_hold`/`managed_rejected`/`managed_dropped` or the applied `managed_<action>` with confidence + rationale. A judgment CLOSE books won/lost by the **sign** of realized P&L. `graduation_for_management()` gates mainnet management on the TESTNET book. | `manage_live()`, `LiveSummary`, `graduation_for_management()` |
 
 Config lives on the tunable surface (`TunableConfig.trail`, clamped; all rules
@@ -179,7 +180,7 @@ Wired by `hl journal write|show|ls` and the agent's daily job (writes yesterday)
 
 ---
 
-## `tests/` — 386 passing, keyless
+## `tests/` — 395 passing, keyless
 
 Highest-risk code first: gate/sizing, the LLM-output validator/clamp, paper
 exchange + monitor, intake idempotency + HWM, config-schema clamping, the mainnet

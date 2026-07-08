@@ -26,6 +26,7 @@ from hlcli.executor.protect import requires_native_protection
 from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
+from hlcli.sentry.adopt import adopt_unmanaged
 from hlcli.sentry.apply import manage_open_trades
 from hlcli.sentry.live import graduation_for_management, manage_live
 from hlcli.sentry.shadow import shadow_pass
@@ -49,8 +50,9 @@ def once(ctx: typer.Context) -> None:
         emit({"network": g.network.value, "would_apply": s.actions,
               "note": "dry-run (no state changes)"}, as_json=g.json_out, title="sentry once")
         return
-    summary = run_once(exchange, state, caps, tunable, include_intake=False,
-                       alerter=network_alerter(caps, g.network))
+    alerter = network_alerter(caps, g.network)
+    adopt_unmanaged(exchange, state, alerter=alerter)  # Mode A positions join the book first
+    summary = run_once(exchange, state, caps, tunable, include_intake=False, alerter=alerter)
     emit(summary.model_dump(), as_json=g.json_out, title="sentry once")
 
 
@@ -121,6 +123,9 @@ def run(
         while True:
             try:
                 tunable = load_tunable()  # re-read each pass, same contract as `exec run`
+                ad = adopt_unmanaged(exchange, state, alerter=alerter)
+                if ad.adopted:
+                    note(f"[dim]adopted[/dim] {', '.join(a['coin'] for a in ad.adopted)}")
                 if with_shadow:
                     # Propose BEFORE the rules mutate the book, so proposal and
                     # baseline judge the same state.
@@ -149,6 +154,18 @@ def run(
             time.sleep(min(interval * (2 ** min(failures, 10)), _MAX_BACKOFF_SECONDS) if failures else interval)
     except KeyboardInterrupt:
         note("stopped")
+
+
+@app.command("adopt")
+def adopt(ctx: typer.Context) -> None:
+    """Adopt unmanaged (Mode A) positions that carry an exchange stop trigger into
+    the ledger — recorded only, no orders placed. Stopless positions are skipped:
+    set a stop with `hl trade order stop-loss` first (adoption never invents one)."""
+    g = state_of(ctx)
+    exchange, state, caps, _ = open_env(g, for_write=False)
+    s = adopt_unmanaged(exchange, state, alerter=network_alerter(caps, g.network))
+    emit({"network": g.network.value, "adopted": s.adopted, "skipped": s.skipped},
+         as_json=g.json_out, title="sentry adopt")
 
 
 @app.command("status")

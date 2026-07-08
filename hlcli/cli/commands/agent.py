@@ -27,6 +27,7 @@ from hlcli.executor.protect import requires_native_protection
 from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
+from hlcli.sentry.adopt import adopt_unmanaged
 from hlcli.sentry.live import manage_live
 from hlcli.sentry.shadow import shadow_pass
 from hlcli.state.store import StateStore
@@ -62,6 +63,7 @@ def run(
 
     def sentry_pass() -> None:
         t = load_tunable()
+        adopt_unmanaged(exchange, state, alerter=alerter)  # Mode A positions join the book first
         if with_shadow:
             # Propose BEFORE the rules mutate the book, same ordering as `sentry run`.
             shadow_pass(exchange, state, caps, t, breaker_tripped=Breaker(state, caps).tripped())

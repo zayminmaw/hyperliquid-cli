@@ -347,3 +347,12 @@ hl journal write                   # today, with reflection
 hl journal show 2026-07-07
 hl --json journal ls
 ```
+
+### `sentry adopt` (Phase 7d)
+
+Adopts unmanaged (Mode A) positions **that carry an exchange stop trigger** into
+the ledger: entry at the actual average price, `initial_sl` at the trigger, row
+flagged `adopted` — thereafter trailed/managed identically to a Mode B trade.
+Records only, places no orders; a stopless position is skipped (set one with
+`hl trade order stop-loss` — adoption never invents a stop) and keeps raising
+the `unmanaged_position` alert. Runs automatically before every watch pass.
