@@ -171,3 +171,15 @@ Gate: capped inject visible in decision_log; nightly tuner: paper auto-promotes,
 Gate: manual testnet order with a stop gets adopted + trailed; stopless position alerts and stays untouched. ⚠️ mechanics test-verified (9 tests incl. ratcheted/unlabeled/multi-trigger/short cases); live testnet run pending — no account configured on this machine (`hl account ls` empty). To close: add a testnet account, place a manual order + stop, run `hl --network testnet sentry once`.
 
 - [x] 7d.1 `sentry/adopt.py` `adopt_unmanaged`: exchange stop trigger required (entry = actual avg price, `initial_sl` = trigger; farthest stop anchors R, nearest tp is the target, else 100R out-of-reach park since ledger tp is NOT NULL); row flagged `adopted` (additive column), conviction 0, `adopted` sentry-log row + `position_adopted` alert; stop-vs-tp by frontend order type with side-of-entry fallback that fails safe; **no stop ⇒ skip** (runner's edge-triggered `unmanaged_position` alert keeps pointing at it) — a stop is never invented. Records only, places no orders. Auto-runs before every watch pass (`sentry once`/`run`, agent sentry cadence) + on-demand `hl sentry adopt`
+
+---
+
+## UX — `hl repl` (interactive shell)
+
+Standalone UX addition, outside PLAN.md's phase list — a shell over the existing command surface, no new order-path or trading capability. User-requested.
+
+- [x] REPL.1 `hl repl` (`cli/repl.py`): dispatches each line through `typer.main.get_command(app)` under `standalone_mode=False`, so the root callback still owns network resolution + the mainnet gate (never bypassed). Stateful session (`network/account/json/dry-run/yes/header`) injected as leading global flags per line, per-line flag wins; meta-commands `use <net>` / `use account <alias|->` / `set <flag> on|off` / `show` / `help` / `watch` / `exit`. Errors (`ClickException`/domain/`Exit`/unexpected) print and stay in the loop — a bad command never drops the shell. Shared `cli/errors.py` (`DOMAIN_ERRORS` + `render_domain_error`) now backs both `__main__` and the REPL.
+- [x] REPL.2 Live-PnL header: positions + fresh marks rendered above each prompt (`position_rows` → coin/side/size/entry/mark/uPnL/uPnL%, footer equity/open/uPnL) via `open_env` (real paper book, keyless live reads); suppressed under json mode (`set json on`); degrades to a dim line if the book is unreachable; toggle `set header on|off`. `watch` = full-screen ticking table (reuses `watch_rows`) until ctrl-c. Network-coloured prompt (paper green / testnet yellow / mainnet red).
+- [x] REPL.3 stdlib `readline` — persistent history at `~/.hyperliquid-cli/repl_history` + tab-completion of the walked command tree (nouns → verbs → `--options`) and meta words (libedit-aware binding). Zero new deps; `anthropic`/`hyperliquid`/`eth_account` verified absent from the REPL import path.
+
+✅ `hl repl` complete — 429 tests pass (21 new). Smoke-verified on paper: header + colour prompt, meta-commands, `<group> --help` dispatch, bad-command recovery, clean exit.

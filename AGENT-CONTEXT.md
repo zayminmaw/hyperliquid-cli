@@ -1,6 +1,6 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-08 | Session: fresh-eyes review of 154ee47..HEAD (phase 6+7) — all findings fixed; 408 tests pass; uncommitted
+> Last updated: 2026-07-08 | Session: added `hl repl` interactive shell (out-of-plan UX) — 429 tests pass (21 new); uncommitted
 
 ---
 
@@ -16,6 +16,11 @@
 
 ## 📍 LAST ACTION
 
+- Did: built `hl repl` — an interactive shell over the existing command surface (out-of-plan UX addition, user-requested). Dispatches each line through `typer.main.get_command(app)` under `standalone_mode=False` so the root callback still owns network resolution + the mainnet gate (never bypassed). Stateful session (network/account/json/dry-run/yes/header) injected as leading global flags per line, per-line flag wins; meta-commands `use`/`set`/`show`/`watch`/`help`/`exit`. Live-PnL header (positions + fresh marks, coloured prompt paper→green/testnet→yellow/mainnet→red) above each prompt via `open_env` (real paper book); `watch` = full-screen ticking table reusing `watch_rows`. stdlib readline history + command-tree tab-completion, zero new deps. New shared `cli/errors.py` (`DOMAIN_ERRORS`+`render_domain_error`) now backs both `__main__` and the REPL. NOTE: this repo's Typer 0.26.8 **vendors click as `typer._click`** — no standalone `click`; build REPLs on `get_command`, not `click_repl`.
+- Result: 429 pass (21 new). Smoke-verified on paper; no anthropic/hyperliquid/eth_account leak into the REPL import path.
+- File(s) touched: cli/repl.py (new), cli/errors.py (new), cli/app.py (register `repl`), __main__.py (use shared error helper), tests/test_repl.py (new), ACTION-ITEMS.md
+
+### Prior session
 - Did: fixed all fresh-eyes review findings on 154ee47..HEAD. Big ones: (1) native SL/TP triggers now carry per-row oids (`trades.sl_oid/tp_oid`), so a post-ADD coin's sibling slice keeps its protection — every cancel is slice-scoped (`cancel_trade_triggers`), coin-wide sweep only when no open row remains; (2) `shadow_pass` now throttled by eval spacing + `sentry_max_llm_calls_per_day`; (3) ADD budget is per-position (counts since the coin's current position opened) + idempotency key is trade-id-scoped with an alert on crash-replay skip; (4) CLOSE bypasses churn caps + halted; (5) journal excludes `scaled` children from opened tally + graduation excludes them from `n`; (6) adopt anchors R at the loss-side extreme, not abs-distance; records the anchor stop's oid. Plus: atomic `record_fire` claim (kills exec/sentry double-fire race), deferred re-check drops already-fired, first-class `outcome` in decision log, tuner stage isolated in daily job, journal defers narrative for an incomplete day, `prior_actions` excludes holds, supervisor stamps LAST_TICK on failing ticks. New shared modules `executor/rmath.py` + `core/backoff.py`; centralized `alerts_path`, `DECISION_INTERVAL`, `require_exclusive_modes`.
 - Result: 408 pass (12 new). CLI smoke + legacy-DB migration verified.
 - File(s) touched: state/store.py, executor/{rmath(new),protect,resolve,execute,runner,regime}.py, sentry/{apply,gate,live,shadow,context,adopt,engine}.py, journal/{digest,writer,narrative}.py, agent/{daily,supervisor}.py, safety/{alerts,graduation}.py, core/{backoff(new),config}.py, cli/commands/{exec_,sentry,agent,journal}.py, tests/*
@@ -31,7 +36,9 @@
 | `hlcli/core/config.py` | Hard caps (`HL_*` env); `get_caps()`; relative `config_path` anchors to `data_dir` |
 | `hlcli/core/config_schema.py` | Tunable surface + `clamp()` (non-finite ⇒ field default) + `load_tunable()` |
 | `hlcli/core/{network,types,llm}.py` | network gate · domain types (`OpenOrder.is_trigger`) · llm: the ONE lazy anthropic import; key from shell env or `.env`, never on Caps; `masked_api_key()` |
-| `hlcli/cli/context.py` | `GlobalState`, `build_for(state, for_write)` — account/key resolution, mainnet gate |
+| `hlcli/cli/context.py` | `GlobalState`, `build_for(state, for_write)` — account/key resolution, mainnet gate; `open_env` (stateful paper book / keyless live reads) |
+| `hlcli/cli/repl.py` | `hl repl` shell: dispatches via `get_command(app)` (callback keeps gate/resolution); stateful session flags injected per line; live-PnL header + `watch`; readline history/completion |
+| `hlcli/cli/errors.py` | `DOMAIN_ERRORS` + `render_domain_error` — shared by `__main__` and the REPL |
 | `hlcli/cli/commands/` | account/trade/markets/asset/exec_/config/tune · exec run has failure backoff + per-pass tunable reload |
 | `hlcli/accounts/{store,keystore}.py` | SQLite metadata (resolve is network-checked; alias globally unique) · `0600` keys (perms enforced on load too) |
 | `hlcli/exchange/marks.py` | keyless httpx `/info`: marks/book/candles/`sz_decimals` (meta) |
@@ -88,6 +95,8 @@
 - `record_fire` now returns bool (atomic claim). `fire()` and the sentry apply helpers claim-then-act; don't reintroduce a separate `already_fired` check before it.
 - Graduation counts positions, not partials (`assess` drops `status='scaled'`); the tuner's `summary`/cohorts still COUNT scaled (banked profit is a real outcome). Don't unify them.
 - CLOSE is exempt from the sentry churn caps + halted gate (ends all risk); the budget/cooldown tests probe with `tighten_stop`, not `close`.
+- Typer 0.26.8 here **vendors click as `typer._click`** — there is NO standalone `click` installed. Import click exceptions from `typer._click.exceptions` (`ClickException`/`Abort`/`Exit`/`UsageError`); build any programmatic dispatch on `typer.main.get_command(app)` (returns a `TyperGroup`) called with `standalone_mode=False`. `click_repl` and other click-importing helpers won't work.
+- REPL header/watch read the REAL paper book via `open_env` (stateful `PaperExchange(state=store)`), NOT `build_for(paper)` which is stateless (empty `_mem`). `account positions` on paper is empty for that same reason. Header opens+closes the store each prompt; `watch` keeps it open for the loop's duration.
 
 ---
 

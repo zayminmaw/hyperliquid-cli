@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from rich.console import Console
-
-from hlcli._lazy import MissingDependencyError
-from hlcli.core.config_schema import ConfigError
-from hlcli.core.network import MainnetGateError
+from hlcli.cli.errors import DOMAIN_ERRORS, render_domain_error
 
 
 def main() -> None:
@@ -14,8 +10,8 @@ def main() -> None:
 
     try:
         app()
-    except (MainnetGateError, MissingDependencyError, ConfigError, NotImplementedError) as exc:
-        Console(stderr=True).print(f"[red]error:[/red] {exc}")
+    except DOMAIN_ERRORS as exc:
+        render_domain_error(exc)
         raise SystemExit(1) from exc
 
 

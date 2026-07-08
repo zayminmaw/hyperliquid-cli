@@ -14,7 +14,7 @@ from typing import Optional
 import typer
 
 from hlcli.cli.commands import account, agent, asset, config, exec_, journal, markets, sentry, trade, tune
-from hlcli.cli.context import GlobalState
+from hlcli.cli.context import GlobalState, state_of
 from hlcli.core.config import get_caps
 from hlcli.core.network import resolve_network
 
@@ -52,3 +52,11 @@ app.add_typer(config.app, name="config")
 app.add_typer(tune.app, name="tune")
 app.add_typer(agent.app, name="agent")
 app.add_typer(journal.app, name="journal")
+
+
+@app.command("repl")
+def repl(ctx: typer.Context) -> None:
+    """Interactive shell — set network/account once, run commands, live-PnL header."""
+    from hlcli.cli.repl import run_repl  # lazy: pulls readline only when the shell runs
+
+    run_repl(state_of(ctx))
