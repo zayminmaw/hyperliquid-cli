@@ -1,24 +1,24 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-07 | Session: 7a committed; 7b BUILT (hl journal digest + cached opus narrative, wired into agent daily job); 377 tests pass; live-verified; 7b uncommitted
+> Last updated: 2026-07-08 | Session: 7c BUILT (reflection memory: reflections table + bounded lessons inject into exec+sentry contexts; run_daily w/ paper-only auto-promote); 386 tests pass; live-verified; 7c uncommitted
 
 ---
 
 ## 🎯 CURRENT TASK
 
 - Task: Phase 7 — Agent mode: autonomous supervisor + daily journal + reflection memory + Mode A adoption (PLAN.md §15)
-- Goal: 7a supervisor + intake dir ✅ → 7b `hl journal` ✅ → 7c reflection inject + scheduled tuners → 7d sentry adopts Mode A
-- Status: 7b complete, uncommitted (7a committed by user). Gate live-verified: journal reconciles with `exec report`; real opus reflection written + cached
-- Next action: commit 7b, then build 7c (`reflections` table + bounded "recent lessons" inject into decision prompt + sentry context; tuner scheduled in agent loop, auto-promote paper only)
+- Goal: 7a supervisor ✅ → 7b `hl journal` ✅ → 7c reflection inject + scheduled tuners ✅ → 7d sentry adopts Mode A
+- Status: 7c complete, uncommitted (7a/7b committed by user). Gate live-verified: opus `submit_journal` distilled a lesson; next `exec once` logged `lessons: ["2026-07-08"]` in decision context
+- Next action: commit 7c, then build 7d (sentry adopts Mode A positions: exchange stop ⇒ ledger row flagged `adopted`; stopless ⇒ alert+skip, never invent; `hl sentry adopt`)
 - Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: built 7b — `journal/digest.py` (day slice via new `decisions_between`/`sentry_between`; per-verdict rationale lines, gate-reason tally, R/expectancy/PF, sentry+alert tallies, report-reconciling snapshot), `journal/narrative.py` (opus, trader persona, judge-process-not-P&L), `journal/writer.py` (narrative cached per-date in meta — one call/day ever; failure ⇒ placeholder + alert, digest always writes), `hl journal write|show|ls`, agent daily job now writes YESTERDAY's journal; `tuner.promote.pending_proposals()` shared helper; caps `HL_JOURNAL_MODEL/MAX_TOKENS`, tunable `agent.journal_narrative`
-- Result: 377 pass (9 new); live: journal reconciled with report; real opus reflection flagged unauditable skips → digest enriched with rationale lines same session; rewrite reused cache
-- File(s) touched: journal/* (new), cli/commands/{journal(new),agent}.py, cli/app.py, state/store.py, core/{config,config_schema}.py, tuner/promote.py, .env.example, tests/test_journal.py (new), tests/test_cli.py, docs/{cli,modules}.md, ACTION-ITEMS.md
+- Did: built 7c — `reflections` table (upsert/date) + narrative now forced `submit_journal` tool (reflection + ONE lesson; no tool ⇒ dropped); `journal/lessons.py` bounded inject (caps `HL_AGENT_REFLECT_INJECT_MAX`/`_MAX_CHARS`, tunable `agent.reflection_inject`) → `EnrichedContext.recent_lessons` (runner, logged as dates in decision context) + `ManagementContext.recent_lessons` (shadow + live passes); both system prompts note the block is advisory-never-override; `agent/daily.py` `run_daily` (journal yesterday → sample-gated tuners → PAPER-only auto-promote → report alert), agent daily_pass wired to it
+- Result: 386 pass (18 new); live: real opus lesson stored; exec pass carried it (decision_log `lessons: ["2026-07-08"]`); paper-promotes/testnet-waits test-verified
+- File(s) touched: journal/{narrative,writer,lessons}.py, agent/daily.py (new), executor/{enrich,runner,decision}.py, sentry/{context,shadow,live,decision}.py, state/store.py, core/{config,config_schema}.py, cli/commands/agent.py, .env.example, tests/test_reflection.py (new), tests/test_{journal,keys}.py, docs/modules.md, ACTION-ITEMS.md
 
 ---
 
@@ -46,7 +46,8 @@
 | `hlcli/sentry/{decision,context,shadow}.py` | 6b: strict `submit_management` (no ADD) · thesis+2-frame context (prior_actions excludes shadow rows) · shadow pass pairing proposal with the 6a baseline (never shown to model) |
 | `hlcli/sentry/{gate,live}.py` | 6c/6d: management gate (churn clocks FROM sentry_log; ↓risk-only when halted; ADD = winners-only, code-sized, raise-stop-first) · live pass (eval spacing, 24h budgets, real book only) · `graduation_for_management` gates mainnet on the TESTNET book |
 | `hlcli/agent/{intake_watch,supervisor}.py` | 7a: watched intake dir (enqueue-before-move, settle window) · tick loop (cadences, daily job, heartbeat, backoff); `cli/context.open_env` + `alerts.network_alerter` shared by exec/sentry/agent |
-| `hlcli/journal/{digest,narrative,writer}.py` | 7b: day digest (verdict rationales, R/PF, report-reconciling) · opus reflection · writer (narrative meta-cached per date; failure degrades, never blocks) |
+| `hlcli/journal/{digest,narrative,writer,lessons}.py` | 7b/7c: day digest (verdict rationales, R/PF) · opus `submit_journal` tool (reflection + lesson) · writer (meta-cached; failure degrades) · bounded lessons inject |
+| `hlcli/agent/daily.py` | 7c: run_daily — journal yesterday → tuners → PAPER-only auto-promote → report alert |
 | `hlcli/tuner/{stats,config_tuner,prompt_tuner,promote}.py` | cohorts (`scaled`=win) · tuners · promote consumes proposals, audit records content |
 | `hlcli/safety/{breaker,alerts,graduation}.py` | kill switch + loss-limit (`persist=` for dry-run) · JSONL alerts · graduation verdict |
 

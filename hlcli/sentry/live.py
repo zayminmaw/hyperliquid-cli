@@ -30,6 +30,7 @@ from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Candle
 from hlcli.exchange.base import Exchange
 from hlcli.executor.regime import classify
+from hlcli.journal.lessons import recent_lessons
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.sentry.apply import (
@@ -93,6 +94,7 @@ def manage_live(
     day_ago = now - _DAY_SECONDS
     calls_today = state.sentry_count_since(day_ago, _EVALUATED)
     bars_cache: dict[str, tuple[list[Candle], list[Candle]]] = {}
+    lessons = recent_lessons(state, caps, tunable)
     applied = ManageSummary()  # the apply helpers tally into this; folded in below
     book = state.open_trades(shadow=False)
     coin_sizes: dict[str, float] = {}
@@ -115,7 +117,8 @@ def manage_live(
         ctx = build_context(
             trade, mark=mark, state=state, tunable=tunable, now=now,
             regime=classify(fast), candles=labeled(FAST_INTERVAL, fast),
-            candles_slow=labeled(SLOW_INTERVAL, slow), breaker_tripped=breaker_tripped,
+            candles_slow=labeled(SLOW_INTERVAL, slow), lessons=lessons,
+            breaker_tripped=breaker_tripped,
         )
         result = decide_fn(ctx, caps, tunable)
         calls_today += 1

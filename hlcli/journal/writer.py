@@ -9,11 +9,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import time
+
 from hlcli.core.config import Caps
 from hlcli.core.types import Network
 from hlcli.exchange.base import Exchange
 from hlcli.journal.digest import build_digest, render
-from hlcli.journal.narrative import narrate
+from hlcli.journal.narrative import JournalNarrative, narrate
 from hlcli.safety.alerts import Alerter
 from hlcli.state.store import StateStore
 
@@ -32,7 +34,7 @@ def write_journal(
     date: str,
     *,
     narrative: bool = True,
-    narrate_fn: Callable[[str, Caps], str | None] = narrate,
+    narrate_fn: Callable[[str, Caps], JournalNarrative | None] = narrate,
     alerter: Alerter | None = None,
     pending_proposals: list[str] | None = None,
 ) -> Path:
@@ -54,23 +56,25 @@ def _reflection(
     date: str,
     digest_md: str,
     narrative: bool,
-    narrate_fn: Callable[[str, Caps], str | None],
+    narrate_fn: Callable[[str, Caps], JournalNarrative | None],
     alerter: Alerter | None,
 ) -> str:
     if not narrative:
         return "_narrative disabled_"
     cached = state.meta_get(_META_PREFIX + date)
     if cached:
-        return cached
+        return cached  # the lesson was stored alongside it on the fresh call
     try:
-        text = narrate_fn(digest_md, caps)
+        result = narrate_fn(digest_md, caps)
     except Exception as exc:
         # The reflection is an out-of-path nicety: a missing key or API fault must
         # degrade the journal, never fail the daily job that writes it.
         if alerter is not None:
             alerter.alert("journal_narrative_failed", level="warning", date=date, error=str(exc))
         return f"_narrative unavailable: {exc}_"
-    if text is None:
+    if result is None:
         return "_narrative empty_"
-    state.meta_set(_META_PREFIX + date, text)
-    return text
+    state.meta_set(_META_PREFIX + date, result.reflection)
+    if result.lesson:
+        state.add_reflection(date, time.time(), result.lesson)  # the §15.4 memory row
+    return result.reflection

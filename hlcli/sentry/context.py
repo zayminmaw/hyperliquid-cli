@@ -35,6 +35,9 @@ class ManagementContext(BaseModel):
     candles_slow: dict | None = None  # slow frame — the longer-horizon view
     thesis: dict | None = None        # why this trade exists; None if the log has gaps
     prior_actions: list[dict]         # this trade's management history, newest first
+    # Distilled lessons from our own recent journaled days (PLAN.md §15.4) —
+    # advisory context, bounded by hard caps; the management gate still decides.
+    recent_lessons: list[dict] | None = None
     breaker_tripped: bool = False
     tunable: dict
 
@@ -49,6 +52,7 @@ def build_context(
     regime: str | None = None,
     candles: dict | None = None,
     candles_slow: dict | None = None,
+    lessons: list[dict] | None = None,
     breaker_tripped: bool = False,
 ) -> ManagementContext:
     initial_sl = trade["initial_sl"] or trade["sl"]
@@ -75,6 +79,7 @@ def build_context(
         candles_slow=candles_slow,
         thesis=_thesis(state, trade["candidate_id"]),
         prior_actions=_prior_actions(state, trade["id"], now),
+        recent_lessons=lessons or None,
         breaker_tripped=breaker_tripped,
         # Only the trail surface — the manager should know what the rule baseline is
         # configured to do, not the hard caps and never a key.

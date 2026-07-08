@@ -21,6 +21,7 @@ from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Candle
 from hlcli.exchange.base import Exchange
 from hlcli.executor.regime import classify
+from hlcli.journal.lessons import recent_lessons
 from hlcli.sentry.context import FAST_INTERVAL, SLOW_INTERVAL, build_context, frames_for, labeled
 from hlcli.sentry.decision import ManagementAction, ManagementResult, decide_management
 from hlcli.sentry.engine import MoveStop, ScaleOut, plan
@@ -56,6 +57,7 @@ def shadow_pass(
     marks = marks if marks is not None else exchange.get_marks()
     summary = ShadowSummary()
     bars_cache: dict[str, tuple[list[Candle], list[Candle]]] = {}
+    lessons = recent_lessons(state, caps, tunable)
 
     for trade in state.open_trades():
         mark = marks.get(trade["coin"])
@@ -66,7 +68,8 @@ def shadow_pass(
         ctx = build_context(
             trade, mark=mark, state=state, tunable=tunable, now=now,
             regime=classify(fast), candles=labeled(FAST_INTERVAL, fast),
-            candles_slow=labeled(SLOW_INTERVAL, slow), breaker_tripped=breaker_tripped,
+            candles_slow=labeled(SLOW_INTERVAL, slow), lessons=lessons,
+            breaker_tripped=breaker_tripped,
         )
         result = decide_fn(ctx, caps, tunable)
         summary.evaluated += 1

@@ -155,6 +155,7 @@ honest R) → slice protection (failure ⇒ emergency close, `aborted`).
 | File | What it does | Key surface |
 |------|--------------|-------------|
 | `intake_watch.py` | The producer-agnostic signal handoff: polls `<intake_dir>/<network>/` for `*.json` candidate batches → parse → enqueue → archive to `processed/` (`failed/` + alert on bad content; nothing deleted). Enqueue happens **before** the move, so a crash in between re-parses into content-hash duplicates, never a double-queue. A 2s settle window skips files still being written. | `poll()`, `intake_dir()`, `IntakeResult` |
+| `daily.py` | The daily job (§15.3–.5): journal yesterday (distilling the reflection lesson via the `submit_journal` tool), run both sample-gated tuners, auto-promote pending proposals on **paper only** (testnet/mainnet wait for a human `tune promote`), emit the `agent_daily_report` alert. | `run_daily()` |
 | `supervisor.py` | One deterministic loop owning all cadences: intake poll every tick (new candidates trigger an exec pass immediately), exec + sentry passes on their intervals, the daily job at `HL_AGENT_DAILY_UTC` (meta-persisted — a restart never re-runs it; a start after the scheduled time still runs it), hourly heartbeat alert, exponential failure backoff. Passes are injected callables; LLM calls stay inside them. Last-run timestamps persist in state meta for cross-process `agent status`. | `Supervisor` (`tick()`, `run_forever()`), `Cadence`, meta keys `LAST_*` |
 
 Wired by `hl agent run|status` (`cli/commands/agent.py`); cadences live on the
@@ -170,13 +171,15 @@ tunable surface (`TunableConfig.agent`, clamped); deploy templates in `deploy/`.
 | `narrative.py` | The LLM half: one opus call ("senior discretionary trader" persona) reflecting on the digest — judge process not just P&L. Out-of-path; input is our own tallied outcomes, never raw external text. | `narrate()` |
 | `writer.py` | Digest + reflection → `journal/<network>/YYYY-MM-DD.md`. The narrative is cached per-date in state meta (one call per day, ever); a narrative failure degrades to a placeholder + `journal_narrative_failed` alert — the deterministic digest always writes. | `write_journal()`, `journal_path()` |
 
+| `lessons.py` | The reflection memory's read side (§15.4): the bounded "recent lessons" block for the decision + management contexts. Hard caps `HL_AGENT_REFLECT_INJECT_MAX`/`_MAX_CHARS` bound it; tunable `agent.reflection_inject` switches it off; the decision log records which lesson dates were in context. | `recent_lessons()` |
+
 Wired by `hl journal write|show|ls` and the agent's daily job (writes yesterday).
 `agent.journal_narrative` (tunable) switches the LLM section; `HL_JOURNAL_MODEL` /
 `HL_JOURNAL_MAX_TOKENS` cap it.
 
 ---
 
-## `tests/` — 377 passing, keyless
+## `tests/` — 386 passing, keyless
 
 Highest-risk code first: gate/sizing, the LLM-output validator/clamp, paper
 exchange + monitor, intake idempotency + HWM, config-schema clamping, the mainnet

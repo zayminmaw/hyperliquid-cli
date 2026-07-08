@@ -160,10 +160,12 @@ Gate: a paper-trading day yields a journal reconciling with `exec report`; opus 
 ✅ Phase 7b complete — 377 tests pass (9 new). Live-verified on paper: journal reconciled with `exec report` (2 decisions, 2 skips, flat book); real opus reflection landed and immediately flagged that skips lacked rationale — digest enriched with per-verdict rationale lines in response; re-write reused the cached narrative.
 
 ### 7c — Reflection memory + scheduled tuners
-Gate: capped inject visible in decision_log; nightly tuner: paper auto-promotes, testnet/mainnet wait.
+Gate: capped inject visible in decision_log; nightly tuner: paper auto-promotes, testnet/mainnet wait. ✅ passed (live-verified on paper)
 
-- [ ] 7c.1 `reflections` table + daily distill; bounded "recent lessons" block in exec decision prompt + sentry context (last N, token-capped, own-outcomes-only); decision_log records injected rows
-- [ ] 7c.2 Tuner scheduled in agent loop; auto-promote paper only
+- [x] 7c.1 `reflections` table (upsert per date) + journal narrative now a forced `submit_journal` tool call returning reflection + ONE distilled lesson (no tool call ⇒ dropped, never guessed); `journal/lessons.py` bounded inject (`HL_AGENT_REFLECT_INJECT_MAX`/`_MAX_CHARS` hard caps, `agent.reflection_inject` tunable switch) into `EnrichedContext.recent_lessons` + `ManagementContext.recent_lessons` (exec runner, sentry shadow + live passes); both system prompts describe the block as advisory-never-override; decision_log context records injected lesson dates
+- [x] 7c.2 `agent/daily.py` `run_daily`: journal yesterday → both sample-gated tuners → auto-promote pending proposals on PAPER only (testnet/mainnet wait for human `tune promote`) → `agent_daily_report` alert; agent daily_pass wired to it
+
+✅ Phase 7c complete — 386 tests pass (18 new incl. rewritten narrative tests). Live-verified on paper: real opus `submit_journal` call distilled a lesson into the reflections table; next `exec once` carried it — decision_log context shows `lessons: ["2026-07-08"]` with a thesis-aware verdict; paper auto-promote/testnet-wait covered by tests.
 
 ### 7d — Mode A adoption
 Gate: manual testnet order with a stop gets adopted + trailed; stopless position alerts and stays untouched.

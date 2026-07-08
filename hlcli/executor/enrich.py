@@ -37,6 +37,9 @@ class EnrichedContext(BaseModel):
     candles: dict | None = None  # {"interval": "15m", "order": "oldest_first", "bars": [...]}
     recent_decisions: list[dict]  # what was recently decided/fired (no results yet); newest first
     recent_outcomes: list[dict]  # resolved trades: what actually won/lost, in R; newest first
+    # Distilled lessons from our own recent journaled days (PLAN.md §15.4) —
+    # advisory context, bounded by hard caps; the gate still owns everything.
+    recent_lessons: list[dict] | None = None
     followup: dict | None = None  # set on a WAIT re-check: attempts left + minutes to staleness
     tunable: dict
 
@@ -53,6 +56,7 @@ def enrich(
     tunable: TunableConfig,
     candles: dict | None = None,
     regime: str | None = None,
+    lessons: list[dict] | None = None,
     followup: dict | None = None,
     now: float | None = None,  # for the minutes_ago on recent decisions
 ) -> EnrichedContext:
@@ -64,6 +68,7 @@ def enrich(
         unrealized_pnl=round(sum(p.unrealized_pnl for p in positions), 4),
         regime=regime,
         candles=candles,
+        recent_lessons=lessons or None,  # absent beats an empty list in the prompt
         followup=followup,
         open_positions=[
             {

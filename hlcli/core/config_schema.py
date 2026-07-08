@@ -71,6 +71,7 @@ class AgentConfig(BaseModel):
     exec_interval_minutes: float = 5.0   # full intake pass; new files trigger one immediately
     sentry_interval_seconds: float = 60.0
     journal_narrative: bool = True       # the one daily opus reflection in `hl journal`
+    reflection_inject: bool = True       # "recent lessons" block in decision/management context
 
 
 class TunableConfig(BaseModel):

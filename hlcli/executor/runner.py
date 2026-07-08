@@ -45,6 +45,7 @@ from hlcli.executor.protect import (
 )
 from hlcli.executor.regime import classify, summarize
 from hlcli.executor.resolve import resolve_open_trades
+from hlcli.journal.lessons import recent_lessons
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.sentry.apply import manage_open_trades
@@ -144,7 +145,8 @@ def run_once(
     common = _PassContext(
         caps=caps, tunable=tunable, decide_fn=decide_fn, marks=marks,
         market=_market_context(exchange, coins), equity=equity, positions=positions,
-        realized=realized, recent=recent, outcomes=outcomes, open_coins=open_coins, now=now,
+        realized=realized, recent=recent, outcomes=outcomes,
+        lessons=recent_lessons(state, caps, tunable), open_coins=open_coins, now=now,
         breaker_tripped=breaker_tripped, daily_loss=daily_loss, protected=protected,
         fire_enabled=fire_enabled, dry_run=dry_run, alerter=alerter,
     )
@@ -197,6 +199,7 @@ class _PassContext:
     realized: float | None
     recent: list[dict]
     outcomes: list[dict]  # recently resolved trades — the model's track record
+    lessons: list[dict]  # distilled daily lessons (§15.4); [] when the inject is off
     open_coins: set[str]
     now: float
     breaker_tripped: bool
@@ -251,8 +254,8 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
     ctx = enrich(
         candidate, marks=common.marks, equity=common.equity, positions=common.positions,
         realized=common.realized, recent=common.recent, outcomes=common.outcomes,
-        tunable=common.tunable, candles=candles, regime=regime, followup=followup,
-        now=common.now,
+        tunable=common.tunable, candles=candles, regime=regime, lessons=common.lessons,
+        followup=followup, now=common.now,
     )
     result = common.decide_fn(ctx, common.caps, common.tunable)
 
@@ -300,7 +303,10 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
     state.log_decision(
         candidate.id, common.now, decision=decision, gate=outcome, fill=fill,
         context={"coin": candidate.coin, "equity": common.equity,
-                 "open_coins": sorted(common.open_coins), "regime": regime},
+                 "open_coins": sorted(common.open_coins), "regime": regime,
+                 # which reflection rows were in the model's context — makes the
+                 # inject's value measurable (§15.4), like 6b measured the manager
+                 "lessons": [le["date"] for le in common.lessons]},
     )
     return _Step(status)
 

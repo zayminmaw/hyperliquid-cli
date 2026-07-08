@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import typer
 
+from hlcli.agent.daily import run_daily
 from hlcli.agent.intake_watch import intake_dir, poll
 from hlcli.agent.supervisor import (
     LAST_DAILY, LAST_EXEC, LAST_INTAKE, LAST_SENTRY, LAST_TICK,
@@ -24,11 +25,8 @@ from hlcli.cli.output import emit, note
 from hlcli.core.config_schema import load_tunable
 from hlcli.executor.protect import requires_native_protection
 from hlcli.executor.runner import run_once
-from hlcli.journal.digest import utc_date
-from hlcli.journal.writer import write_journal
 from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
-from hlcli.safety.graduation import assess
 from hlcli.sentry.live import manage_live
 from hlcli.sentry.shadow import shadow_pass
 from hlcli.state.store import StateStore
@@ -72,32 +70,13 @@ def run(
                         native_protected=requires_native_protection(g.network), alerter=alerter)
         run_once(exchange, state, caps, t, include_intake=False, alerter=alerter)
 
-    def daily_pass() -> None:
-        # Journal the day that just ended (the job runs shortly after UTC midnight);
-        # narrative honors the tunable and degrades gracefully without a key.
-        yesterday = utc_date(time.time() - 86_400)
-        journal = write_journal(
-            exchange, state, caps, g.network, yesterday,
-            narrative=load_tunable().agent.journal_narrative,
-            alerter=alerter, pending_proposals=pending_proposals(caps),
-        )
-        positions = exchange.get_positions()
-        alerter.alert(
-            "agent_daily_report",
-            journal=str(journal),
-            equity=exchange.equity(),
-            open_positions=len(positions),
-            unrealized_pnl=round(sum(p.unrealized_pnl for p in positions), 4),
-            breaker="tripped" if Breaker(state, caps).tripped() else "clear",
-            deferred=state.deferred_count(),
-            graduation=assess(state.resolved_trades(), caps),
-            pending_proposals=pending_proposals(caps),
-        )
-
     supervisor = Supervisor(
         state, alerter, cadence,
         poll_intake=lambda: poll(directory, state, alerter),
-        exec_pass=exec_pass, sentry_pass=sentry_pass, daily_pass=daily_pass,
+        exec_pass=exec_pass, sentry_pass=sentry_pass,
+        # journal yesterday (distilling the reflection lesson) → tuners →
+        # paper-only auto-promote → report alert
+        daily_pass=lambda: run_daily(exchange, state, caps, g.network, alerter),
     )
 
     mode = " (+shadow)" if with_shadow else " (+manage)" if with_manage else ""

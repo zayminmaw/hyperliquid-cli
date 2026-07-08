@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS sentry_log (
     ts REAL NOT NULL, trade_id INTEGER NOT NULL, coin TEXT NOT NULL,
     action TEXT NOT NULL, details TEXT
 );
+CREATE TABLE IF NOT EXISTS reflections (
+    date TEXT PRIMARY KEY,  -- YYYY-MM-DD (UTC); one distilled lesson per journaled day
+    ts REAL NOT NULL,
+    lesson TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS deferred (
     id                 TEXT PRIMARY KEY,
     candidate          TEXT NOT NULL,      -- full Candidate JSON, to re-enrich/re-decide
@@ -322,6 +327,24 @@ class StateStore:
             sql += " AND coin = ?"
             params.append(coin)
         return self._conn.execute(sql, params).fetchone()[0]
+
+    # --- reflections (PLAN.md §15.4 — the journal's distilled daily lessons) ---
+
+    def add_reflection(self, date: str, ts: float, lesson: str) -> None:
+        """Upsert the day's lesson — re-journaling a day replaces, never duplicates."""
+        self._conn.execute(
+            "INSERT INTO reflections(date, ts, lesson) VALUES(?, ?, ?)"
+            " ON CONFLICT(date) DO UPDATE SET ts = excluded.ts, lesson = excluded.lesson",
+            (date, ts, lesson),
+        )
+        self._conn.commit()
+
+    def recent_reflections(self, limit: int) -> list[dict]:
+        """Most recent daily lessons, newest first."""
+        rows = self._conn.execute(
+            "SELECT * FROM reflections ORDER BY date DESC LIMIT ?", (int(limit),)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # --- deferred follow-ups (LLM said WAIT; re-checked later with fresh data) ---
 

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from hlcli.core.types import Network, Side
 from hlcli.exchange.paper import PaperExchange
 from hlcli.journal.digest import build_digest, day_bounds, render, utc_date
-from hlcli.journal.narrative import narrate
+from hlcli.journal.narrative import JournalNarrative, narrate
 from hlcli.journal.writer import journal_path, write_journal
 from hlcli.safety.alerts import Alerter
 from hlcli.state.store import StateStore
@@ -49,7 +49,8 @@ def seeded_state(tmp_path) -> StateStore:
 def test_digest_reconciles_and_slices_by_day(tmp_path):
     state = seeded_state(tmp_path)
     alerts = tmp_path / "alerts.log"
-    Alerter(alerts, stream=None).alert("halted", level="critical", reason="kill switch")
+    alerts.write_text(json.dumps(
+        {"ts": IN_DAY, "level": "critical", "event": "halted", "reason": "kill switch"}) + "\n")
 
     d = build_digest(PaperExchange(10_000.0, state=state), state, Network.PAPER, DAY,
                      alerts_path=alerts, pending_proposals=["proposed_config.json"])
@@ -86,7 +87,8 @@ def test_write_is_idempotent_and_narrative_is_once_per_day(tmp_path):
 
     def fake_narrate(digest_md, caps_):
         calls.append(digest_md)
-        return "well-skipped chop; keep honoring the R:R floor"
+        return JournalNarrative(reflection="well-skipped chop; keep honoring the R:R floor",
+                                lesson="skip chop")
 
     for _ in range(2):
         path = write_journal(PaperExchange(10_000.0, state=state), state, c, Network.PAPER, DAY,
@@ -133,15 +135,29 @@ def test_narrate_calls_the_journal_model(tmp_path):
 
         def create(self, **kwargs):
             captured.update(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text="  reflect  ")])
+            block = SimpleNamespace(type="tool_use", name="submit_journal",
+                                    input={"reflection": "  reflect  ", "lesson": " one lesson "})
+            return SimpleNamespace(content=[block])
 
     c = caps(journal_model="claude-opus-4-8", journal_max_tokens=512)
-    text = narrate("# digest", c, client=FakeClient())
+    result = narrate("# digest", c, client=FakeClient())
 
-    assert text == "reflect"
+    assert result == JournalNarrative(reflection="reflect", lesson="one lesson")
     assert captured["model"] == "claude-opus-4-8"
     assert captured["max_tokens"] == 512
+    assert captured["tool_choice"] == {"type": "tool", "name": "submit_journal"}
     assert captured["messages"][0]["content"] == "# digest"
+
+
+def test_narrate_without_the_tool_call_is_dropped():
+    class NoTool:
+        def __init__(self):
+            self.messages = self
+
+        def create(self, **kwargs):
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text="prose only")])
+
+    assert narrate("# digest", caps(), client=NoTool()) is None
 
 
 def test_day_bounds_and_utc_date_roundtrip():

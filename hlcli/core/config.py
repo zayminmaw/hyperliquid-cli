@@ -45,6 +45,10 @@ class Caps(BaseSettings):
     # Producers drop candidate-batch JSON files here (per-network subdir appended).
     agent_intake_dir: Path | None = None  # default: <data_dir>/intake
     agent_daily_utc: str = "00:10"        # HH:MM UTC — when the daily jobs run
+    # Reflection memory bounds (§15.4) — how much distilled lesson text may ride
+    # into the decision/management context. Hard caps: the inject can't bloat.
+    agent_reflect_inject_max: int = 3
+    agent_reflect_max_chars: int = 240
 
     @model_validator(mode="after")
     def _anchor_config_path(self) -> "Caps":
