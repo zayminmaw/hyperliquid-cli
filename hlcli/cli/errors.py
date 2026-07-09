@@ -18,6 +18,12 @@ DOMAIN_ERRORS = (MainnetGateError, MissingDependencyError, ConfigError, NotImple
 _stderr = Console(stderr=True)
 
 
-def render_domain_error(exc: BaseException) -> None:
+def render_error(message: str, console: Console | None = None) -> None:
+    """Print a one-line CLI error (no traceback). Defaults to stderr for the `hl`
+    entry point; the REPL passes its own console so all shell output stays one stream."""
+    (console or _stderr).print(f"[red]error:[/red] {message}")
+
+
+def render_domain_error(exc: BaseException, console: Console | None = None) -> None:
     """Print a known domain error as a clean CLI message (no traceback)."""
-    _stderr.print(f"[red]error:[/red] {exc}")
+    render_error(str(exc), console)

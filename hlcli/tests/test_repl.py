@@ -13,11 +13,16 @@ from rich.console import Console
 from typer.main import get_command
 
 from hlcli.cli.app import app
+from hlcli.cli import context
+from hlcli.cli.context import GlobalState
 from hlcli.cli.repl import (
     Session,
+    _dispatch,
+    _watch_row,
     assemble_argv,
     completions,
     position_rows,
+    render_header,
     render_prompt,
     run_line,
 )
@@ -158,17 +163,26 @@ def test_completion_set_values(command):
 def test_position_rows_pnl_percent_long():
     pos = Position(coin="BTC", side=Side.LONG, size=0.15, entry_price=64000.0, unrealized_pnl=63.0)
     (row,) = position_rows([pos], {"BTC": 64420.0})
-    assert row["mark"] == 64420.0
-    assert row["uPnL"] == 63.0
-    assert row["uPnL%"] == pytest.approx(0.66, abs=0.01)  # 63 / (0.15*64000) * 100
+    assert row.mark == 64420.0
+    assert row.upnl == 63.0
+    assert row.upnl_pct == pytest.approx(0.66, abs=0.01)  # 63 / (0.15*64000) * 100
 
 
 def test_position_rows_missing_mark_and_short_sign():
     pos = Position(coin="ETH", side=Side.SHORT, size=2.0, entry_price=3450.0, unrealized_pnl=-58.0)
     (row,) = position_rows([pos], {})  # no mark for ETH
-    assert row["mark"] is None
-    assert row["side"] == "short"
-    assert row["uPnL%"] < 0
+    assert row.mark is None
+    assert row.side == "short"
+    assert row.upnl_pct < 0
+
+
+def test_watch_row_formats_like_header_missing_mark():
+    pos = Position(coin="ETH", side=Side.SHORT, size=2.0, entry_price=3450.0, unrealized_pnl=-58.0)
+    (row,) = position_rows([pos], {})
+    cells = _watch_row(row)
+    assert cells["mark"] == "-"        # None renders as a placeholder, not the string "None"
+    assert cells["side"] == "short"
+    assert "-58" in cells["uPnL"]      # formatted + signed, same as the header
 
 
 # --- prompt rendering -----------------------------------------------------------------
@@ -179,3 +193,75 @@ def test_prompt_plain_forms():
     assert render_prompt(s, color=False) == "hl(testnet:alice)[json]> "
     s2 = _session(network=Network.MAINNET, json=True, dry_run=True)
     assert render_prompt(s2, color=False) == "hl(mainnet)[json,dry]> "
+
+
+# --- dispatch: exit codes ------------------------------------------------------------
+
+class _FakeCommand:
+    """Stands in for the click group: `main` returns an exit code (what click does
+    under standalone_mode=False), rather than raising Exit."""
+
+    def __init__(self, code):
+        self._code = code
+
+    def main(self, argv, **kwargs):
+        return self._code
+
+
+def test_dispatch_surfaces_nonzero_exit(console):
+    _dispatch(_session(), ["anything"], _FakeCommand(2), console)
+    assert "exited with code 2" in console.file.getvalue()
+
+
+def test_dispatch_silent_on_success(console):
+    _dispatch(_session(), ["anything"], _FakeCommand(0), console)
+    assert "exited" not in console.file.getvalue()
+
+
+# --- mainnet re-arms the typed confirmation ------------------------------------------
+
+def test_use_mainnet_clears_session_yes(command, console):
+    session = _session(yes=True)
+    run_line(session, "use mainnet", command=command, console=console)
+    assert session.network is Network.MAINNET
+    assert session.yes is False  # a carried-over `-y` must not skip the mainnet confirm
+
+
+def test_argv_per_line_yes_not_duplicated():
+    argv = assemble_argv(_session(yes=True), ["--yes", "trade", "cancel-all"])
+    assert argv.count("-y") == 0 and argv.count("--yes") == 1
+
+
+# --- open_env is exception-safe (no leaked state store) ------------------------------
+
+def test_open_env_closes_store_when_exchange_build_fails(monkeypatch):
+    closed = []
+
+    class FakeStore:
+        def close(self):
+            closed.append(True)
+
+    def boom(state, *, for_write):
+        raise RuntimeError("no account")
+
+    monkeypatch.setattr(context, "open_state", lambda caps, net: FakeStore())
+    monkeypatch.setattr(context, "load_tunable", lambda: object())
+    monkeypatch.setattr(context, "build_for", boom)
+
+    state = GlobalState(network=Network.TESTNET, account=None, json_out=False, dry_run=False, yes=False)
+    with pytest.raises(RuntimeError, match="no account"):
+        context.open_env(state, for_write=False)
+    assert closed == [True]  # store closed despite the build failure
+
+
+# --- header degrades instead of crashing --------------------------------------------
+
+def test_render_header_degrades_when_book_unreachable(monkeypatch, console):
+    from hlcli.cli import repl
+
+    def boom(state, *, for_write):
+        raise RuntimeError("unreachable")
+
+    monkeypatch.setattr(repl, "open_env", boom)
+    render_header(_session(network=Network.TESTNET), console)  # must not raise
+    assert "positions unavailable" in console.file.getvalue()

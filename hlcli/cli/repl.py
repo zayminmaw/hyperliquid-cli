@@ -18,20 +18,29 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from rich import box
 from rich.console import Console
 from rich.table import Table
 
+# Typer 0.26 vendors click as `typer._click`; there is no standalone `click` here.
+from typer._click.exceptions import Abort, ClickException
+
 from hlcli.cli.context import GlobalState, open_env
-from hlcli.cli.errors import DOMAIN_ERRORS, render_domain_error
+from hlcli.cli.errors import DOMAIN_ERRORS, render_domain_error, render_error
 from hlcli.core.config import get_caps
 from hlcli.core.network import resolve_network
 from hlcli.core.types import Network
 
 # --- session --------------------------------------------------------------------------
 
-_NET_COLOR = {Network.PAPER: "green", Network.TESTNET: "yellow", Network.MAINNET: "bold red"}
+# network → (rich style for the header, raw ANSI code for the readline prompt)
+_NET_STYLE: dict[Network, tuple[str, str]] = {
+    Network.PAPER: ("green", "32"),
+    Network.TESTNET: ("yellow", "33"),
+    Network.MAINNET: ("bold red", "1;31"),
+}
 _SET_FIELDS = {"json": "json", "dry-run": "dry_run", "yes": "yes", "header": "header"}
 _META = ("use", "set", "show", "status", "watch", "clear", "help", "?", "exit", "quit")
 
@@ -48,7 +57,10 @@ class Session:
     header: bool = True
 
     def global_state(self) -> GlobalState:
-        return GlobalState(self.network, self.account, self.json, self.dry_run, self.yes)
+        return GlobalState(
+            network=self.network, account=self.account,
+            json_out=self.json, dry_run=self.dry_run, yes=self.yes,
+        )
 
 
 def assemble_argv(session: Session, tokens: list[str]) -> list[str]:
@@ -88,30 +100,52 @@ def _pct(x: float) -> str:
     return f"[{'green' if x >= 0 else 'red'}]{x:+.2f}%[/]"
 
 
-def position_rows(positions, marks: dict[str, float]) -> list[dict]:
-    """Raw (uncoloured) rows for the positions table — coin/side/size/entry/mark/uPnL/uPnL%.
-    Shared by the prompt header and the `watch` view; kept pure for testing."""
+class PositionRow(NamedTuple):
+    """One position for the header/`watch` tables — pure and typed, so it's unit-tested."""
+
+    coin: str
+    side: str
+    size: float
+    entry: float
+    mark: float | None
+    upnl: float
+    upnl_pct: float
+
+
+def position_rows(positions, marks: dict[str, float]) -> list[PositionRow]:
+    """Raw (uncoloured) rows — coin/side/size/entry/mark/uPnL/uPnL%. Shared by the
+    prompt header and the `watch` view; kept pure for testing."""
     rows = []
     for p in positions:
         notional = abs(p.size * p.entry_price)
         pct = (p.unrealized_pnl / notional * 100) if notional else 0.0
-        rows.append({
-            "coin": p.coin, "side": p.side.value, "size": p.size, "entry": p.entry_price,
-            "mark": marks.get(p.coin), "uPnL": round(p.unrealized_pnl, 4), "uPnL%": round(pct, 2),
-        })
+        rows.append(PositionRow(
+            coin=p.coin, side=p.side.value, size=p.size, entry=p.entry_price,
+            mark=marks.get(p.coin), upnl=round(p.unrealized_pnl, 4), upnl_pct=round(pct, 2),
+        ))
     return rows
 
 
-def _positions_table(rows: list[dict]) -> Table:
+def _positions_table(rows: list[PositionRow]) -> Table:
     table = Table(title="active positions", box=box.SIMPLE, title_style="bold cyan")
     table.add_column("coin")
     table.add_column("side")
     for col in ("size", "entry", "mark", "uPnL", "uPnL%"):
         table.add_column(col, justify="right")
     for r in rows:
-        table.add_row(r["coin"], r["side"], _num(r["size"]), _num(r["entry"]),
-                      _num(r["mark"]), _pnl(r["uPnL"]), _pct(r["uPnL%"]))
+        table.add_row(r.coin, r.side, _num(r.size), _num(r.entry),
+                      _num(r.mark), _pnl(r.upnl), _pct(r.upnl_pct))
     return table
+
+
+def _watch_row(r: PositionRow) -> dict:
+    """A PositionRow formatted for the `watch` table — same number/colour treatment as
+    the prompt header (watch_rows derives its columns from these keys)."""
+    return {
+        "coin": r.coin, "side": r.side,
+        "size": _num(r.size), "entry": _num(r.entry), "mark": _num(r.mark),
+        "uPnL": _pnl(r.upnl), "uPnL%": _pct(r.upnl_pct),
+    }
 
 
 def render_header(session: Session, console: Console) -> None:
@@ -140,7 +174,7 @@ def render_header(session: Session, console: Console) -> None:
         return
     rows = position_rows(positions, marks)
     console.print(_positions_table(rows))
-    total = round(sum(r["uPnL"] for r in rows), 4)
+    total = round(sum(r.upnl for r in rows), 4)
     console.print(f"[dim]equity[/] {_num(equity)}   [dim]open[/] {len(rows)}   [dim]uPnL[/] {_pnl(total)}")
 
 
@@ -151,14 +185,11 @@ def _watch(session: Session, console: Console) -> None:
     try:
         exchange, store, _caps, _tunable = open_env(session.global_state(), for_write=False)
     except Exception as exc:  # UI boundary: report and return to the prompt
-        console.print(f"[red]error:[/red] {exc}")
+        render_error(str(exc), console)
         return
 
     def rows() -> list[dict]:
-        out = position_rows(exchange.get_positions(), exchange.get_marks())
-        for r in out:
-            r["uPnL%"] = f"{r['uPnL%']:+.2f}%"
-        return out
+        return [_watch_row(r) for r in position_rows(exchange.get_positions(), exchange.get_marks())]
 
     try:
         watch_rows(rows, title="positions")
@@ -183,13 +214,23 @@ def _meta_use(session: Session, tokens: list[str], console: Console) -> None:
     try:
         resolved = resolve_network(tokens[1].lower(), get_caps())
     except ValueError as exc:
-        console.print(f"[red]error:[/red] {exc}")
+        render_error(str(exc), console)
         return
     prev = session.account
     session.network = resolved
     session.account = None  # accounts are network-scoped — a stale alias would just fail to resolve
     cleared = f" [dim](account '{prev}' cleared)[/]" if prev else ""
     console.print(f"network → {session.network.value}{cleared}")
+    _guard_mainnet_yes(session, console)
+
+
+def _guard_mainnet_yes(session: Session, console: Console) -> None:
+    """Entering mainnet re-arms the typed confirmation: a session-wide `yes` carried
+    over from paper/testnet must not silently skip the last human check on real money.
+    Turn it back on deliberately with `set yes on` while on mainnet."""
+    if session.network is Network.MAINNET and session.yes:
+        session.yes = False
+        console.print("[yellow]mainnet:[/] confirmation re-enabled [dim](`set yes on` to skip again)[/]")
 
 
 def _meta_set(session: Session, tokens: list[str], console: Console) -> None:
@@ -238,25 +279,23 @@ _HELP = """[bold]hl repl[/bold] — interactive shell
 # --- dispatch + loop ------------------------------------------------------------------
 
 def _dispatch(session: Session, tokens: list[str], command, console: Console) -> None:
-    from typer._click.exceptions import Abort, ClickException, Exit
-
     argv = assemble_argv(session, tokens)
     try:
-        command.main(argv, prog_name="hl", standalone_mode=False)
+        # standalone_mode=False makes click RETURN the exit code rather than raise Exit,
+        # and re-raise ClickException/Abort for us to render.
+        code = command.main(argv, prog_name="hl", standalone_mode=False)
     except DOMAIN_ERRORS as exc:
-        render_domain_error(exc)
-    except Exit as exc:
-        if getattr(exc, "exit_code", 0):
-            console.print(f"[red]exited with code {exc.exit_code}[/red]")
+        render_domain_error(exc, console)
     except ClickException as exc:
-        console.print(f"[red]error:[/red] {exc.format_message()}")
+        render_error(exc.format_message(), console)
     except Abort:
         console.print("[dim]aborted.[/dim]")
-    except KeyboardInterrupt:
-        console.print("\n[dim]interrupted.[/dim]")
-    except SystemExit as exc:
+    except SystemExit as exc:  # a command that calls sys.exit() directly must not kill the shell
         if exc.code not in (0, None):
             console.print(f"[red]exited with code {exc.code}[/red]")
+    else:
+        if code:
+            console.print(f"[red]exited with code {code}[/red]")
 
 
 def run_line(session: Session, line: str, *, command, console: Console) -> bool:
@@ -298,7 +337,8 @@ def render_prompt(session: Session, *, color: bool) -> str:
     flags = [f for f, on in (("json", session.json), ("dry", session.dry_run)) if on]
     tag = f"[{','.join(flags)}]" if flags else ""
     if color:
-        ctx = _rl_colour(ctx, _NET_COLOR[session.network])
+        _style, ansi = _NET_STYLE[session.network]
+        ctx = _rl_colour(ctx, ansi)
     return f"hl({ctx}){tag}> "
 
 
@@ -306,12 +346,10 @@ def render_prompt(session: Session, *, color: bool) -> str:
 
 # readline needs non-printing bytes wrapped so it computes the prompt width correctly.
 _RL_START, _RL_END = "\001", "\002"
-_ANSI = {"green": "32", "yellow": "33", "bold red": "1;31"}
 
 
-def _rl_colour(text: str, style: str) -> str:
-    code = _ANSI.get(style, "0")
-    return f"{_RL_START}\033[{code}m{_RL_END}{text}{_RL_START}\033[0m{_RL_END}"
+def _rl_colour(text: str, ansi: str) -> str:
+    return f"{_RL_START}\033[{ansi}m{_RL_END}{text}{_RL_START}\033[0m{_RL_END}"
 
 
 def _option_names(node) -> list[str]:
@@ -354,7 +392,7 @@ def _setup_readline(command):
     histfile.parent.mkdir(parents=True, exist_ok=True)
     try:
         readline.read_history_file(histfile)
-    except (FileNotFoundError, OSError):
+    except OSError:
         pass
     readline.set_history_length(1000)
 
@@ -396,11 +434,15 @@ def run_repl(state: GlobalState) -> None:
     from hlcli.cli.app import app  # lazy: app imports this module to register the command
 
     command = get_command(app)
-    session = Session(state.network, state.account, state.json_out, state.dry_run, state.yes)
+    session = Session(
+        network=state.network, account=state.account,
+        json=state.json_out, dry_run=state.dry_run, yes=state.yes,
+    )
     console = Console()
     histfile = _setup_readline(command)
 
     console.print("[bold]hl repl[/] — type [cyan]help[/] for commands, [cyan]exit[/] to quit.")
+    _guard_mainnet_yes(session, console)  # a launch-time `-y` doesn't silently persist on mainnet
     try:
         while True:
             render_header(session, console)

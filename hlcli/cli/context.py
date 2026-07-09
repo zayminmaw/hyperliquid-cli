@@ -59,11 +59,15 @@ def open_env(state: GlobalState, *, for_write: bool) -> tuple[Exchange, StateSto
     network. Shared by `exec`, `sentry`, and `agent` so paper wiring stays identical."""
     caps = get_caps()
     store = open_state(caps, state.network)
-    tunable = load_tunable()
-    if state.network is Network.PAPER:
-        exchange: Exchange = PaperExchange(caps.starting_equity, state=store)
-    else:
-        exchange = build_for(state, for_write=for_write)
+    try:
+        tunable = load_tunable()
+        if state.network is Network.PAPER:
+            exchange: Exchange = PaperExchange(caps.starting_equity, state=store)
+        else:
+            exchange = build_for(state, for_write=for_write)
+    except BaseException:
+        store.close()  # don't leak the state store if wiring the exchange fails (e.g. mainnet gate, no account)
+        raise
     return exchange, store, caps, tunable
 
 
