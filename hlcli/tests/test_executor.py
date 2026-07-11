@@ -358,7 +358,7 @@ def test_candle_context_is_labeled_with_interval_and_order():
     candles, regime = _coin_context(ex, "BTC")
     assert ex.interval == "15m"  # fetched at the labeled interval, not the callee default
     assert candles["interval"] == "15m" and candles["order"] == "oldest_first"
-    assert candles["bars"] and set(candles["bars"][0]) == {"o", "h", "l", "c"}
+    assert candles["bars"] and set(candles["bars"][0]) == {"o", "h", "l", "c", "v"}
     assert regime is not None    # classify still sees the raw bars
 
 
