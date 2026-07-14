@@ -181,6 +181,30 @@ def decide(
     return DecisionResult(decision, payload, "ok", stop_reason=stop_reason)
 
 
+def decide_rule(ctx: EnrichedContext, caps: Caps, tunable: TunableConfig, *, client=None) -> DecisionResult:
+    """The rule-based baseline arbiter (`HL_DECISION_SOURCE=rule`): act, now, on every
+    candidate — the deterministic gate is the filter (freshness, regime, levels, R:R at
+    the mark, caps). No LLM call, no key, fully reproducible.
+
+    This is the control arm of the audit's core A/B (2026-07, L-2/E1): the LLM arbiter
+    earns its place in the order path only by beating this baseline on shadow/paper
+    expectancy at the graduation sample. Conviction is fixed at 1.0 — with conviction
+    sizing disabled (the default) it carries no weight; the fixed rationale makes rule
+    verdicts self-identifying in the decision log.
+    """
+    return DecisionResult(
+        Decision(candidate_id=ctx.candidate.id, action=Action.ACT, timing=Timing.NOW,
+                 conviction=1.0, rationale="rule baseline: act on every gate-valid setup"),
+        raw={"source": "rule"},
+        note="ok",
+    )
+
+
+def decider_for(caps: Caps):
+    """The arbiter the hard caps select — `decide` (LLM) unless HL_DECISION_SOURCE=rule."""
+    return decide_rule if caps.decision_source == "rule" else decide
+
+
 def _user_message(ctx: EnrichedContext) -> str:
     """The per-candidate user turn: a one-line task statement plus the context as
     compact JSON (indenting roughly doubles the token cost of the hot loop)."""

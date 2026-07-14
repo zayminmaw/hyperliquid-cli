@@ -59,6 +59,37 @@ def cohorts(trades: list[dict], *, min_samples: int = MIN_COHORT_SAMPLES) -> lis
     return out
 
 
+# Statuses that carry a genuine setup outcome. `scaled` children duplicate the parent's
+# conviction; `aborted`/`abort_failed` are mechanical protection failures, not verdicts
+# on the setup — all three would pollute a calibration curve.
+_CALIBRATION_STATUSES = ("won", "lost", "expired", "closed")
+
+
+def conviction_calibration(trades: list[dict]) -> list[dict]:
+    """Conviction-bucket → realized outcome, over every resolved trade with a real result.
+
+    This is the evidence gate for re-enabling conviction→size scaling
+    (`sizing.enabled`, off by default per the 2026-07 audit): scaling earns its way
+    back only when higher buckets show higher avg_r on an adequate sample. No
+    minimum-sample filter — thin buckets are the honest picture, shown with their n."""
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        if t["status"] in _CALIBRATION_STATUSES:
+            groups[conviction_bucket(t["conviction"])].append(t)
+
+    out = []
+    for bucket in ("low", "mid", "high"):
+        ts = groups.get(bucket)
+        if not ts:
+            continue
+        wins = sum(1 for t in ts if _is_win(t))
+        out.append({
+            "bucket": bucket, "n": len(ts), "win_rate": round(wins / len(ts), 3),
+            "avg_r": round(mean(t["r_multiple"] or 0.0 for t in ts), 4),
+        })
+    return out
+
+
 def summary(trades: list[dict]) -> dict:
     """Portfolio-wide resolved-trade stats."""
     if not trades:

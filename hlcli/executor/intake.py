@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 
@@ -23,6 +24,27 @@ from hlcli.executor.gate import infer_side
 
 # Accept friendly aliases from hand-written batches.
 _ALIASES = {"pair": "coin", "reason": "reasoning"}
+
+# Imperative-injection heuristics for the human-supplied thesis text (2026-07 audit,
+# L-5/E2/E3). The decision model *evaluates* `reasoning`/`news`, so text that commands
+# it — rather than argues a setup — is the prompt-injection surface. Flagging is
+# advisory: the flagged candidate still flows to the decision + gate (the gate remains
+# the authority); the flags ride into the decision log and a warning alert so a
+# poisoned intake feed is visible, not silent.
+_INJECTION_PATTERNS = (
+    ("ignore-instructions", re.compile(
+        r"\b(ignore|disregard|forget)\b.{0,40}\b(instruction|rule|prompt|guideline|boundar)", re.I | re.S)),
+    ("role-override", re.compile(r"\b(you are now|act as|new persona|system prompt|jailbreak)\b", re.I)),
+    ("verdict-coercion", re.compile(
+        r"\b(you must|always|are required to)\b.{0,30}\b(act|buy|sell|approve|execute|answer)\b", re.I | re.S)),
+    ("schema-tamper", re.compile(r"\b(conviction|action|timing)\s*[:=]\s*\S", re.I)),
+)
+
+
+def injection_flags(candidate: Candidate) -> list[str]:
+    """Names of injection heuristics the candidate's thesis text trips (often empty)."""
+    text = f"{candidate.reasoning}\n{candidate.news}"
+    return [name for name, rx in _INJECTION_PATTERNS if rx.search(text)]
 
 
 def make_candidate(

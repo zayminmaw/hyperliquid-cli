@@ -1,25 +1,27 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-08 | Session: `hl repl` shell + fresh-eyes hardening pass — 436 tests pass (28 new)
+> Last updated: 2026-07-14 | Session: evidence audit → phased improvement plan → Phase 1 (safety) + Phase 2 (constrain LLM) — 456 tests pass
 
 ---
 
 ## 🎯 CURRENT TASK
 
-- Task: Phase 7 — Agent mode (PLAN.md §15) — CODE-COMPLETE (7a–7d)
-- Goal: 7a supervisor ✅ → 7b `hl journal` ✅ → 7c reflection memory + tuners ✅ → 7d Mode A adoption ✅ (mechanics)
-- Status: 7d complete + test-verified, uncommitted (7a–7c committed by user). 7d gate's live half pending: `hl account ls` is empty on this machine — needs a testnet account, a manual order + stop, then `hl --network testnet sentry once`
-- Next action: commit 7d. Then operational: VPS deploy (`deploy/`), `hl agent run` on paper/testnet to accumulate graduation evidence; close 7d live check when a testnet account exists
-- Blocked by: none (live 7d check waits on a testnet account)
+- Task: Execute the 2026-07 audit improvement plan (docs/audits/2026-07-hl-cli-evidence-audit/; approved plan at ~/.claude/plans/lazy-crunching-pumpkin.md)
+- Goal: P1 safety D-1/2/3 ✅ (committed ac25150) → P2 constrain-LLM L-1..L-5 ✅ → P3 exec quality X-1..X-4 → P4 ops O-1/O-2 → P5/6 process
+- Status: Phases 1–2 code-complete + test-verified + paper-smoked; Phase 2 commit in flight
+- Next action: Phase 3 — slippage-capped IOC entry (X-1), $10 min-notional gate check (X-2), reframe prompt `wait` semantics (X-3), open+realized breaker bound (X-4)
+- Blocked by: none (Phase-1 testnet drill — forced protection-failure + orderStatus-parse confirm — waits on a funded testnet agent wallet; also gates 7d's live check)
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: built `hl repl` — an interactive shell over the existing command surface (out-of-plan UX addition, user-requested). Dispatches each line through `typer.main.get_command(app)` under `standalone_mode=False` so the root callback still owns network resolution + the mainnet gate (never bypassed). Stateful session (network/account/json/dry-run/yes/header) injected as leading global flags per line, per-line flag wins; meta-commands `use`/`set`/`show`/`watch`/`help`/`exit`. Live-PnL header (positions + fresh marks, coloured prompt paper→green/testnet→yellow/mainnet→red) above each prompt via `open_env` (real paper book); `watch` = full-screen ticking table reusing `watch_rows`. stdlib readline history + command-tree tab-completion, zero new deps. New shared `cli/errors.py` (`DOMAIN_ERRORS`+`render_domain_error`) now backs both `__main__` and the REPL. NOTE: this repo's Typer 0.26.8 **vendors click as `typer._click`** — no standalone `click`; build REPLs on `get_command`, not `click_repl`.
-- Then: fresh-eyes senior review of 074e58b..HEAD + fixed all findings. (1) `_dispatch` now consumes the exit code click **returns** under `standalone_mode=False` (verified: `Exit(2)`→returns 2, KI→returns) so non-zero exits surface — dropped the dead `except Exit`/`except KeyboardInterrupt`. (2) `open_env` made exception-safe (`store.close()` on build failure) — killed a per-prompt state-store leak the header triggered on a live network with no account. (3) mainnet re-arms the typed confirmation: entering mainnet (via `use` or launch `-y`) clears a carried-over session `yes` + notifies (`_guard_mainnet_yes`). (4) one `_NET_STYLE` map (rich style + ANSI) replaces the parallel `_NET_COLOR`/`_ANSI` dicts. (5) error rendering unified on `errors.render_error(msg, console)` — REPL errors now all hit the shell's console (one stream, testable), `render_domain_error` takes an optional console. (6) `position_rows` → typed `PositionRow`; `watch` reuses the header's number/colour formatting (`_watch_row`), so `None` marks show `-` not `"None"`.
-- Result: 436 pass (28 new). Smoke-verified on paper: colour prompt, header degrade, `use mainnet` clears `yes`, bad-command recovery, clean exit. No anthropic/hyperliquid/eth_account leak into the REPL import path.
-- File(s) touched: cli/repl.py (new), cli/errors.py (new + `render_error`), cli/context.py (`open_env` cleanup), cli/app.py (register `repl`), __main__.py (shared error helper), tests/test_repl.py (new), ACTION-ITEMS.md
+- Did: (1) **Evidence audit** of every money-touching component vs external research + current HL docs → `docs/audits/2026-07-hl-cli-evidence-audit/` (Inventory/Evidence/Verdicts/Improvement-Plan; committed a3051a1). Headline: state DBs are EMPTY (tool has never traded in any mode); two DANGEROUS defects. (2) **Phase 1 safety** (committed ac25150): D-1 emergency close must be *confirmed* (accepted+filled) or the row resolves `abort_failed` (no fabricated P&L) + critical `emergency_close_failed` alert — raised backend errors caught, never crash the pass; D-2 `place_reduce_only` retries transport/429 with bounded backoff on the reduce-only paths only (protection + emergency close); D-3 entries carry a deterministic `cloid` (`entry_cloid` = sha256(candidate_id)[:16]) and a transport-unknown submit resolves via `order_status_by_cloid` — fill → tracked+protected, never-booked → key released, no lookup → re-raise + key kept. (3) **Phase 2 constrain-LLM**: L-1 conviction→size scaling OFF by default (`ConvictionSizing.enabled=False` ⇒ fraction 1.0, pure fixed-fractional; conviction logged for calibration); L-2 `HL_DECISION_SOURCE=llm|rule` hard cap + `decide_rule` baseline (act on every gate-valid setup, no LLM/key) resolved inside `run_once` via `decider_for(caps)`; L-3 `sentry_max_adds_per_position` default 2→0 (ADD disabled until graduation); L-4 `conviction_calibration()` in tuner/stats surfaced in `exec report` (excludes scaled/aborted/abort_failed); L-5 `injection_flags()` in intake — advisory screen on reasoning/news, warning alert + `thesis_flags` in decision-log context, never auto-rejects.
+- Result: 456 pass (20 new this session). Paper-smoked: rule source fires with no key; injected thesis → `thesis_flagged` alert + gate mark-sanity reject; report carries `conviction_calibration`.
+- File(s) touched: executor/{runner,protect,execute,gate,decision,enrich,intake}.py, exchange/hyperliquid.py, core/{types,config,config_schema}.py, state/store.py, tuner/stats.py, cli/commands/exec_.py, .env.example, tests/{test_protect,test_executor,test_gate,test_sentry_add,test_intake,test_tuner,test_hyperliquid_reads}.py, docs/audits/* (new)
+
+### Prior session (hl repl)
+- Built `hl repl` (typer `get_command` dispatch under `standalone_mode=False`, session flags, live-PnL header, watch, readline) + fresh-eyes fixes: exit-code returns consumed, `open_env` store-leak fixed, mainnet re-arms typed confirm, unified `_NET_STYLE`/error rendering, typed `PositionRow`. 436 pass. Files: cli/{repl,errors,context,app}.py, __main__.py, tests/test_repl.py.
 
 ### Prior session
 - Did: fixed all fresh-eyes review findings on 154ee47..HEAD. Big ones: (1) native SL/TP triggers now carry per-row oids (`trades.sl_oid/tp_oid`), so a post-ADD coin's sibling slice keeps its protection — every cancel is slice-scoped (`cancel_trade_triggers`), coin-wide sweep only when no open row remains; (2) `shadow_pass` now throttled by eval spacing + `sentry_max_llm_calls_per_day`; (3) ADD budget is per-position (counts since the coin's current position opened) + idempotency key is trade-id-scoped with an alert on crash-replay skip; (4) CLOSE bypasses churn caps + halted; (5) journal excludes `scaled` children from opened tally + graduation excludes them from `n`; (6) adopt anchors R at the loss-side extreme, not abs-distance; records the anchor stop's oid. Plus: atomic `record_fire` claim (kills exec/sentry double-fire race), deferred re-check drops already-fired, first-class `outcome` in decision log, tuner stage isolated in daily job, journal defers narrative for an incomplete day, `prior_actions` excludes holds, supervisor stamps LAST_TICK on failing ticks. New shared modules `executor/rmath.py` + `core/backoff.py`; centralized `alerts_path`, `DECISION_INTERVAL`, `require_exclusive_modes`.
@@ -76,6 +78,7 @@
 - [2026-07-05] R anchors to `initial_sl` once the stop ratchets; a profit-side stop-out books `won`; `scaled` partials count as wins; live stop replace = place-new-then-cancel-old (reject ⇒ old level kept everywhere); scale-out idempotent via `sentry:scale:<id>` recorded before the order
 - [2026-07-06] 6b shadow-only: proposals logged PAIRED with the 6a baseline (baseline never in the model's context — no anchoring); `hl sentry once|run` = `run_once(include_intake=False)` watch pass (deferred re-entry shares attempts/idempotency with exec; intake stays exec's)
 - [2026-07-07] Phase 7 (§15): repo stays producer-agnostic + OSS — signal handoff = watched JSON-batch intake dir, NO open port/HTTP; adoption never invents a stop (alert+skip); reflection inject bounded + own-outcomes-only; tuner auto-promote paper ONLY (testnet/mainnet propose→approve)
+- [2026-07-14] Audit-driven defaults (evidence in docs/audits/2026-07-…): conviction sizing OFF (uncalibrated scalar — re-enable only when `exec report` calibration shows monotonic bucket→avg_r), sentry ADD cap 0 (risk-increasing, post-graduation only), `HL_DECISION_SOURCE` selects llm|rule arbiter (A/B via separate HL_DATA_DIRs in shadow), an unconfirmed emergency close books `abort_failed` never `aborted`
 
 ---
 
@@ -91,7 +94,9 @@
 - Sentry 6a is inert until the tunable `trail` rules are switched on (all default off); `hl sentry once` tells you when nothing is active.
 - Executor tests inject `run_once(..., decide_fn=...)`; real `decide`/tuners tested via fakes. `exec`/`tune run` need ANTHROPIC_API_KEY.
 - `resolved_trades(limit=N)` = most recent N (newest-closed first) — don't assume oldest-first.
-- FakeLiveExchange (test_protect) models positions/open_orders/canceled; `fail_triggers="tp"` = partial-protection case.
+- FakeLiveExchange (test_protect) models positions/open_orders/canceled; `fail_triggers="tp"` = partial-protection case; `fail_close=True|"raise"` = the abort_failed cases. `protect._sleep` is monkeypatched in retry tests — keep it a module attribute.
+- Add tests opt IN to a budget (`_add_caps`/`sentry_max_adds_per_position=2`) — the default is 0. Gate conviction tests opt IN to scaling (`_scaling_on()`) — the default is flat 1.0. Don't "fix" a failing new test by flipping the production default back.
+- `order_status_by_cloid`'s orderStatus parse is best-effort — confirm the response shape on the first testnet drill before trusting the transport-unknown recovery path on mainnet.
 - Native SL/TP cancels are now BY OID (`trades.sl_oid/tp_oid`): use `cancel_trade_triggers` for one row; `cancel_coin_triggers` is the last-row-only sweep — never call it while a sibling slice is open. Legacy/oid-less rows fall back to the type-match cancel (safe: they have no sibling). Entry path + adopt + `apply_add` all record oids.
 - `record_fire` now returns bool (atomic claim). `fire()` and the sentry apply helpers claim-then-act; don't reintroduce a separate `already_fired` check before it.
 - Graduation counts positions, not partials (`assess` drops `status='scaled'`); the tuner's `summary`/cohorts still COUNT scaled (banked profit is a real outcome). Don't unify them.

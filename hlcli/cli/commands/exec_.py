@@ -22,6 +22,7 @@ from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.safety.graduation import assess
 from hlcli.state.store import open_state
+from hlcli.tuner.stats import conviction_calibration
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
 
@@ -152,6 +153,7 @@ def report(ctx: typer.Context) -> None:
     g = state_of(ctx)
     exchange, state, caps, _tunable = open_env(g, for_write=False)
     positions = exchange.get_positions()
+    resolved = state.resolved_trades()
     emit(
         {
             "network": g.network.value,
@@ -160,7 +162,10 @@ def report(ctx: typer.Context) -> None:
             "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
             "breaker": "tripped" if Breaker(state, caps).tripped() else "clear",
             "deferred": state.deferred_count(),  # WAIT candidates parked for re-check
-            "graduation": assess(state.resolved_trades(), caps),
+            "graduation": assess(resolved, caps),
+            # The evidence gate for re-enabling conviction→size scaling (audit L-1/L-4):
+            # scaling stays off until higher buckets show higher avg_r on real sample.
+            "conviction_calibration": conviction_calibration(resolved),
         },
         as_json=g.json_out, title="exec report",
     )

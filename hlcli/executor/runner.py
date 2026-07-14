@@ -33,9 +33,10 @@ from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Action, Candidate, Network, OrderResult, Position, Side, Timing
 from hlcli.exchange.base import Exchange
-from hlcli.executor.decision import DecisionResult, decide
+from hlcli.executor.decision import DecisionResult, decider_for
 from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
+from hlcli.executor.intake import injection_flags
 from hlcli.executor.gate import GateContext, evaluate
 from hlcli.executor.protect import (
     cancel_placed,
@@ -82,7 +83,7 @@ def run_once(
     *,
     dry_run: bool = False,
     fire_enabled: bool = True,
-    decide_fn: DecideFn = decide,
+    decide_fn: DecideFn | None = None,
     alerter: Alerter | None = None,
     now: float | None = None,
     include_intake: bool = True,
@@ -93,6 +94,9 @@ def run_once(
     deferred table and idempotency keys, so running them side by side can't
     double-spend a follow-up attempt or double-fire an entry."""
     now = now if now is not None else time.time()
+    # Arbiter selection is a hard cap (HL_DECISION_SOURCE): resolving it here wires every
+    # caller — exec/sentry/agent — through one switch; tests still inject their own.
+    decide_fn = decide_fn if decide_fn is not None else decider_for(caps)
     breaker = Breaker(state, caps)
     protected = requires_native_protection(exchange.network)
 
@@ -257,6 +261,14 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
             _emit(common.alerter, "reject", level="warning", coin=candidate.coin, reason="no mark for coin")
         return _Step("rejected")
 
+    # Advisory injection screen on the human-supplied thesis (L-5): flagged candidates
+    # still flow to the decision + gate, but the flags are alerted and logged so a
+    # poisoned intake feed is visible in the audit trail, never silent.
+    flags = injection_flags(candidate)
+    if flags and not common.dry_run:
+        _emit(common.alerter, "thesis_flagged", level="warning", coin=candidate.coin,
+              candidate=candidate.id, flags=flags)
+
     ctx = enrich(
         candidate, marks=common.marks, equity=common.equity, positions=common.positions,
         realized=common.realized, recent=common.recent, outcomes=common.outcomes,
@@ -306,14 +318,15 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         common.tally.approved += 1
         status, fill = _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, common)
 
-    state.log_decision(
-        candidate.id, common.now, decision=decision, gate=outcome, fill=fill,
-        context={"coin": candidate.coin, "outcome": status, "equity": common.equity,
-                 "open_coins": sorted(common.open_coins), "regime": regime,
-                 # which reflection rows were in the model's context — makes the
-                 # inject's value measurable (§15.4), like 6b measured the manager
-                 "lessons": [le["date"] for le in common.lessons]},
-    )
+    context = {"coin": candidate.coin, "outcome": status, "equity": common.equity,
+               "open_coins": sorted(common.open_coins), "regime": regime,
+               # which reflection rows were in the model's context — makes the
+               # inject's value measurable (§15.4), like 6b measured the manager
+               "lessons": [le["date"] for le in common.lessons]}
+    if flags:
+        context["thesis_flags"] = flags  # the injection screen's audit-trail record
+    state.log_decision(candidate.id, common.now, decision=decision, gate=outcome, fill=fill,
+                       context=context)
     return _Step(status)
 
 

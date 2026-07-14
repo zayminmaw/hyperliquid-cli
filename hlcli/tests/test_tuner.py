@@ -222,3 +222,30 @@ def test_promotion_audit_records_what_went_live(tmp_path):
     entries = {e["kind"]: e for e in history(c)}
     assert entries["config"]["config"]["risk_per_trade_pct"] == 1.2
     assert entries["prompt"]["chars"] == len("prompt v2") and "sha256" in entries["prompt"]
+
+
+# --- L-4: the conviction-calibration table (the gate for re-enabling conviction sizing) ---
+
+def test_conviction_calibration_buckets_and_exclusions():
+    from hlcli.tuner.stats import conviction_calibration
+
+    def t(conv, status, r):
+        return {"conviction": conv, "status": status, "r_multiple": r, "realized": r * 10}
+
+    rows = [
+        t(0.9, "won", 2.0), t(0.8, "lost", -1.0),   # high bucket: n=2, win_rate .5, avg_r .5
+        t(0.5, "lost", -1.0),                       # mid bucket
+        t(0.2, "expired", 0.3),                     # low bucket (expired counts — a real outcome)
+        # Excluded: scaled duplicates the parent's conviction; aborts are mechanical failures.
+        t(0.9, "scaled", 1.0), t(0.9, "aborted", -0.02), t(0.9, "abort_failed", 0.0),
+    ]
+    cal = conviction_calibration(rows)
+    assert [c["bucket"] for c in cal] == ["low", "mid", "high"]
+    high = cal[-1]
+    assert high["n"] == 2 and high["win_rate"] == 0.5 and high["avg_r"] == 0.5
+
+
+def test_conviction_calibration_empty_book_is_empty():
+    from hlcli.tuner.stats import conviction_calibration
+
+    assert conviction_calibration([]) == []

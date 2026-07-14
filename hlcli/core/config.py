@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -81,12 +82,22 @@ class Caps(BaseSettings):
     sentry_opposing_window_minutes: float = 120.0     # no extend_tp ↔ reduce flip-flops inside this
     # ADD (6d) — the one risk-increasing action; pyramid rules are hard policy:
     sentry_add_min_r: float = 1.0            # adds only to winners at/above this unrealized R
-    sentry_max_adds_per_position: int = 2    # cap per open position (resets when the coin is flat)
+    # Default 0 = ADD disabled (2026-07 audit, L-3): the lone risk-*increasing* lever stays
+    # off until the book has graduated; raising this is a deliberate risk decision.
+    sentry_max_adds_per_position: int = 0    # cap per open position (resets when the coin is flat)
 
     # --- graduation checklist (mainnet readiness; risk policy, off-limits to the tuner) ---
     graduation_min_trades: int = 20
     graduation_min_days: int = 7
     graduation_min_expectancy: float = 0.0  # mean R-multiple must clear this
+
+    # --- decision source (2026-07 audit, L-2) ---
+    # Which arbiter judges candidates: "llm" (the decision model) or "rule" (the
+    # deterministic act-on-every-gate-valid-setup baseline — no LLM call, no key).
+    # A hard cap, not a tunable: the A/B control must be off-limits to the tuner.
+    # A/B procedure: run each source in shadow against the same intake under separate
+    # HL_DATA_DIRs, then compare `exec report` expectancy at the graduation sample.
+    decision_source: Literal["llm", "rule"] = "llm"
 
     # --- models + token budgets (configurable, but a hard cap on spend/choice) ---
     decision_model: str = "claude-sonnet-4-6"

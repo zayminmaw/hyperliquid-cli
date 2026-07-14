@@ -148,7 +148,13 @@ def _size(candidate: Candidate, decision: Decision, ctx: GateContext) -> tuple[f
 
 
 def _conviction_fraction(conviction: float, sizing: ConvictionSizing) -> float:
-    """Map conviction → fraction of target size, within [floor, ceil]. Below min → 0."""
+    """Map conviction → fraction of target size, within [floor, ceil]. Below min → 0.
+
+    With scaling disabled (the default — conviction is uncalibrated until this book's
+    outcomes prove otherwise) the fraction is 1.0: pure fixed-fractional sizing, where
+    `risk_per_trade_pct` alone sets the risk and conviction is a logged signal only."""
+    if not sizing.enabled:
+        return 1.0
     if conviction < sizing.min_conviction:
         return 0.0
     span = (conviction - sizing.min_conviction) / max(1e-9, 1.0 - sizing.min_conviction)

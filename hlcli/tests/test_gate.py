@@ -5,7 +5,7 @@ import time
 import pytest
 
 from hlcli.core.config import Caps
-from hlcli.core.config_schema import TunableConfig, clamp
+from hlcli.core.config_schema import ConvictionSizing, TunableConfig, clamp
 from hlcli.core.types import Action, Candidate, Decision, Side, Timing
 from hlcli.executor.gate import GateContext, evaluate, infer_side
 
@@ -34,6 +34,11 @@ def _ctx(caps=None, **kw) -> GateContext:
         open_coins=set(), open_count=0, now=NOW, mark=100.0,  # mark at the default entry
     )
     return GateContext(**{**base, **kw})
+
+
+def _scaling_on() -> TunableConfig:
+    """Conviction→size scaling is OFF by default (audit L-1); scaling tests opt in."""
+    return clamp(TunableConfig(sizing=ConvictionSizing(enabled=True)))
 
 
 # --- happy paths ---
@@ -139,7 +144,7 @@ def test_rejects_max_concurrent():
 
 
 def test_rejects_zero_size_below_conviction():
-    out = evaluate(_candidate(), _decision(conviction=0.1), _ctx())
+    out = evaluate(_candidate(), _decision(conviction=0.1), _ctx(tunable=_scaling_on()))
     assert not out.approved and "size clamped to zero" in out.reason
 
 
@@ -185,8 +190,19 @@ def test_leverage_cap_clamps_size():
 
 def test_conviction_scales_within_bounds():
     # at min_conviction (0.3) -> floor_fraction (0.25) of 5 units = 1.25
-    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(conviction=0.3), _ctx())
+    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(conviction=0.3),
+                   _ctx(tunable=_scaling_on()))
     assert out.size == 1.25
+
+
+def test_flat_sizing_ignores_conviction_by_default():
+    # Scaling OFF (the default, audit L-1): every conviction sizes at the full
+    # fixed-fractional target — 0.5% of 10000 = 50 risk / stop 10 = 5 units — and a
+    # low-conviction act is no longer zero-sized (conviction is a logged signal only).
+    for conviction in (0.1, 0.3, 0.9, 1.0):
+        out = evaluate(_candidate(entry=100, sl=90, tp=120),
+                       _decision(conviction=conviction), _ctx())
+        assert out.approved and out.size == 5.0, conviction
 
 
 # --- side inference ---

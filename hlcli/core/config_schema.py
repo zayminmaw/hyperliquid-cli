@@ -34,8 +34,16 @@ class RegimeGate(BaseModel):
 
 
 class ConvictionSizing(BaseModel):
-    """Maps the LLM's conviction (0–1) to a fraction of the max allowed size."""
+    """Maps the LLM's conviction (0–1) to a fraction of the max allowed size.
 
+    **Disabled by default** (2026-07 audit, E1/E6): LLM conviction is an uncalibrated
+    scalar until this book's own outcomes prove it predicts realized R — see the
+    conviction-calibration table in `exec report`. Disabled ⇒ every gate-approved
+    trade sizes at the full fixed-fractional target (fraction 1.0) and conviction is
+    still logged, accumulating the calibration evidence that could re-enable this.
+    """
+
+    enabled: bool = False
     # Below this conviction the gate sizes to zero (treated as a skip).
     min_conviction: float = 0.3
     # Size scales between these fractions of the gate-permitted max as conviction

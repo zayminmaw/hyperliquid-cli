@@ -35,8 +35,14 @@ def _decision(**over):
     return d
 
 
+def _add_caps(**kw):
+    """ADD is disabled by default (cap 0, audit L-3) — these tests exercise the add
+    mechanics, so they opt into a budget explicitly."""
+    return caps(sentry_max_adds_per_position=2, **kw)
+
+
 def _gctx(**over):
-    base = dict(caps=caps(), tunable=tunable(), mark=112.0, now=NOW,
+    base = dict(caps=_add_caps(), tunable=tunable(), mark=112.0, now=NOW,
                 breaker_tripped=False, daily_loss_hit=False,
                 last_applied_ts=None, actions_today=0, last_bank_ts=None, last_extend_ts=None,
                 equity=10_000.0, coin_adds=0, coin_size=0.0)
@@ -66,7 +72,15 @@ def test_add_only_to_winners_at_min_r():
 
 
 def test_add_budget_is_per_coin_lifetime():
-    out = evaluate_management(_decision(), _trade(), _gctx(coin_adds=caps().sentry_max_adds_per_position))
+    out = evaluate_management(_decision(), _trade(),
+                              _gctx(coin_adds=_add_caps().sentry_max_adds_per_position))
+    assert not out.approved and "add budget" in out.reason
+
+
+def test_add_is_disabled_by_default():
+    # The default cap is 0 (audit L-3): with stock caps the one risk-increasing action
+    # is always rejected, however perfect the setup — enabling it is a deliberate choice.
+    out = evaluate_management(_decision(), _trade(size=2.0), _gctx(caps=caps()))
     assert not out.approved and "add budget" in out.reason
 
 
@@ -88,7 +102,7 @@ def test_add_sized_by_half_the_position():
 def test_add_sized_by_unrealized_profit_coverage():
     # min_r lowered so a shallow winner qualifies: favorable 3, gap 8 ⇒
     # by_profit = 6/8 = 0.75 < by_half = 1.0.
-    c = caps(sentry_add_min_r=0.2)
+    c = _add_caps(sentry_add_min_r=0.2)
     out = evaluate_management(_decision(new_stop=95.0), _trade(size=2.0),
                               _gctx(caps=c, mark=103.0))
     assert out.approved and out.plan.size == 0.75
@@ -97,11 +111,11 @@ def test_add_sized_by_unrealized_profit_coverage():
 def test_add_recleared_against_entry_caps_on_total_size():
     # Notional cap: 250/112 − 2 ≈ 0.232 binds below the half-size 1.0.
     out = evaluate_management(_decision(), _trade(size=2.0),
-                              _gctx(caps=caps(max_notional_per_trade=250.0)))
+                              _gctx(caps=_add_caps(max_notional_per_trade=250.0)))
     assert out.approved and round(out.plan.size, 3) == 0.232
     # No room at all ⇒ reject, never a negative/zero order.
     out = evaluate_management(_decision(), _trade(size=2.0),
-                              _gctx(caps=caps(max_notional_per_trade=200.0)))
+                              _gctx(caps=_add_caps(max_notional_per_trade=200.0)))
     assert not out.approved and "no room" in out.reason
 
 
@@ -120,7 +134,7 @@ def test_paper_add_raises_stop_and_books_child_slice(tmp_path):
     state.upsert_paper_position("BTC", Side.LONG, 2.0, 100.0)
     state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 2.0, 0.8, None, NOW)
 
-    s = manage_live(ex, state, _fast_caps(), tunable(), now=NOW,
+    s = manage_live(ex, state, _fast_caps(sentry_max_adds_per_position=2), tunable(), now=NOW,
                     decide_fn=ScriptedManager(_payload("add", new_stop=105.0)))
     assert s.applied == 1 and s.failed == 0
 
@@ -145,7 +159,7 @@ def test_add_idempotency_key_prevents_double_fire(tmp_path):
     tid = state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 2.0, 0.8, None, NOW)
     state.record_fire(f"sentry:add:{tid}:0", None, NOW)  # crash left the key behind
 
-    manage_live(ex, state, _fast_caps(), tunable(), now=NOW,
+    manage_live(ex, state, _fast_caps(sentry_max_adds_per_position=2), tunable(), now=NOW,
                 decide_fn=ScriptedManager(_payload("add", new_stop=105.0)))
     assert len(state.open_trades()) == 1              # no child slice
     assert ex.get_positions()[0].size == 2.0          # no market order
@@ -173,7 +187,7 @@ def test_live_add_sequences_raise_fire_protect(tmp_path):
     state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 1.0, 0.8, None, NOW)
     ex = FakeLive([_resting(1, "stop market", 90.0), _resting(2, "take profit market", 130.0)])
 
-    s = manage_live(ex, state, _fast_caps(), tunable(), now=NOW, native_protected=True,
+    s = manage_live(ex, state, _fast_caps(sentry_max_adds_per_position=2), tunable(), now=NOW, native_protected=True,
                     decide_fn=ScriptedManager(_payload("add", new_stop=110.0)))
     assert s.applied == 1
     kinds = [(o.order_type, o.size) for o in ex.placed]
@@ -193,7 +207,7 @@ def test_live_add_aborts_if_stop_raise_rejected(tmp_path):
     state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 1.0, 0.8, None, NOW)
     ex = FakeLive([_resting(1, "stop market", 90.0)], reject=(OrderType.STOP_LOSS,))
 
-    s = manage_live(ex, state, _fast_caps(), tunable(), now=NOW, native_protected=True,
+    s = manage_live(ex, state, _fast_caps(sentry_max_adds_per_position=2), tunable(), now=NOW, native_protected=True,
                     decide_fn=ScriptedManager(_payload("add", new_stop=110.0)))
     assert s.applied == 0 and s.failed == 1
     assert all(o.order_type is not OrderType.MARKET for o in ex.placed)  # no size w/o the raise
@@ -205,7 +219,7 @@ def test_live_add_slice_protection_failure_emergency_closes(tmp_path):
     state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 1.0, 0.8, None, NOW)
     ex = FakeLive([_resting(1, "stop market", 90.0)], reject=(OrderType.TAKE_PROFIT,))
 
-    s = manage_live(ex, state, _fast_caps(), tunable(), now=NOW, native_protected=True,
+    s = manage_live(ex, state, _fast_caps(sentry_max_adds_per_position=2), tunable(), now=NOW, native_protected=True,
                     decide_fn=ScriptedManager(_payload("add", new_stop=110.0)))
     # The raise applied (the stop genuinely moved — the safe direction); the add failed.
     assert s.applied == 1 and s.failed == 1
