@@ -29,6 +29,7 @@ class HyperliquidExchange:
         account_address: str,
         agent_key: str | None = None,
         marks: MarksFeed | None = None,
+        max_entry_slippage_pct: float = 0.3,
     ) -> None:
         self.network = network
         self._account_address = account_address
@@ -37,6 +38,11 @@ class HyperliquidExchange:
         self._info = None
         self._exchange = None
         self._marks = marks or MarksFeed(self._base_url)
+        # Entry slippage cap as a fraction (audit X-1): the SDK turns a market open into
+        # an IOC limit at mid × (1 ± slippage), so this bounds the worst entry fill. The
+        # SDK's own default is 5% — far too wide for a leveraged entry. Closes are left
+        # at the SDK default on purpose: a flatten must fill.
+        self._entry_slippage = max_entry_slippage_pct / 100.0
 
     # --- lazy SDK clients ---
 
@@ -122,10 +128,14 @@ class HyperliquidExchange:
         cloid = require("hyperliquid.utils.types").Cloid.from_str(order.cloid) if order.cloid else None
 
         if order.order_type is OrderType.MARKET:
+            # Entries are slippage-capped IOC limits (X-1): a non-fill is a clean no-op
+            # the caller retries later, never a fill worse than the cap. Reduce-only
+            # closes keep the SDK's wide default — a flatten must fill.
             resp = (
                 ex.market_close(order.coin, sz=order.size, cloid=cloid)
                 if order.reduce_only
-                else ex.market_open(order.coin, is_buy, order.size, cloid=cloid)
+                else ex.market_open(order.coin, is_buy, order.size,
+                                    slippage=self._entry_slippage, cloid=cloid)
             )
         elif order.order_type is OrderType.LIMIT:
             resp = ex.order(

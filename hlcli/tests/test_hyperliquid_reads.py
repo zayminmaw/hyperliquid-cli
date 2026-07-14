@@ -35,8 +35,8 @@ class FakeExchangeClient:
         self.orders = []
         self.canceled = []
 
-    def market_open(self, coin, is_buy, sz, cloid=None):
-        self.orders.append(("market_open", coin, is_buy, sz, cloid))
+    def market_open(self, coin, is_buy, sz, slippage=0.05, cloid=None):
+        self.orders.append(("market_open", coin, is_buy, sz, slippage, cloid))
         return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"oid": 9, "totalSz": str(sz), "avgPx": "100"}}]}}}
 
     def market_close(self, coin, sz=None, cloid=None):
@@ -108,7 +108,18 @@ def test_writes_blocked_without_key():
 def test_market_size_is_floored_to_sz_decimals():
     ex = _exchange(with_writes=True)
     ex.place_order(Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=0.123456789))
-    assert ex._exchange.orders[0] == ("market_open", "BTC", True, 0.12345, None)  # floored, never up
+    # floored size, never up; entry slippage capped at the default 0.3% (not the SDK's 5%)
+    assert ex._exchange.orders[0] == ("market_open", "BTC", True, 0.12345, 0.003, None)
+
+
+def test_entry_slippage_cap_is_plumbed_from_caps():
+    ex = HyperliquidExchange(Network.TESTNET, account_address="0xabc", max_entry_slippage_pct=0.15)
+    ex._info = FakeInfo()
+    ex._marks.sz_decimals = FakeMeta().sz_decimals
+    ex._agent_key = "0x" + "1" * 64
+    ex._exchange = FakeExchangeClient()
+    ex.place_order(Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=1.0))
+    assert ex._exchange.orders[0][4] == 0.0015  # pct → fraction on the wire
 
 
 def test_trigger_price_is_rounded_for_the_wire():

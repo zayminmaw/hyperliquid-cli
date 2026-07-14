@@ -107,6 +107,13 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
     size, notional = _size(candidate, decision, ctx)
     if size <= 0:
         return _reject("size clamped to zero (conviction below threshold)")
+    # Exchange floor (Hyperliquid: $10/order) — reject with a clear reason here rather
+    # than a late exchange error. Mode B only; Mode A market orders bypass the gate and
+    # get the exchange's own (clearer) reject.
+    if notional < ctx.caps.min_order_notional:
+        return _reject(
+            f"notional {notional:.2f} below exchange minimum ${ctx.caps.min_order_notional:g}"
+        )
 
     # A MARKET entry so an accepted order is a *filled* one — a resting GTC limit
     # would leave the ledger and protective triggers tracking a position that may

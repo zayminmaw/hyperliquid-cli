@@ -195,6 +195,13 @@ def test_conviction_scales_within_bounds():
     assert out.size == 1.25
 
 
+def test_rejects_notional_below_exchange_minimum():
+    # X-2: Hyperliquid rejects orders under $10 notional — the gate says so up front.
+    # equity 100 → risk 0.5% = 0.5; stop 10 → size 0.05 → notional 5 < $10.
+    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(), _ctx(equity=100.0))
+    assert not out.approved and "below exchange minimum" in out.reason
+
+
 def test_flat_sizing_ignores_conviction_by_default():
     # Scaling OFF (the default, audit L-1): every conviction sizes at the full
     # fixed-fractional target — 0.5% of 10000 = 50 risk / stop 10 = 5 units — and a

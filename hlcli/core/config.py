@@ -67,6 +67,14 @@ class Caps(BaseSettings):
     max_leverage: float = 3.0
     rr_floor: float = 1.5
     max_signal_age_minutes: int = 30
+    # Exchange-enforced floor (Hyperliquid rejects orders under $10 notional) — the gate
+    # rejects early with a clear reason instead of a late exchange error (audit X-2).
+    min_order_notional: float = 10.0
+    # Worst acceptable entry fill vs the mid, in percent (audit X-1). The live entry is
+    # an IOC limit at mid ± this — normally fills like a market order, but refuses a
+    # fill worse than the cap (leverage multiplies slippage into margin). Entries only:
+    # closes must fill and stay wide.
+    max_entry_slippage_pct: float = 0.3
     # How many times the executor re-checks a candidate the LLM said to WAIT on before
     # giving up. 0 disables follow-ups (a `wait` becomes a terminal reject, as before).
     followup_max_attempts: int = 3
