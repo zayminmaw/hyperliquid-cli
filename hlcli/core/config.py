@@ -99,6 +99,14 @@ class Caps(BaseSettings):
     graduation_min_days: int = 7
     graduation_min_expectancy: float = 0.0  # mean R-multiple must clear this
 
+    # --- reconciliation response (2026-07 audit, O-2) ---
+    # What an executor pass does about an exchange position the ledger doesn't know:
+    # "alert" (default) pages a human; "adopt" additionally books stop-protected
+    # positions into the ledger via the sentry adopt path (never invents a stop —
+    # stopless positions still only alert). Flattening stays a manual decision:
+    # auto-closing could kill a position the human opened on purpose.
+    reconcile_action: Literal["alert", "adopt"] = "alert"
+
     # --- decision source (2026-07 audit, L-2) ---
     # Which arbiter judges candidates: "llm" (the decision model) or "rule" (the
     # deterministic act-on-every-gate-valid-setup baseline — no LLM call, no key).

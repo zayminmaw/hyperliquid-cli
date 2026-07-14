@@ -139,6 +139,16 @@ hl journal  write | show | ls   # daily journal (§15)
 
 `exec once` = one full pass (intake → enrich → decision → gate → fire → monitor). `exec run` = continuous loop. `exec shadow` = decide and log but **fire nothing** (pre-mainnet confidence + tuner training data). `exec breaker` = kill switch (halts new fires; open positions still managed). Idempotency + a high-water mark on the intake stream mean a restart never double-fires.
 
+## Evidence gate (2026-07 audit — binding on order-path changes)
+
+Any feature that touches the order path must pass the 7-point checklist in `docs/evidence-gate.md`
+(evidence grade, boxing, failure behavior, idempotency, tests, kill switch, measurement) and the
+paper → shadow → testnet → graduation validation ladder. **Audit-set defaults are deliberate — do
+not "fix" them back:** conviction→size scaling OFF (`sizing.enabled`; re-enable only when
+`exec report`'s calibration proves it), sentry ADD cap 0, `HL_DECISION_SOURCE` selects the llm|rule
+arbiter for A/B, an unconfirmed emergency close books `abort_failed` (never `aborted`), entries are
+slippage-capped IOC limits. Full rationale: `docs/audits/2026-07-hl-cli-evidence-audit/`.
+
 ## Testing
 
 No tooling is configured yet (no `pyproject.toml`/CI). When adding it, the intended runner is `pytest`. Prioritize tests for the **highest-risk code**: the gate/sizing, the LLM-output validator/clamp, the paper exchange + monitor, intake idempotency + high-water mark, config-schema clamping, the mainnet gate, and the CLI. **Mock the LLM decision call** in tests (deterministic fixtures); `shadow` mode is the real integration test against live data.

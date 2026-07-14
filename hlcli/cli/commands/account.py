@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import typer
 
-from hlcli.accounts.keystore import Keystore, agent_address
+from hlcli.accounts.keystore import Keystore, agent_address, keystore_passphrase
 from hlcli.accounts.store import Account, AccountType, open_store
 from hlcli.cli.context import build_for, state_of
 from hlcli.cli.output import emit, emit_rows, note
@@ -46,7 +46,9 @@ def add(
     )
     if private_key is not None:
         try:
-            Keystore(caps.data_dir / "keys").save(alias, private_key)
+            # With HL_KEYSTORE_PASSPHRASE set, the key lands encrypted at rest (V3
+            # keystore JSON); unset, plaintext hex — both load transparently.
+            Keystore(caps.data_dir / "keys").save(alias, private_key, passphrase=keystore_passphrase())
         except Exception:
             store.remove(alias)  # don't leave a row pointing at a key that never landed
             raise

@@ -286,6 +286,66 @@ def test_partial_protection_cancels_the_placed_trigger_on_abort(tmp_path):
     assert crit and crit[0]["triggers_canceled"] == 1
 
 
+# --- O-2: reconciliation runs every pass; auto-adopt behind HL_RECONCILE_ACTION ---
+
+def _unmanaged_long(entry=100.0, size=2.0):
+    from hlcli.core.types import OpenOrder, Position
+    position = Position(coin="BTC", side=Side.LONG, size=size, entry_price=entry)
+    stop = OpenOrder(coin="BTC", oid=7, side=Side.SHORT, size=size, price=entry - 10.0,
+                     order_type="stop market", reduce_only=True, is_trigger=True)
+    return position, stop
+
+
+def test_unmanaged_position_alerts_even_on_a_shadow_pass(tmp_path):
+    # The check must run on every non-dry pass — drift between exchange and ledger is
+    # never silent just because this pass wasn't allowed to fire.
+    state = StateStore(tmp_path / "state.db")
+    position, _ = _unmanaged_long()
+    ex = FakeLiveExchange(Network.TESTNET, positions=[position])
+    alerter = CapturingAlerter()
+    run_once(ex, state, caps(), tunable(), fire_enabled=False, alerter=alerter, now=NOW)
+    assert any(e["event"] == "unmanaged_position" and e["coins"] == ["BTC"]
+               for e in alerter.events)
+
+
+def test_reconcile_adopt_books_stop_protected_position(tmp_path):
+    # HL_RECONCILE_ACTION=adopt on a fire-enabled pass: the stop-protected orphan gets a
+    # ledger row via the sentry adopt path (never inventing anything) and stops alerting.
+    state = StateStore(tmp_path / "state.db")
+    position, stop = _unmanaged_long()
+    ex = FakeLiveExchange(Network.TESTNET, positions=[position], open_orders=[stop])
+    alerter = CapturingAlerter()
+    run_once(ex, state, caps(reconcile_action="adopt"), tunable(), alerter=alerter, now=NOW)
+
+    trade = state.open_trades()[0]
+    assert trade["adopted"] == 1 and trade["sl"] == 90.0 and trade["sl_oid"] == "7"
+    events = [e["event"] for e in alerter.events]
+    assert "position_adopted" in events and "unmanaged_position" not in events
+
+
+def test_reconcile_adopt_never_runs_on_a_shadow_pass(tmp_path):
+    # Adoption writes real ledger rows — never a shadow pass's job; the alert still fires.
+    state = StateStore(tmp_path / "state.db")
+    position, stop = _unmanaged_long()
+    ex = FakeLiveExchange(Network.TESTNET, positions=[position], open_orders=[stop])
+    alerter = CapturingAlerter()
+    run_once(ex, state, caps(reconcile_action="adopt"), tunable(),
+             fire_enabled=False, alerter=alerter, now=NOW)
+    assert state.open_trades() == []
+    assert any(e["event"] == "unmanaged_position" for e in alerter.events)
+
+
+def test_reconcile_default_alert_only(tmp_path):
+    # The default stays hands-off: alert, adopt nothing.
+    state = StateStore(tmp_path / "state.db")
+    position, stop = _unmanaged_long()
+    ex = FakeLiveExchange(Network.TESTNET, positions=[position], open_orders=[stop])
+    alerter = CapturingAlerter()
+    run_once(ex, state, caps(), tunable(), alerter=alerter, now=NOW)
+    assert state.open_trades() == []
+    assert any(e["event"] == "unmanaged_position" for e in alerter.events)
+
+
 def test_paper_fire_skips_native_protection(tmp_path):
     # Paper relies on the resolver, so a paper fire places no protective triggers.
     from hlcli.exchange.paper import PaperExchange

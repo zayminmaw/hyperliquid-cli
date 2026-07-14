@@ -49,6 +49,7 @@ from hlcli.executor.resolve import resolve_open_trades
 from hlcli.journal.lessons import recent_lessons
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
+from hlcli.sentry.adopt import adopt_unmanaged
 from hlcli.sentry.apply import manage_open_trades
 from hlcli.sentry.engine import active as trail_active
 from hlcli.state.store import DeferredCandidate, StateStore
@@ -134,8 +135,16 @@ def run_once(
     outcomes = state.resolved_trades(limit=10)  # newest first — the model's track record
     breaker_tripped = breaker.tripped()
     daily_loss = breaker.daily_loss_hit(equity, persist=not dry_run)
-    if alerter is not None and not dry_run and fire_enabled:
-        _alert_unmanaged(state, alerter, positions)
+    # Reconciliation (O-2): the unmanaged-position check runs on EVERY non-dry pass —
+    # shadow included — so drift between the exchange and the ledger is never silent.
+    # The auto-response (adopt) needs a live-authorized pass: it writes real ledger
+    # rows, which is never a shadow pass's job. Adoption first, so positions it books
+    # drop out of the unmanaged alert; stopless ones remain and keep paging.
+    if not dry_run:
+        if caps.reconcile_action == "adopt" and fire_enabled:
+            adopt_unmanaged(exchange, state, alerter=alerter, now=now)
+        if alerter is not None:
+            _alert_unmanaged(state, alerter, positions)
 
     # WAIT re-checks (skip in a dry-run preview, and while the kill switch is tripped — a
     # re-check can't fire anyway, so don't spend an LLM call or a follow-up attempt on it;
