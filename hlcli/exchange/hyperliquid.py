@@ -119,26 +119,50 @@ class HyperliquidExchange:
                 message=f"size rounds to zero at {order.coin}'s size precision",
             )
         is_buy = order.side is Side.LONG
+        cloid = require("hyperliquid.utils.types").Cloid.from_str(order.cloid) if order.cloid else None
 
         if order.order_type is OrderType.MARKET:
             resp = (
-                ex.market_close(order.coin, sz=order.size)
+                ex.market_close(order.coin, sz=order.size, cloid=cloid)
                 if order.reduce_only
-                else ex.market_open(order.coin, is_buy, order.size)
+                else ex.market_open(order.coin, is_buy, order.size, cloid=cloid)
             )
         elif order.order_type is OrderType.LIMIT:
             resp = ex.order(
                 order.coin, is_buy, order.size, order.price,
-                {"limit": {"tif": "Gtc"}}, reduce_only=order.reduce_only,
+                {"limit": {"tif": "Gtc"}}, reduce_only=order.reduce_only, cloid=cloid,
             )
         else:  # STOP_LOSS / TAKE_PROFIT — protective market trigger
             tpsl = "sl" if order.order_type is OrderType.STOP_LOSS else "tp"
             resp = ex.order(
                 order.coin, is_buy, order.size, order.trigger_price,
                 {"trigger": {"isMarket": True, "triggerPx": order.trigger_price, "tpsl": tpsl}},
-                reduce_only=order.reduce_only,
+                reduce_only=order.reduce_only, cloid=cloid,
             )
         return _parse_order_response(resp)
+
+    def order_status_by_cloid(self, cloid: str) -> OrderResult | None:
+        """Resolve a transport-unknown submit by its client order id. Returns a fill/resting
+        result when the exchange has the order, or None when it never saw it (safe to skip).
+        Keyless read (Info endpoint). NOTE: the orderStatus response shape is parsed
+        best-effort here and must be confirmed on a testnet drill (see the D-3 plan)."""
+        types = require("hyperliquid.utils.types")
+        raw = self._info_client().query_order_by_cloid(self._account_address, types.Cloid.from_str(cloid))
+        if not isinstance(raw, dict) or raw.get("status") != "order":
+            return None  # unknownOid / unexpected → the exchange never booked this order
+        inner = raw.get("order", {}) or {}
+        o = inner.get("order", {}) or {}
+        status = inner.get("status")
+        oid = str(o["oid"]) if o.get("oid") is not None else None
+        if status == "filled":
+            return OrderResult(
+                accepted=True, status="filled", order_id=oid,
+                filled_size=_as_float(o.get("origSz") or o.get("sz")),
+                avg_price=_as_float(o.get("limitPx")),
+            )
+        if status in ("open", "resting"):
+            return OrderResult(accepted=True, status="resting", order_id=oid, filled_size=0.0)
+        return None  # canceled / rejected / margin-canceled → treat as not on the book
 
     def _round_for_wire(self, order: Order) -> Order:
         """Round size/prices to the asset's exchange precision (size DOWN — never past

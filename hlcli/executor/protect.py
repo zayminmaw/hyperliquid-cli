@@ -16,10 +16,41 @@ an entry fills, the position is emergency-closed rather than left unprotected.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
+from hlcli.core.backoff import backoff_delay
 from hlcli.core.types import Candidate, Network, Order, OrderResult, OrderType, Side
 from hlcli.exchange.base import Exchange
+
+# Bounded retry for the reduce-only order-writes (protection + emergency close). Kept small:
+# a live position is unprotected while we retry, so a couple of quick attempts covers a
+# transient blip / rate-limit without stalling the flatten. `_sleep` is a module attribute
+# so tests can neutralize the backoff wait.
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE = 0.5
+_RETRY_MAX = 3.0
+_sleep = time.sleep
+
+
+def place_reduce_only(exchange: Exchange, order: Order) -> OrderResult:
+    """Place a reduce-only order, retrying transport / rate-limit failures with backoff.
+
+    A duplicate reduce-only order is idempotency-safe — it can only reduce, never flip or
+    open — so a transport-unknown outcome is safe to re-send (unlike an entry, which needs
+    a cloid). A raised backend error is retried and, if it persists, returned as a
+    definitive non-placement (`accepted=False`) so the caller flattens/aborts instead of
+    crashing the pass. A definitive reject (the backend answered "no") is returned
+    immediately and never retried."""
+    last = "no attempt"
+    for failures in range(_RETRY_ATTEMPTS):
+        try:
+            return exchange.place_order(order)  # OrderResult (incl. a real reject) → done
+        except Exception as exc:  # noqa: BLE001 — transport/rate-limit; reduce-only is safe to retry
+            last = str(exc)
+            if failures < _RETRY_ATTEMPTS - 1:
+                _sleep(backoff_delay(_RETRY_BASE, failures + 1, _RETRY_MAX))
+    return OrderResult(accepted=False, status="error", message=f"exhausted retries: {last}")
 
 
 def requires_native_protection(network: Network) -> bool:
@@ -53,7 +84,7 @@ def place_protection(exchange: Exchange, candidate: Candidate, size: float) -> P
     """Place both protective triggers; stop at the first rejection so we don't half-protect."""
     placed: list[OrderResult] = []
     for order in protective_orders(candidate, size):
-        result = exchange.place_order(order)
+        result = place_reduce_only(exchange, order)
         placed.append(result)
         if not result.accepted:
             return ProtectionResult(ok=False, placed=placed, failed=result.message or result.status)
@@ -61,8 +92,9 @@ def place_protection(exchange: Exchange, candidate: Candidate, size: float) -> P
 
 
 def emergency_close(exchange: Exchange, candidate: Candidate, size: float) -> OrderResult:
-    """Flatten a just-opened position whose protection could not be placed."""
-    return exchange.place_order(Order(
+    """Flatten a just-opened position whose protection could not be placed. Reduce-only,
+    so the retry inside `place_reduce_only` is safe even on a transport-unknown outcome."""
+    return place_reduce_only(exchange, Order(
         coin=candidate.coin, side=_closing_side(candidate.side),
         order_type=OrderType.MARKET, size=size, reduce_only=True,
     ))

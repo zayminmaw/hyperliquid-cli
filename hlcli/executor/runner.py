@@ -340,16 +340,23 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
         candidate.sl, candidate.tp, filled, decision.conviction, regime, common.now,
     )
     if common.protected:
-        close, sl_oid, tp_oid = _secure(exchange, candidate, filled, common.alerter)
-        if close is not None:  # protection failed — position flattened, trade aborted
+        secured = _secure(exchange, candidate, filled, common.alerter)
+        if not secured.protected:
             common.tally.failed += 1
-            exit_price = close.avg_price if close.avg_price is not None else entry_price
-            realized, r_multiple = _abort_pnl(candidate.side, entry_price, candidate.sl, exit_price, filled)
-            state.resolve_trade(trade_id, "aborted", exit_price, realized, r_multiple, common.now)
-            return "aborted", fill
+            if secured.close_confirmed:  # flattened cleanly — book the ~spread cost as an abort
+                close = secured.close
+                exit_price = close.avg_price if close.avg_price is not None else entry_price
+                realized, r_multiple = _abort_pnl(candidate.side, entry_price, candidate.sl, exit_price, filled)
+                state.resolve_trade(trade_id, "aborted", exit_price, realized, r_multiple, common.now)
+                return "aborted", fill
+            # Flatten unconfirmed: the position may still be live and unprotected. Record it
+            # honestly (no fabricated P&L) under a distinct terminal status; the critical
+            # alert already fired, and next pass's _alert_unmanaged re-flags the live position.
+            state.resolve_trade(trade_id, "abort_failed", entry_price, 0.0, 0.0, common.now)
+            return "abort_failed", fill
         # Record the triggers so sentry (and the resolver) later cancel this position's
         # protection by oid, never a sibling slice's.
-        state.update_trade_triggers(trade_id, sl_oid=sl_oid, tp_oid=tp_oid)
+        state.update_trade_triggers(trade_id, sl_oid=secured.sl_oid, tp_oid=secured.tp_oid)
     common.tally.fired += 1
     common.open_coins.add(candidate.coin)
     _emit(common.alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
@@ -441,21 +448,56 @@ def _fetch_candles(exchange: Exchange, coin: str):
         return []
 
 
-def _secure(exchange: Exchange, candidate, size: float,
-            alerter: Alerter | None) -> tuple[OrderResult | None, str | None, str | None]:
+@dataclass
+class _SecureOutcome:
+    """What `_secure` did with a filled entry. `protected` True ⇒ native triggers rest
+    (oids set). Otherwise the entry was flattened; `close_confirmed` says whether that
+    flatten actually filled — an *unconfirmed* flatten may have left the position live
+    and unprotected, which the caller must not record as a clean abort."""
+
+    protected: bool
+    sl_oid: str | None = None
+    tp_oid: str | None = None
+    close: OrderResult | None = None       # emergency-close result when not protected
+    close_confirmed: bool = False          # True only when the flatten actually filled
+
+
+def _secure(exchange: Exchange, candidate, size: float, alerter: Alerter | None) -> _SecureOutcome:
     """Place native protective triggers; if that fails, flatten the position rather than
-    leave it naked — and cancel whichever trigger DID place, so no stray reduce-only
-    order survives to ambush the next position. Returns (None, sl_oid, tp_oid) when
-    protected, else (emergency-close result, None, None) for the abort ledger entry."""
+    leave it naked — and cancel whichever trigger DID place, so no stray reduce-only order
+    survives to ambush the next position.
+
+    The flatten must be *confirmed*: an emergency close that errors or doesn't fill leaves
+    a live, unprotected position, so the caller must not book it as a clean abort. A raised
+    backend error is caught (never propagated) so a naked position is always recorded and
+    alerted, not turned into a crash that skips the ledger update entirely."""
     protection = place_protection(exchange, candidate, size)
     if protection.ok:
         sl, tp = protection.placed  # place_protection orders SL then TP
-        return None, sl.order_id, tp.order_id
-    closed = emergency_close(exchange, candidate, size)
+        return _SecureOutcome(protected=True, sl_oid=sl.order_id, tp_oid=tp.order_id)
+
+    closed = _emergency_close_confirmed(exchange, candidate, size)
+    confirmed = closed.accepted and (closed.filled_size or 0) > 0
     canceled = cancel_placed(exchange, candidate.coin, protection.placed)
     _emit(alerter, "protection_failed", level="critical", coin=candidate.coin,
-          reason=protection.failed, emergency_closed=closed.accepted, triggers_canceled=canceled)
-    return closed, None, None
+          reason=protection.failed, emergency_closed=confirmed, triggers_canceled=canceled)
+    if not confirmed:
+        # The position may still be open and unprotected — page loudly and distinctly so a
+        # human intervenes now, ahead of next pass's _alert_unmanaged backstop.
+        _emit(alerter, "emergency_close_failed", level="critical", coin=candidate.coin,
+              size=size, reason=closed.message or closed.status)
+    return _SecureOutcome(protected=False, close=closed, close_confirmed=confirmed)
+
+
+def _emergency_close_confirmed(exchange: Exchange, candidate, size: float) -> OrderResult:
+    """`emergency_close`, but a raised backend error becomes a definitive non-fill result
+    instead of propagating — a naked position must be *recorded*, never crash the pass. The
+    broad catch is deliberate: the sole caller immediately alerts critical on a non-fill, so
+    nothing is masked silently, and any error here means the flatten is unconfirmed."""
+    try:
+        return emergency_close(exchange, candidate, size)
+    except Exception as exc:  # noqa: BLE001 — money-safety net (see docstring)
+        return OrderResult(accepted=False, status="error", message=f"emergency close raised: {exc}")
 
 
 def _emit(alerter: Alerter | None, event: str, **fields) -> None:

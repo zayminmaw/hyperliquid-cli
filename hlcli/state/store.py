@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS trades (
     candidate_id TEXT NOT NULL, coin TEXT NOT NULL, side TEXT NOT NULL,
     entry REAL NOT NULL, sl REAL NOT NULL, tp REAL NOT NULL, size REAL NOT NULL,
     conviction REAL NOT NULL, regime TEXT, opened_at REAL NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',   -- open | won | lost | expired | aborted | closed | scaled
+    status TEXT NOT NULL DEFAULT 'open',   -- open | won | lost | expired | aborted | abort_failed | closed | scaled
     exit_price REAL, realized REAL, r_multiple REAL, closed_at REAL,
     shadow INTEGER NOT NULL DEFAULT 0,     -- 1 = hypothetical (shadow mode); no order behind it
     initial_sl REAL,                       -- the SL at entry; sentry ratchets `sl`, R math stays anchored here

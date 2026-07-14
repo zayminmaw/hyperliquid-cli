@@ -35,12 +35,16 @@ class FakeExchangeClient:
         self.orders = []
         self.canceled = []
 
-    def market_open(self, coin, is_buy, sz):
-        self.orders.append(("market_open", coin, is_buy, sz))
+    def market_open(self, coin, is_buy, sz, cloid=None):
+        self.orders.append(("market_open", coin, is_buy, sz, cloid))
         return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"oid": 9, "totalSz": str(sz), "avgPx": "100"}}]}}}
 
-    def order(self, coin, is_buy, sz, px, order_spec, reduce_only=False):
-        self.orders.append(("order", coin, is_buy, sz, px, order_spec, reduce_only))
+    def market_close(self, coin, sz=None, cloid=None):
+        self.orders.append(("market_close", coin, sz, cloid))
+        return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"oid": 9, "totalSz": str(sz), "avgPx": "100"}}]}}}
+
+    def order(self, coin, is_buy, sz, px, order_spec, reduce_only=False, cloid=None):
+        self.orders.append(("order", coin, is_buy, sz, px, order_spec, reduce_only, cloid))
         return {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": 10}}]}}}
 
     def cancel(self, coin, oid):
@@ -104,7 +108,7 @@ def test_writes_blocked_without_key():
 def test_market_size_is_floored_to_sz_decimals():
     ex = _exchange(with_writes=True)
     ex.place_order(Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=0.123456789))
-    assert ex._exchange.orders[0] == ("market_open", "BTC", True, 0.12345)  # floored, never up
+    assert ex._exchange.orders[0] == ("market_open", "BTC", True, 0.12345, None)  # floored, never up
 
 
 def test_trigger_price_is_rounded_for_the_wire():
@@ -113,7 +117,7 @@ def test_trigger_price_is_rounded_for_the_wire():
         coin="ETH", side=Side.SHORT, order_type=OrderType.STOP_LOSS,
         size=1.00009, trigger_price=1234.5678, reduce_only=True,
     ))
-    kind, coin, is_buy, sz, px, spec, reduce_only = ex._exchange.orders[0]
+    kind, coin, is_buy, sz, px, spec, reduce_only, cloid = ex._exchange.orders[0]
     assert sz == 1.0  # floored at 4 decimals
     assert px == 1234.6 == spec["trigger"]["triggerPx"]  # 5 sig figs
     assert reduce_only is True

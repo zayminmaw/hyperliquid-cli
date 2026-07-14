@@ -78,6 +78,10 @@ class Order(BaseModel):
     price: float | None = None  # None for market orders
     reduce_only: bool = False
     trigger_price: float | None = None  # for stop_loss / take_profit
+    # Client order id ("0x" + 32 hex = 16 bytes) — lets a transport-unknown submit be
+    # resolved against the exchange by client id instead of guessed. Set on the entry
+    # (see executor/execute.py); None elsewhere.
+    cloid: str | None = None
 
 
 class Position(BaseModel):

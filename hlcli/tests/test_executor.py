@@ -2,10 +2,12 @@
 
 import json
 
+import pytest
+
 from hlcli.core.config_schema import RegimeGate, TunableConfig, clamp
 from hlcli.core.types import Candidate, Candle, Order, OrderResult, OrderType, Side
 from hlcli.exchange.paper import PaperExchange
-from hlcli.executor.execute import fire
+from hlcli.executor.execute import entry_cloid, fire
 from hlcli.executor.runner import _coin_context, run_once
 from hlcli.state.store import StateStore
 from hlcli.tests._helpers import FakeMarks, act_now, act_wait, caps, skip_wait, tunable
@@ -72,6 +74,73 @@ def test_clean_reject_releases_idempotency_key(tmp_path):
 
 def _cand_order() -> Order:
     return Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=1.0)
+
+
+# --- D-3: cloid resolves a transport-unknown entry (no orphan, no double-fire) ---
+
+class _CapturingExchange:
+    def __init__(self):
+        self.placed = None
+
+    def place_order(self, order):
+        self.placed = order
+        return OrderResult(accepted=True, status="filled", order_id="1",
+                           filled_size=order.size, avg_price=100.0)
+
+
+def test_fire_stamps_a_deterministic_entry_cloid(tmp_path):
+    _ex, state = _setup(tmp_path)
+    ex = _CapturingExchange()
+    fire(ex, state, _cand("a"), _cand_order(), NOW)
+    assert ex.placed.cloid == entry_cloid("a")
+    assert ex.placed.cloid.startswith("0x") and len(ex.placed.cloid) == 34  # 0x + 16 bytes
+
+
+class _TransportThenStatus:
+    """Entry submit raises (transport-unknown); the status lookup reports what the exchange saw."""
+
+    def __init__(self, status_result):
+        self._status = status_result
+        self.looked_up = None
+
+    def place_order(self, order):
+        raise RuntimeError("connection reset after submit")
+
+    def order_status_by_cloid(self, cloid):
+        self.looked_up = cloid
+        return self._status
+
+
+def test_transport_unknown_entry_that_filled_is_reconciled_and_key_kept(tmp_path):
+    _ex, state = _setup(tmp_path)
+    filled = OrderResult(accepted=True, status="filled", order_id="7", filled_size=1.0, avg_price=100.0)
+    ex = _TransportThenStatus(filled)
+    result = fire(ex, state, _cand("a"), _cand_order(), NOW)
+    assert result.accepted and result.filled_size == 1.0  # the runner will track + protect it
+    assert ex.looked_up == entry_cloid("a")
+    assert state.already_fired("a")  # a real fill must NOT release the key
+
+
+def test_transport_unknown_entry_never_booked_releases_key(tmp_path):
+    _ex, state = _setup(tmp_path)
+    ex = _TransportThenStatus(None)  # the exchange never saw the order
+    result = fire(ex, state, _cand("a"), _cand_order(), NOW)
+    assert not result.accepted and result.status == "unresolved"
+    assert not state.already_fired("a")  # nothing happened → released, free to retry
+
+
+class _TransportNoLookup:
+    def place_order(self, order):
+        raise RuntimeError("connection reset")
+
+
+def test_transport_unknown_without_cloid_lookup_reraises_and_keeps_key(tmp_path):
+    # A backend that can't resolve by cloid falls back to the safe failure: re-raise and
+    # keep the key claimed, so the candidate is never re-fired on an unknown outcome.
+    _ex, state = _setup(tmp_path)
+    with pytest.raises(RuntimeError):
+        fire(_TransportNoLookup(), state, _cand("a"), _cand_order(), NOW)
+    assert state.already_fired("a")
 
 
 def test_dry_run_is_side_effect_free(tmp_path):

@@ -5,6 +5,7 @@ be protected is emergency-closed, never left naked."""
 from hlcli.core.types import Candidate, Network, OrderResult, OrderType, Side
 from hlcli.executor.protect import (
     place_protection,
+    place_reduce_only,
     protective_orders,
     requires_native_protection,
 )
@@ -19,10 +20,13 @@ class FakeLiveExchange:
     """A live-network backend stand-in: fills entries, optionally rejects triggers."""
 
     def __init__(self, network=Network.TESTNET, marks=None, *, fail_triggers=False,
-                 fill_size=None, fill_price=None, positions=None, open_orders=None):
+                 fail_close=False, fill_size=None, fill_price=None, positions=None, open_orders=None):
         self.network = network
         self._marks = marks or {"BTC": 100.0}
         self.fail_triggers = fail_triggers
+        # fail_close: True rejects the emergency market-close; "raise" makes it raise a
+        # backend error (the transport-unknown flatten). Both must yield abort_failed.
+        self.fail_close = fail_close
         self.fill_size = fill_size  # None = fill the whole order
         self.fill_price = fill_price
         self.positions = positions or []
@@ -59,6 +63,11 @@ class FakeLiveExchange:
         )
         if rejected:
             return OrderResult(accepted=False, status="error", message="trigger rejected")
+        is_close = order.order_type is OrderType.MARKET and order.reduce_only
+        if is_close and self.fail_close:
+            if self.fail_close == "raise":
+                raise RuntimeError("emergency close transport error")
+            return OrderResult(accepted=False, status="error", message="close rejected")
         mark = self._marks.get(order.coin)
         price = self.fill_price if self.fill_price is not None else mark
         if is_trigger or order.reduce_only:
@@ -121,6 +130,50 @@ def test_place_protection_fails_fast_on_first_rejection():
     assert len(result.placed) == 1  # stopped at the stop-loss; no half-protection
 
 
+# --- D-2: bounded retry on the reduce-only order-writes ---
+
+def test_place_reduce_only_retries_transient_then_succeeds(monkeypatch):
+    monkeypatch.setattr("hlcli.executor.protect._sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class Flaky:
+        def place_order(self, order):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("429 rate limited")  # transport/rate-limit → retry
+            return OrderResult(accepted=True, status="filled", order_id="9",
+                               filled_size=order.size, avg_price=100.0)
+
+    res = place_reduce_only(Flaky(), protective_orders(_cand(), size=1.0)[0])
+    assert res.accepted and calls["n"] == 3
+
+
+def test_place_reduce_only_does_not_retry_a_definitive_reject(monkeypatch):
+    monkeypatch.setattr("hlcli.executor.protect._sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class Rejecter:
+        def place_order(self, order):
+            calls["n"] += 1
+            return OrderResult(accepted=False, status="error", message="min notional")
+
+    res = place_reduce_only(Rejecter(), protective_orders(_cand(), size=1.0)[0])
+    assert not res.accepted and calls["n"] == 1  # a real 'no' is answered once, never retried
+
+
+def test_place_reduce_only_exhausts_retries_to_a_definitive_non_placement(monkeypatch):
+    monkeypatch.setattr("hlcli.executor.protect._sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class AlwaysDown:
+        def place_order(self, order):
+            calls["n"] += 1
+            raise RuntimeError("connection reset")
+
+    res = place_reduce_only(AlwaysDown(), protective_orders(_cand(), size=1.0)[0])
+    assert not res.accepted and "exhausted retries" in res.message and calls["n"] == 3
+
+
 # --- runner: the hard prerequisite has teeth ---
 
 def test_protected_fire_places_entry_plus_two_triggers(tmp_path):
@@ -181,6 +234,40 @@ def test_unprotectable_entry_is_emergency_closed_not_left_naked(tmp_path):
     assert ex.placed[-1].order_type is OrderType.MARKET and ex.placed[-1].reduce_only
     crit = [e for e in alerter.events if e["event"] == "protection_failed"]
     assert crit and crit[0]["level"] == "critical" and crit[0]["emergency_closed"]
+
+
+def test_unconfirmed_emergency_close_is_abort_failed_not_aborted(tmp_path):
+    # Protection fails AND the emergency close is rejected → the position may still be live
+    # and unprotected. The ledger must NOT claim a clean abort, and a human must be paged.
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, fail_triggers=True, fail_close=True)
+    state.enqueue(_cand())
+    alerter = CapturingAlerter()
+    s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
+
+    assert s.failed == 1
+    resolved = state.resolved_trades()
+    assert len(resolved) == 1 and resolved[0]["status"] == "abort_failed"
+    assert state.open_trades() == []
+    events = {e["event"]: e for e in alerter.events}
+    assert events["protection_failed"]["emergency_closed"] is False
+    assert "emergency_close_failed" in events and events["emergency_close_failed"]["level"] == "critical"
+
+
+def test_emergency_close_that_raises_is_recorded_not_propagated(tmp_path, monkeypatch):
+    # A backend error during the flatten must not crash the pass — it's caught (after the
+    # bounded retry), recorded as abort_failed, and alerted, so the naked position is
+    # surfaced rather than lost.
+    monkeypatch.setattr("hlcli.executor.protect._sleep", lambda *_: None)  # no real backoff wait
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, fail_triggers=True, fail_close="raise")
+    state.enqueue(_cand())
+    alerter = CapturingAlerter()
+    s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)  # must not raise
+
+    assert s.failed == 1
+    assert state.resolved_trades()[0]["status"] == "abort_failed"
+    assert any(e["event"] == "emergency_close_failed" for e in alerter.events)
 
 
 def test_partial_protection_cancels_the_placed_trigger_on_abort(tmp_path):
