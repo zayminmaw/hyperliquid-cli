@@ -10,10 +10,13 @@ from __future__ import annotations
 from rich.console import Console
 
 from hlcli._lazy import MissingDependencyError
+from hlcli.accounts.keystore import KeystoreError
 from hlcli.core.config_schema import ConfigError
 from hlcli.core.network import MainnetGateError
 
-DOMAIN_ERRORS = (MainnetGateError, MissingDependencyError, ConfigError, NotImplementedError)
+# KeystoreError covers routine operator conditions ("key is encrypted — set
+# HL_KEYSTORE_PASSPHRASE", wrong passphrase) that deserve a one-liner, not a traceback.
+DOMAIN_ERRORS = (MainnetGateError, MissingDependencyError, ConfigError, KeystoreError)
 
 _stderr = Console(stderr=True)
 

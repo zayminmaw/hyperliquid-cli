@@ -112,3 +112,30 @@ def test_journal_write_show_ls_paper(isolated_caps):
 
     listed = runner.invoke(app, ["--json", "journal", "ls"])
     assert json.loads(listed.output)["days"] == [day]
+
+
+def test_exec_shadow_wires_the_reconciliation_alerter(isolated_caps, monkeypatch):
+    # O-2: shadow is exactly where unmanaged-position drift must not be silent — the
+    # CLI has to hand run_once an alerter or the runner-level check is skipped.
+    import hlcli.cli.commands.exec_ as exec_cmd
+
+    seen = {}
+    real = exec_cmd.run_once
+
+    def spy(*args, **kw):
+        seen.update(kw)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(exec_cmd, "run_once", spy)
+    result = runner.invoke(app, ["exec", "shadow"])
+    assert result.exit_code == 0
+    assert seen.get("alerter") is not None
+
+
+def test_keystore_error_is_a_domain_error():
+    # "key is encrypted — set HL_KEYSTORE_PASSPHRASE" is a routine operator condition:
+    # it must render as a one-line CLI error, never a traceback.
+    from hlcli.accounts.keystore import KeystoreError
+    from hlcli.cli.errors import DOMAIN_ERRORS
+
+    assert KeystoreError in DOMAIN_ERRORS

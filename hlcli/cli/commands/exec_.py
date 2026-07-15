@@ -75,7 +75,10 @@ def shadow(ctx: typer.Context) -> None:
     """Decide + gate + log a full pass but fire nothing (pre-mainnet confidence + tuner data)."""
     g = state_of(ctx)
     exchange, state, caps, tunable = open_env(g, for_write=False)
-    summary = run_once(exchange, state, caps, tunable, fire_enabled=False, dry_run=g.dry_run)
+    # Alerted like every other pass (O-2): shadow is exactly where the unmanaged-position
+    # reconciliation must not be silent — it's the long-running pre-mainnet mode.
+    summary = run_once(exchange, state, caps, tunable, fire_enabled=False, dry_run=g.dry_run,
+                       alerter=network_alerter(caps, g.network))
     emit(summary.model_dump(), as_json=g.json_out, title="exec shadow")
 
 

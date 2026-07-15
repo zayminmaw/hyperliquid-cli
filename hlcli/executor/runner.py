@@ -142,7 +142,7 @@ def run_once(
     # drop out of the unmanaged alert; stopless ones remain and keep paging.
     if not dry_run:
         if caps.reconcile_action == "adopt" and fire_enabled:
-            adopt_unmanaged(exchange, state, alerter=alerter, now=now)
+            adopt_unmanaged(exchange, state, positions=positions, alerter=alerter, now=now)
         if alerter is not None:
             _alert_unmanaged(state, alerter, positions)
 
@@ -550,8 +550,11 @@ _UNMANAGED_ALERT_KEY = "alert_unmanaged_last"
 def _alert_unmanaged(state: StateStore, alerter: Alerter, positions: list[Position]) -> None:
     """Alert (on change) when the exchange holds a position the ledger doesn't know —
     e.g. a crash between fill and ledger write, or a manual trade on the executor's
-    account. The resolver won't manage it, so a human has to."""
-    ledger_coins = {t["coin"] for t in state.open_trades()}
+    account. The resolver won't manage it, so a human has to.
+
+    Only *real* ledger rows count as managed: a shadow (hypothetical) trade on the
+    same coin claims nothing on the exchange and must not mask a live orphan."""
+    ledger_coins = {t["coin"] for t in state.open_trades(shadow=False)}
     unmanaged = sorted(p.coin for p in positions if p.coin not in ledger_coins)
     fingerprint = ",".join(unmanaged)
     if fingerprint != (state.meta_get(_UNMANAGED_ALERT_KEY) or ""):

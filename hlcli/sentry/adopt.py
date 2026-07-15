@@ -39,13 +39,18 @@ def adopt_unmanaged(
     exchange: Exchange,
     state: StateStore,
     *,
+    positions: list[Position] | None = None,
     alerter: Alerter | None = None,
     now: float | None = None,
 ) -> AdoptSummary:
+    """Callers that already hold this pass's positions pass them in; standalone
+    callers (the `sentry adopt` command) let it fetch."""
     now = time.time() if now is None else now
     summary = AdoptSummary()
     known = {t["coin"] for t in state.open_trades(shadow=False)}
-    orphans = [p for p in exchange.get_positions() if p.coin not in known]
+    if positions is None:
+        positions = exchange.get_positions()
+    orphans = [p for p in positions if p.coin not in known]
     if not orphans:
         return summary
 

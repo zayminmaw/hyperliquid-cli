@@ -63,7 +63,7 @@ class FakeMeta:
 
 
 def _exchange(with_writes: bool = False) -> HyperliquidExchange:
-    ex = HyperliquidExchange(Network.TESTNET, account_address="0xabc")
+    ex = HyperliquidExchange(Network.TESTNET, account_address="0xabc", max_entry_slippage_pct=0.3)
     ex._info = FakeInfo()  # bypass the lazy SDK client
     ex._marks.sz_decimals = FakeMeta().sz_decimals
     if with_writes:
@@ -108,7 +108,7 @@ def test_writes_blocked_without_key():
 def test_market_size_is_floored_to_sz_decimals():
     ex = _exchange(with_writes=True)
     ex.place_order(Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=0.123456789))
-    # floored size, never up; entry slippage capped at the default 0.3% (not the SDK's 5%)
+    # floored size, never up; entry slippage capped at the caps value (not the SDK's 5%)
     assert ex._exchange.orders[0] == ("market_open", "BTC", True, 0.12345, 0.003, None)
 
 
@@ -145,3 +145,56 @@ def test_unknown_coin_passes_through_unrounded():
     ex = _exchange(with_writes=True)
     ex.place_order(Order(coin="DOGE", side=Side.LONG, order_type=OrderType.MARKET, size=0.123456789))
     assert ex._exchange.orders[0][3] == 0.123456789  # exchange's own reject is clearer
+
+
+# --- order_status_by_cloid: the transport-unknown recovery parser (D-3) ---
+# Fixture shapes follow the documented orderStatus response; the testnet drill
+# confirms the live shape, these lock the parse logic.
+
+_CLOID = "0x" + "ab" * 16
+
+
+def _status_exchange(response) -> HyperliquidExchange:
+    ex = _exchange()
+
+    class FakeStatusInfo(FakeInfo):
+        def query_order_by_cloid(self, address, cloid):
+            return response
+
+    ex._info = FakeStatusInfo()
+    return ex
+
+
+def _order_status(status: str, *, orig="1.0", remaining="0.0"):
+    return {"status": "order", "order": {
+        "status": status,
+        "order": {"oid": 77, "coin": "BTC", "limitPx": "100.3", "origSz": orig, "sz": remaining},
+    }}
+
+
+def test_status_by_cloid_filled():
+    r = _status_exchange(_order_status("filled")).order_status_by_cloid(_CLOID)
+    assert r.accepted and r.status == "filled" and r.order_id == "77"
+    assert r.filled_size == 1.0 and r.avg_price == 100.3
+
+
+def test_status_by_cloid_resting():
+    r = _status_exchange(_order_status("open", remaining="1.0")).order_status_by_cloid(_CLOID)
+    assert r.accepted and r.status == "resting" and r.filled_size == 0.0
+
+
+def test_status_by_cloid_canceled_zero_fill_is_not_on_book():
+    r = _status_exchange(_order_status("canceled", remaining="1.0")).order_status_by_cloid(_CLOID)
+    assert r is None
+
+
+def test_status_by_cloid_canceled_partial_fill_is_a_fill():
+    # An IOC that filled 0.6 before the remainder canceled left a REAL position —
+    # it must never read as "never on the book" (that would release the fire key).
+    r = _status_exchange(_order_status("canceled", orig="1.0", remaining="0.4")).order_status_by_cloid(_CLOID)
+    assert r.accepted and r.status == "filled" and r.filled_size == 0.6
+
+
+def test_status_by_cloid_unknown_oid_is_none():
+    assert _status_exchange({"status": "unknownOid"}).order_status_by_cloid(_CLOID) is None
+    assert _status_exchange("garbage").order_status_by_cloid(_CLOID) is None

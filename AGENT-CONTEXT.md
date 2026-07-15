@@ -1,21 +1,26 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-14 | Session: evidence audit → phased improvement plan → Phase 1 (safety) + Phase 2 (constrain LLM) — 456 tests pass
+> Last updated: 2026-07-15 | Session: fresh-eyes review of 074e58b..HEAD (static + e2e flows) → all findings fixed + docs synced — 481 tests pass
 
 ---
 
 ## 🎯 CURRENT TASK
 
-- Task: Execute the 2026-07 audit improvement plan (docs/audits/2026-07-hl-cli-evidence-audit/; approved plan at ~/.claude/plans/lazy-crunching-pumpkin.md)
-- Goal: ALL SIX PHASES ✅ — P1 safety (ac25150), P2 constrain-LLM (a32398c), P3 exec quality (f31675a), P4 ops + P5/6 process docs (this commit)
-- Status: improvement plan code-complete, 467 tests pass, paper-smoked
-- Next action: OPERATIONAL — fund a testnet agent wallet, run the Phase-1 testnet drill (forced protection-failure; confirm the orderStatus-by-cloid parse), then `hl agent run` on paper/shadow to accumulate graduation evidence and the LLM-vs-rule A/B (see docs/evidence-gate.md)
-- Blocked by: none (Phase-1 testnet drill — forced protection-failure + orderStatus-parse confirm — waits on a funded testnet agent wallet; also gates 7d's live check)
+- Task: 2026-07 audit improvement plan + 2026-07-15 review fixes (ACTION-ITEMS.md "Maintenance" section) — both code-complete
+- Goal: audit phases 1–6 ✅ (ac25150→ece484d) + all fresh-eyes review findings fixed (uncommitted working tree)
+- Status: 481 tests pass, paper-smoked; review fixes NOT yet committed
+- Next action: commit the review-fix working tree, then OPERATIONAL — fund a testnet agent wallet, run the Phase-1 testnet drill (forced protection-failure; confirm the orderStatus-by-cloid live shape — parse logic is now fixture-locked incl. partial-cancel), then `hl agent run` on paper/shadow for graduation evidence + the LLM-vs-rule A/B (docs/evidence-gate.md)
+- Blocked by: none (testnet drill waits on a funded testnet agent wallet; also gates 7d's live check)
 
 ---
 
 ## 📍 LAST ACTION
 
+- Did: **Fresh-eyes review of 074e58b..HEAD** (2 phases: static + end-to-end flows), then fixed every confirmed finding + synced docs (ACTION-ITEMS.md R.1–R.6). Headline fixes: `exec shadow` was dropping the O-2 alerter (reconciliation silently skipped through that CLI path); shadow ledger rows masked real unmanaged positions (`_alert_unmanaged` now `shadow=False`); a canceled-partial-fill IOC in cloid recovery read as "never booked" (key released, live position untracked) — now returns the partial as a fill, parser fixture-locked; graduation/`conviction_calibration` no longer graded by `aborted`/`abort_failed`/adopted rows (`assess` surfaces an `aborts` count); decision prompt's conviction section made truthful for calibration mode (flat sizing kept — deliberate L-1 default, prompt was the bug); injection heuristics de-noised ("price action:" / "should act as support" no longer page); `KeystoreError` → `DOMAIN_ERRORS` (replacing never-raised `NotImplementedError`); slippage default single-sourced (exchange ctor param required); `adopt_unmanaged` reuses pass positions; `trade order market` help documents the shared IOC cap.
+- Result: 481 pass (14 new). Smoked: `exec shadow` e2e on paper, market help, injection probes. **Working tree uncommitted.**
+- File(s) touched: executor/{decision,runner,execute,protect,intake}.py, exchange/hyperliquid.py, sentry/{adopt,decision}.py, tuner/stats.py, safety/graduation.py, cli/errors.py, cli/commands/{exec_,trade}.py, tests/{test_executor,test_protect,test_intake,test_tuner,test_graduation,test_cli,test_hyperliquid_reads}.py, .env.example, CLAUDE.md, docs/evidence-gate.md, ACTION-ITEMS.md
+
+### Prior session (audit phases 1–6)
 - Did: (1) **Evidence audit** of every money-touching component vs external research + current HL docs → `docs/audits/2026-07-hl-cli-evidence-audit/` (Inventory/Evidence/Verdicts/Improvement-Plan; committed a3051a1). Headline: state DBs are EMPTY (tool has never traded in any mode); two DANGEROUS defects. (2) **Phase 1 safety** (committed ac25150): D-1 emergency close must be *confirmed* (accepted+filled) or the row resolves `abort_failed` (no fabricated P&L) + critical `emergency_close_failed` alert — raised backend errors caught, never crash the pass; D-2 `place_reduce_only` retries transport/429 with bounded backoff on the reduce-only paths only (protection + emergency close); D-3 entries carry a deterministic `cloid` (`entry_cloid` = sha256(candidate_id)[:16]) and a transport-unknown submit resolves via `order_status_by_cloid` — fill → tracked+protected, never-booked → key released, no lookup → re-raise + key kept. (3) **Phase 2 constrain-LLM**: L-1 conviction→size scaling OFF by default (`ConvictionSizing.enabled=False` ⇒ fraction 1.0, pure fixed-fractional; conviction logged for calibration); L-2 `HL_DECISION_SOURCE=llm|rule` hard cap + `decide_rule` baseline (act on every gate-valid setup, no LLM/key) resolved inside `run_once` via `decider_for(caps)`; L-3 `sentry_max_adds_per_position` default 2→0 (ADD disabled until graduation); L-4 `conviction_calibration()` in tuner/stats surfaced in `exec report` (excludes scaled/aborted/abort_failed); L-5 `injection_flags()` in intake — advisory screen on reasoning/news, warning alert + `thesis_flags` in decision-log context, never auto-rejects.
 - Then: **Phase 3 exec quality**: X-1 entries are slippage-capped IOC limits — `HL_MAX_ENTRY_SLIPPAGE_PCT` (default 0.3%) plumbed Caps→factory→`HyperliquidExchange`, passed as `slippage=` to SDK `market_open` (the SDK applies it to mid + wire-rounds; its own default is 5%); reduce-only closes stay wide on purpose — a flatten must fill. X-2 gate rejects notional < `HL_MIN_ORDER_NOTIONAL` ($10, verified vs HL error docs) before the exchange can. X-3 decision prompt: WAIT = "not yet valid at the mark", never fishing a better fill (entry always fills at the mark). X-4 verified both backends' equity is mark-to-market (paper = start+realized+unrealized; live = accountValue) ⇒ unrealized drawdown alone trips the daily-loss breaker — locked with a test + breaker docstring.
 - Then: **Phase 4 ops + P5/6 docs**: O-1 keystore encrypt-at-rest — `HL_KEYSTORE_PASSPHRASE` (env, kept off Caps like the API key) ⇒ `hl account add` writes eth_account V3 keystore JSON (scrypt+AES, lazy eth_account); format detected per file so plaintext keys keep loading; perms + refuse-if-readable unchanged. O-2 reconciliation — the unmanaged-position alert now runs on EVERY non-dry pass (shadow included); `HL_RECONCILE_ACTION=alert|adopt` — adopt reuses `sentry/adopt` (stop-protected only, fire-enabled passes only; flatten stays manual, it could kill a deliberate manual position). P5/6: `docs/evidence-gate.md` (7-point order-path checklist + validation ladder + per-class success metrics) referenced from a new binding CLAUDE.md section. Also: `thesis_flags` added to test_keys' context allowlist (Phase-2 field the allowlist test would have flagged on first real flag).
@@ -24,11 +29,6 @@
 
 ### Prior session (hl repl)
 - Built `hl repl` (typer `get_command` dispatch under `standalone_mode=False`, session flags, live-PnL header, watch, readline) + fresh-eyes fixes: exit-code returns consumed, `open_env` store-leak fixed, mainnet re-arms typed confirm, unified `_NET_STYLE`/error rendering, typed `PositionRow`. 436 pass. Files: cli/{repl,errors,context,app}.py, __main__.py, tests/test_repl.py.
-
-### Prior session
-- Did: fixed all fresh-eyes review findings on 154ee47..HEAD. Big ones: (1) native SL/TP triggers now carry per-row oids (`trades.sl_oid/tp_oid`), so a post-ADD coin's sibling slice keeps its protection — every cancel is slice-scoped (`cancel_trade_triggers`), coin-wide sweep only when no open row remains; (2) `shadow_pass` now throttled by eval spacing + `sentry_max_llm_calls_per_day`; (3) ADD budget is per-position (counts since the coin's current position opened) + idempotency key is trade-id-scoped with an alert on crash-replay skip; (4) CLOSE bypasses churn caps + halted; (5) journal excludes `scaled` children from opened tally + graduation excludes them from `n`; (6) adopt anchors R at the loss-side extreme, not abs-distance; records the anchor stop's oid. Plus: atomic `record_fire` claim (kills exec/sentry double-fire race), deferred re-check drops already-fired, first-class `outcome` in decision log, tuner stage isolated in daily job, journal defers narrative for an incomplete day, `prior_actions` excludes holds, supervisor stamps LAST_TICK on failing ticks. New shared modules `executor/rmath.py` + `core/backoff.py`; centralized `alerts_path`, `DECISION_INTERVAL`, `require_exclusive_modes`.
-- Result: 408 pass (12 new). CLI smoke + legacy-DB migration verified.
-- File(s) touched: state/store.py, executor/{rmath(new),protect,resolve,execute,runner,regime}.py, sentry/{apply,gate,live,shadow,context,adopt,engine}.py, journal/{digest,writer,narrative}.py, agent/{daily,supervisor}.py, safety/{alerts,graduation}.py, core/{backoff(new),config}.py, cli/commands/{exec_,sentry,agent,journal}.py, tests/*
 
 ---
 
@@ -71,7 +71,7 @@
 ## 🧠 DECISIONS
 
 - [2026-06-27] LLM owns judgment, code owns mechanics + safety (full statement lives in CLAUDE.md); hard caps in .env; tunable surface clamped on load; anthropic + exchange deps lazy; sonnet-4-6 order path / opus-4-8 tuner; idempotency key recorded BEFORE fire
-- [2026-07-01] wait→follow-up: act+wait DEFERRED not rejected; re-check inside freshness, `HL_FOLLOWUP_MAX_ATTEMPTS`; frozen while breaker tripped; re-checks labeled via `followup` in context
+- [2026-07-15] Review-pass rulings: L-1's min-conviction floor removal is DELIBERATE (fixed the prompt, not the gate — flat sizing stands until calibration); Mode A market orders share the slippage cap on purpose (it's a hard cap); only strategy outcomes grade graduation/calibration (aborts surfaced separately, adopted rows excluded)
 - [2026-07-02] Non-finite numbers NEVER clamp: NaN slides through min/max as the UPPER bound, so conviction/recheck are dropped and tunables fall back to defaults (`math.isfinite` everywhere a clamp guards money)
 - [2026-07-02] Gate mark-sanity: the entry is a MARKET order ⇒ mark must exist, sit strictly inside sl/tp, and R:R **at the mark** must clear the floor; sizing + notional/leverage caps priced at the mark, not the proposed entry
 - [2026-07-02] Ledger-first fills: trades row written on fill BEFORE protection; failed protection ⇒ emergency close + cancel placed triggers + row resolved `aborted` (was: no ledger). Positions the ledger doesn't know raise an edge-triggered `unmanaged_position` alert
@@ -98,7 +98,8 @@
 - `resolved_trades(limit=N)` = most recent N (newest-closed first) — don't assume oldest-first.
 - FakeLiveExchange (test_protect) models positions/open_orders/canceled; `fail_triggers="tp"` = partial-protection case; `fail_close=True|"raise"` = the abort_failed cases. `protect._sleep` is monkeypatched in retry tests — keep it a module attribute.
 - Add tests opt IN to a budget (`_add_caps`/`sentry_max_adds_per_position=2`) — the default is 0. Gate conviction tests opt IN to scaling (`_scaling_on()`) — the default is flat 1.0. Don't "fix" a failing new test by flipping the production default back.
-- `order_status_by_cloid`'s orderStatus parse is best-effort — confirm the response shape on the first testnet drill before trusting the transport-unknown recovery path on mainnet.
+- `order_status_by_cloid`'s parse *logic* is fixture-locked (filled/resting/canceled/partial-cancel ⇒ fill for origSz−sz) — but the LIVE response shape still needs the first testnet drill before trusting the recovery path on mainnet. A resting recovered entry gets canceled by `_resolve_unknown`, never left live-untracked.
+- Evidence hygiene (2026-07-15): `assess` + `conviction_calibration` exclude aborted/abort_failed/adopted rows; `_alert_unmanaged` counts only REAL rows (`shadow=False`). Don't "simplify" the filters away — CLAUDE.md's evidence-gate section is binding.
 - Native SL/TP cancels are now BY OID (`trades.sl_oid/tp_oid`): use `cancel_trade_triggers` for one row; `cancel_coin_triggers` is the last-row-only sweep — never call it while a sibling slice is open. Legacy/oid-less rows fall back to the type-match cancel (safe: they have no sibling). Entry path + adopt + `apply_add` all record oids.
 - `record_fire` now returns bool (atomic claim). `fire()` and the sentry apply helpers claim-then-act; don't reintroduce a separate `already_fired` check before it.
 - Graduation counts positions, not partials (`assess` drops `status='scaled'`); the tuner's `summary`/cohorts still COUNT scaled (banked profit is a real outcome). Don't unify them.

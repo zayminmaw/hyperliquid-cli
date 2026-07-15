@@ -152,6 +152,7 @@ class _TransportThenStatus:
     def __init__(self, status_result):
         self._status = status_result
         self.looked_up = None
+        self.canceled = []
 
     def place_order(self, order):
         raise RuntimeError("connection reset after submit")
@@ -159,6 +160,10 @@ class _TransportThenStatus:
     def order_status_by_cloid(self, cloid):
         self.looked_up = cloid
         return self._status
+
+    def cancel(self, coin, oid):
+        self.canceled.append((coin, oid))
+        return OrderResult(accepted=True, status="canceled")
 
 
 def test_transport_unknown_entry_that_filled_is_reconciled_and_key_kept(tmp_path):
@@ -177,6 +182,19 @@ def test_transport_unknown_entry_never_booked_releases_key(tmp_path):
     result = fire(ex, state, _cand("a"), _cand_order(), NOW)
     assert not result.accepted and result.status == "unresolved"
     assert not state.already_fired("a")  # nothing happened → released, free to retry
+
+
+def test_transport_unknown_resting_entry_is_canceled_and_key_released(tmp_path):
+    # An IOC entry must not rest. If the recovery lookup finds one resting anyway, it is
+    # canceled — never left live and untracked on the book — and the fire reads as a
+    # clean non-placement so the key releases.
+    _ex, state = _setup(tmp_path)
+    resting = OrderResult(accepted=True, status="resting", order_id="9", filled_size=0.0)
+    ex = _TransportThenStatus(resting)
+    result = fire(ex, state, _cand("a"), _cand_order(), NOW)
+    assert not result.accepted and result.status == "unresolved"
+    assert ex.canceled == [("BTC", 9)]
+    assert not state.already_fired("a")
 
 
 class _TransportNoLookup:

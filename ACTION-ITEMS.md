@@ -184,3 +184,18 @@ Standalone UX addition, outside PLAN.md's phase list — a shell over the existi
 - [x] REPL.4 Mainnet safety: entering mainnet (via `use mainnet` or a launch-time `-y`) clears any session-wide `yes` and re-arms the typed confirmation (`_guard_mainnet_yes`) — a carried-over `-y` can't silently skip the last human check; re-enable deliberately with `set yes on` while on mainnet.
 
 ✅ `hl repl` complete + fresh-eyes hardened — 436 tests pass (28 new). Smoke-verified on paper: header + colour prompt, meta-commands, `<group> --help` dispatch, non-zero-exit surfacing, `use mainnet` re-arming the confirmation, bad-command recovery, clean exit.
+
+---
+
+## Maintenance — 2026-07-15 fresh-eyes review (074e58b..HEAD) + fixes
+
+Two-phase senior review (static + end-to-end flow) of the repl/prompt/audit-phase commits; all confirmed findings fixed same session. 481 tests pass (14 new).
+
+- [x] R.1 Reconciliation actually alerts everywhere: `exec shadow` now passes `network_alerter` into `run_once` (the O-2 unmanaged-position check was silently skipped through that CLI path — the runner-level test had masked the wiring gap); `_alert_unmanaged` counts only REAL ledger rows (`open_trades(shadow=False)`) so an open shadow trade can't mask a live orphan on the same coin. CLI-level + shadow-masking tests added.
+- [x] R.2 Evidence hygiene: graduation `assess` excludes `aborted`/`abort_failed` (mechanical rig failures — surfaced separately as an `aborts` count) and adopted rows (no LLM verdict); `conviction_calibration` excludes adopted rows and no longer reads a missing `r_multiple` as 0R (avg_r over present Rs, else null).
+- [x] R.3 Transport-unknown recovery hardened: `order_status_by_cloid` returns a canceled-with-partial-fill IOC as a fill for `origSz − sz` (was "never on the book" ⇒ key released with a live position behind it); parser locked with fixture tests (filled / resting / canceled / partial / unknownOid); `_resolve_unknown` cancels a resting recovered entry rather than leaving it live and untracked. Live shape still confirmed on the testnet drill.
+- [x] R.4 Prompt truth: decision prompt's conviction section now matches calibration mode (scaling off ⇒ every act fires full size; never use low conviction as a soft skip) — the deliberate flat-sizing default is unchanged; sentry prompt notes adds can be administratively disabled (budget 0).
+- [x] R.5 Injection heuristics de-noised: schema-tamper needs a schema-shaped value ("action: act", "conviction: 0.9"), "act as" only in the imperative, bare "always" dropped — "price action: …" / "should act as support" no longer page; probes locked as negative tests.
+- [x] R.6 Cleanups: `KeystoreError` is a clean one-line domain error (replaces never-raised `NotImplementedError` in `DOMAIN_ERRORS`); slippage-cap value single-sourced on Caps (`HyperliquidExchange` ctor param now required); `adopt_unmanaged` reuses the pass's positions (no second fetch); `trade order market --help` documents the IOC slippage cap (Mode A shares it deliberately — it is a hard cap); docs synced (.env.example, CLAUDE.md, docs/evidence-gate.md).
+
+✅ Review pass complete — 481 tests pass. Smoke-verified: `exec shadow` end-to-end on paper, market-order help, injection probes, domain-error tuple.

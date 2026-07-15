@@ -356,3 +356,30 @@ def test_paper_fire_skips_native_protection(tmp_path):
     state.enqueue(_cand())
     s = run_once(ex, state, caps(), tunable(), decide_fn=act_now, now=NOW)
     assert s.fired == 1 and len(state.open_trades()) == 1
+
+
+def test_shadow_row_does_not_mask_a_real_unmanaged_position(tmp_path):
+    # A shadow (hypothetical) trade claims nothing on the exchange — a real orphan on
+    # the same coin must still page. Only real ledger rows count as "managed".
+    state = StateStore(tmp_path / "state.db")
+    state.open_trade("shadow:BTC", "BTC", Side.LONG, 100.0, 90.0, 120.0, 1.0, 0.7, None, NOW,
+                     shadow=True)
+    position, _ = _unmanaged_long()
+    ex = FakeLiveExchange(Network.TESTNET, positions=[position])
+    alerter = CapturingAlerter()
+    run_once(ex, state, caps(), tunable(), fire_enabled=False, alerter=alerter, now=NOW)
+    assert any(e["event"] == "unmanaged_position" and e["coins"] == ["BTC"]
+               for e in alerter.events)
+
+
+def test_sentry_shaped_pass_reconciles_too(tmp_path):
+    # `hl sentry once|run` = run_once(include_intake=False): adopt + alert must behave
+    # exactly as on an exec-shaped pass.
+    state = StateStore(tmp_path / "state.db")
+    position, stop = _unmanaged_long()
+    ex = FakeLiveExchange(Network.TESTNET, positions=[position], open_orders=[stop])
+    alerter = CapturingAlerter()
+    run_once(ex, state, caps(reconcile_action="adopt"), tunable(), include_intake=False,
+             alerter=alerter, now=NOW)
+    assert state.open_trades()[0]["adopted"] == 1
+    assert any(e["event"] == "position_adopted" for e in alerter.events)

@@ -80,6 +80,9 @@ def market(
     size: float = typer.Argument(...),
     reduce_only: bool = typer.Option(False, "--reduce-only"),
 ) -> None:
+    """Market order. Live non-reduce-only orders fill as IOC limits capped at
+    HL_MAX_ENTRY_SLIPPAGE_PCT vs mid — a worse fill is refused, not taken (the
+    result shows what filled). --reduce-only closes stay uncapped: a flatten must fill."""
     _submit(state_of(ctx), Order(
         coin=coin.upper(), side=side, order_type=OrderType.MARKET,
         size=size, reduce_only=reduce_only,

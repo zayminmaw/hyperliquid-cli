@@ -42,14 +42,13 @@ def place_reduce_only(exchange: Exchange, order: Order) -> OrderResult:
     definitive non-placement (`accepted=False`) so the caller flattens/aborts instead of
     crashing the pass. A definitive reject (the backend answered "no") is returned
     immediately and never retried."""
-    last = "no attempt"
-    for failures in range(_RETRY_ATTEMPTS):
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
         try:
             return exchange.place_order(order)  # OrderResult (incl. a real reject) → done
         except Exception as exc:  # noqa: BLE001 — transport/rate-limit; reduce-only is safe to retry
             last = str(exc)
-            if failures < _RETRY_ATTEMPTS - 1:
-                _sleep(backoff_delay(_RETRY_BASE, failures + 1, _RETRY_MAX))
+            if attempt < _RETRY_ATTEMPTS:
+                _sleep(backoff_delay(_RETRY_BASE, attempt, _RETRY_MAX))
     return OrderResult(accepted=False, status="error", message=f"exhausted retries: {last}")
 
 

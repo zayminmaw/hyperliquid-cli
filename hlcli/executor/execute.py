@@ -59,4 +59,13 @@ def _resolve_unknown(exchange: Exchange, order: Order, exc: Exception) -> OrderR
     status = lookup(order.cloid)  # a raise here propagates — keeping the key is the safe failure
     if status is None:
         return OrderResult(accepted=False, status="unresolved", message=f"submit failed, not on book: {exc}")
+    if status.status == "resting":
+        # An IOC entry must not rest — don't leave a surprise order live on the book.
+        # Cancel it (a raise here propagates → key kept), then report a clean
+        # non-placement so the caller releases the key.
+        if status.order_id is None:
+            raise exc
+        exchange.cancel(order.coin, int(status.order_id))
+        return OrderResult(accepted=False, status="unresolved",
+                           message=f"resting entry canceled after transport error: {exc}")
     return status

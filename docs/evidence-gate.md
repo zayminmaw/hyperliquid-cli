@@ -34,7 +34,10 @@ A feature that can't answer all seven does not go in front of real money. Paste 
    the `orderStatus`-by-cloid response parse.)
 5. **Graduation** — mainnet opens only after `exec report`'s graduation gate passes on
    shadow/testnet data (≥ `HL_GRADUATION_MIN_TRADES` resolved over ≥ `HL_GRADUATION_MIN_DAYS`,
-   `avg_r` > `HL_GRADUATION_MIN_EXPECTANCY`) — and then at the smallest caps.
+   `avg_r` > `HL_GRADUATION_MIN_EXPECTANCY`) — and then at the smallest caps. Only genuine
+   strategy outcomes grade: `scaled` partials, `aborted`/`abort_failed` (mechanical protection
+   failures, surfaced separately as `aborts`), and adopted rows (no LLM verdict) are excluded
+   from `n` and expectancy. A nonzero `aborts` count is itself a reason not to promote.
 
 ## Success metrics per change class (minimum sample before mainnet)
 

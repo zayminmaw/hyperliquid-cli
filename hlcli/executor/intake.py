@@ -34,10 +34,20 @@ _ALIASES = {"pair": "coin", "reason": "reasoning"}
 _INJECTION_PATTERNS = (
     ("ignore-instructions", re.compile(
         r"\b(ignore|disregard|forget)\b.{0,40}\b(instruction|rule|prompt|guideline|boundar)", re.I | re.S)),
-    ("role-override", re.compile(r"\b(you are now|act as|new persona|system prompt|jailbreak)\b", re.I)),
+    # "act as" only in the imperative — honest theses say "should/will/could act as support".
+    ("role-override", re.compile(
+        r"\b(you are now|new persona|system prompt|jailbreak)\b"
+        r"|(?<!should )(?<!would )(?<!will )(?<!may )(?<!might )(?<!could )(?<!can )(?<!to )\bact as\b",
+        re.I)),
+    # Commands aimed at the model ("you must … act"). Bare "always" is deliberately NOT a
+    # trigger — honest theses say things like "buyers always act at this level".
     ("verdict-coercion", re.compile(
-        r"\b(you must|always|are required to)\b.{0,30}\b(act|buy|sell|approve|execute|answer)\b", re.I | re.S)),
-    ("schema-tamper", re.compile(r"\b(conviction|action|timing)\s*[:=]\s*\S", re.I)),
+        r"\b(you must|you are required to|you have to)\b.{0,30}\b(act|buy|sell|approve|execute|answer)\b",
+        re.I | re.S)),
+    # Only a schema field assigned a *schema-shaped* value ("action: act", "conviction: 0.9").
+    # A bare "<field>:" is everyday trading prose ("price action: bullish", "timing: …").
+    ("schema-tamper", re.compile(
+        r"\b(conviction\s*[:=]\s*[01]?\.\d|action\s*[:=]\s*(act|skip)\b|timing\s*[:=]\s*(now|wait)\b)", re.I)),
 )
 
 

@@ -249,3 +249,23 @@ def test_conviction_calibration_empty_book_is_empty():
     from hlcli.tuner.stats import conviction_calibration
 
     assert conviction_calibration([]) == []
+
+
+def test_conviction_calibration_skips_adopted_and_missing_r():
+    from hlcli.tuner.stats import conviction_calibration
+
+    def t(conv, status, r, **kw):
+        return {"conviction": conv, "status": status, "r_multiple": r,
+                "realized": (r or 0.0) * 10, **kw}
+
+    rows = [
+        t(0.9, "won", 2.0),
+        t(0.8, "closed", None),         # counted in n/win_rate, but never as a 0R in avg_r
+        t(0.0, "won", 3.0, adopted=1),  # adopted: no LLM verdict behind it — excluded entirely
+    ]
+    cal = conviction_calibration(rows)
+    assert [c["bucket"] for c in cal] == ["high"]  # the adopted row opened no low bucket
+    assert cal[0]["n"] == 2 and cal[0]["avg_r"] == 2.0  # missing R didn't drag avg_r down
+
+    only_missing = conviction_calibration([t(0.9, "closed", None)])
+    assert only_missing[0]["avg_r"] is None  # no R evidence reads as none, not as flat

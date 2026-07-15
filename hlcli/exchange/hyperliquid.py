@@ -29,7 +29,8 @@ class HyperliquidExchange:
         account_address: str,
         agent_key: str | None = None,
         marks: MarksFeed | None = None,
-        max_entry_slippage_pct: float = 0.3,
+        # No default: the value is a hard cap and lives on Caps — the factory passes it.
+        max_entry_slippage_pct: float,
     ) -> None:
         self.network = network
         self._account_address = account_address
@@ -164,15 +165,27 @@ class HyperliquidExchange:
         o = inner.get("order", {}) or {}
         status = inner.get("status")
         oid = str(o["oid"]) if o.get("oid") is not None else None
+        # `origSz` is the original size, `sz` the *remaining* size (0 once filled). The
+        # payload carries no average fill price — `limitPx` (for an entry, the slippage-cap
+        # bound) is the closest available, at most the cap away from the true fill.
+        orig, remaining = _as_float(o.get("origSz")), _as_float(o.get("sz"))
         if status == "filled":
             return OrderResult(
                 accepted=True, status="filled", order_id=oid,
-                filled_size=_as_float(o.get("origSz") or o.get("sz")),
+                filled_size=orig if orig is not None else remaining,
                 avg_price=_as_float(o.get("limitPx")),
             )
         if status in ("open", "resting"):
             return OrderResult(accepted=True, status="resting", order_id=oid, filled_size=0.0)
-        return None  # canceled / rejected / margin-canceled → treat as not on the book
+        # Terminal without a full fill (canceled / rejected / marginCanceled). An IOC can
+        # PARTIALLY fill before the remainder cancels — that partial is a live position and
+        # must be reported as a fill; only a zero-fill terminal was "never on the book".
+        if orig is not None and remaining is not None and orig - remaining > 0:
+            return OrderResult(
+                accepted=True, status="filled", order_id=oid,
+                filled_size=orig - remaining, avg_price=_as_float(o.get("limitPx")),
+            )
+        return None
 
     def _round_for_wire(self, order: Order) -> Order:
         """Round size/prices to the asset's exchange precision (size DOWN — never past

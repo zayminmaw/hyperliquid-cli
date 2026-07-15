@@ -146,8 +146,11 @@ Any feature that touches the order path must pass the 7-point checklist in `docs
 paper → shadow → testnet → graduation validation ladder. **Audit-set defaults are deliberate — do
 not "fix" them back:** conviction→size scaling OFF (`sizing.enabled`; re-enable only when
 `exec report`'s calibration proves it), sentry ADD cap 0, `HL_DECISION_SOURCE` selects the llm|rule
-arbiter for A/B, an unconfirmed emergency close books `abort_failed` (never `aborted`), entries are
-slippage-capped IOC limits. Full rationale: `docs/audits/2026-07-hl-cli-evidence-audit/`.
+arbiter for A/B, an unconfirmed emergency close books `abort_failed` (never `aborted`), every
+non-reduce-only market order (Mode A included) is a slippage-capped IOC limit. Evidence hygiene:
+graduation and `conviction_calibration` exclude `aborted`/`abort_failed` (mechanical failures) and
+adopted rows (no LLM verdict) — don't let them back in. Full rationale:
+`docs/audits/2026-07-hl-cli-evidence-audit/`.
 
 ## Testing
 

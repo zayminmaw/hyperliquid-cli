@@ -71,10 +71,12 @@ def conviction_calibration(trades: list[dict]) -> list[dict]:
     This is the evidence gate for re-enabling conviction→size scaling
     (`sizing.enabled`, off by default per the 2026-07 audit): scaling earns its way
     back only when higher buckets show higher avg_r on an adequate sample. No
-    minimum-sample filter — thin buckets are the honest picture, shown with their n."""
+    minimum-sample filter — thin buckets are the honest picture, shown with their n.
+    Adopted rows are excluded: no LLM verdict sits behind them, and their conviction
+    is 0.0 by construction — they would fill the low bucket with non-evidence."""
     groups: dict[str, list[dict]] = defaultdict(list)
     for t in trades:
-        if t["status"] in _CALIBRATION_STATUSES:
+        if t["status"] in _CALIBRATION_STATUSES and not t.get("adopted"):
             groups[conviction_bucket(t["conviction"])].append(t)
 
     out = []
@@ -83,9 +85,12 @@ def conviction_calibration(trades: list[dict]) -> list[dict]:
         if not ts:
             continue
         wins = sum(1 for t in ts if _is_win(t))
+        # avg_r only over rows that actually carry an R — a missing R must not read
+        # as a flat outcome in the table that gates re-enabling sizing.
+        rs = [t["r_multiple"] for t in ts if t["r_multiple"] is not None]
         out.append({
             "bucket": bucket, "n": len(ts), "win_rate": round(wins / len(ts), 3),
-            "avg_r": round(mean(t["r_multiple"] or 0.0 for t in ts), 4),
+            "avg_r": round(mean(rs), 4) if rs else None,
         })
     return out
 

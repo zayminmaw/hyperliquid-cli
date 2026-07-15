@@ -53,3 +53,16 @@ def test_scaled_partials_do_not_count_toward_graduation():
     trades += [_trade("scaled", r=0.5, closed_at=i * DAY) for i in range(6)]
     g = assess(trades, caps(graduation_min_trades=5, graduation_min_days=7))
     assert g["n"] == 4 and not g["checks"]["min_trades"]
+
+
+def test_mechanical_failures_and_adopted_rows_do_not_grade_the_strategy():
+    # aborted/abort_failed are verdicts on the rig, adopted rows carry no LLM verdict —
+    # none of them may pad n or move expectancy; aborts stay visible as their own count.
+    trades = _record(6, r=1.0, span_days=10)
+    trades += [_trade("aborted", -0.02), _trade("abort_failed", 0.0)]
+    adopted = _trade("won", 5.0)
+    adopted["adopted"] = 1
+    trades.append(adopted)
+    g = assess(trades, caps(graduation_min_trades=5, graduation_min_days=7))
+    assert g["n"] == 6 and g["avg_r"] == 1.0
+    assert g["aborts"] == 2
