@@ -58,7 +58,7 @@ One `run_once` pass (`hlcli/executor/runner.py`) is the heart of Mode B:
                                    enrich  (marks, equity, positions, recent decisions, tunable,
                                            │   candle tail + regime via Kaufman ER — None if no feed)
                                            ▼
-                                   decide  (LLM: claude-sonnet-4-6, strict tool, low temp)
+                                   decide  (LLM: claude-sonnet-5, strict tool, low temp)
                                            │   schema-invalid → DROP + tally + log (never guessed)
                                            │   act + wait → DEFER (park for re-check, advance HWM)
                                            ▼

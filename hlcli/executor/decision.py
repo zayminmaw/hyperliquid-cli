@@ -2,7 +2,7 @@
 
 The LLM owns *judgment* (act/skip, now/wait, conviction); deterministic code owns
 everything that touches money. This module is the seam between them: it asks
-`claude-sonnet-4-6` for a structured verdict on one candidate, then validates and
+`claude-sonnet-5` for a structured verdict on one candidate, then validates and
 clamps that verdict before it ever reaches the gate. Output that fails schema
 validation is **dropped and tallied, never guessed at** — we never default a
 missing action to "skip" or invent a conviction.

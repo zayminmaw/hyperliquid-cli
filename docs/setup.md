@@ -48,8 +48,8 @@ Copy `.env.example` to `.env` and adjust. Every var is `HL_`-prefixed.
 | `HL_FOLLOWUP_MAX_ATTEMPTS` | `3` | max WAIT re-checks before a deferred candidate is dropped (`0` disables deferral) |
 | `HL_ALLOWED_COINS` | `BTC,ETH,SOL` | the only tradable coins |
 | `HL_GRADUATION_MIN_TRADES` / `_DAYS` / `_EXPECTANCY` | `20` / `7` / `0.0` | mainnet-readiness thresholds |
-| `HL_DECISION_MODEL` / `_MAX_TOKENS` | `claude-sonnet-4-6` / `1024` | order-path model |
-| `HL_TUNER_MODEL` / `_MAX_TOKENS` | `claude-opus-4-8` / `4096` | daily-tuner model |
+| `HL_DECISION_MODEL` / `_MAX_TOKENS` | `claude-sonnet-5` / `1024` | order-path model |
+| `HL_TUNER_MODEL` / `_MAX_TOKENS` | `claude-sonnet-5` / `4096` | daily-tuner model |
 
 `HL_DATA_DIR` (default `~/.hyperliquid-cli`) and `HL_CONFIG_PATH` are also
 configurable. A **relative** `HL_CONFIG_PATH` resolves against `HL_DATA_DIR`

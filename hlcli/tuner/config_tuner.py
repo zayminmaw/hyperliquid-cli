@@ -1,6 +1,6 @@
 """Config tuner (PLAN.md §10) — out of the order path, propose → approve.
 
-Reads resolved-trade cohorts and asks `claude-opus-4-8` to propose edits to the
+Reads resolved-trade cohorts and asks `claude-sonnet-5` to propose edits to the
 *tunable surface* (risk %, regime gate, conviction→size mapping, hold/expiry).
 **Sample-gated**: with no eligible cohort the model is never called. The proposal
 is clamped before it is returned, and again on load — a tuned value can never

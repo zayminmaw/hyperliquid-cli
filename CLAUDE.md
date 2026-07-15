@@ -96,8 +96,8 @@ Both tuners run **outside** the order path and **propose** changes a human appro
 
 ## Models
 
-- **Order-path decision** → `claude-sonnet-4-6` (hot loop; the gate is the real safety authority, so this needn't be the largest model).
-- **Daily tuner** → `claude-opus-4-8` (out-of-path, once a day, deeper reasoning worth the cost).
+- **Order-path decision** → `claude-sonnet-5` (hot loop; the gate is the real safety authority, so this needn't be the largest model — Sonnet 5 beats the original Sonnet 4.6 default at equal-or-lower cost; a smaller model here is unvalidated, see `docs/decisions.md`).
+- **Daily tuner** → `claude-sonnet-5` (out-of-path, once a day; near-Opus quality at a fraction of the cost, and every proposal is human-reviewed before `promote` regardless of model).
 
 Both configurable via `.env`. **`anthropic` and live-exchange deps are lazy-imported** so `paper` mode and the test suite run with no keys or signing libs present — preserve this; don't add top-level imports of `anthropic`, `hyperliquid`, or `eth_account` into hot import paths.
 

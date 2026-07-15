@@ -1,7 +1,7 @@
 """Prompt/strategy tuner (PLAN.md §10) — out of the order path, propose → approve.
 
 The "self-tune the decision-making" piece: it pairs each logged LLM decision with
-the outcome of the trade it produced and asks `claude-opus-4-8` to refine the
+the outcome of the trade it produced and asks `claude-sonnet-5` to refine the
 *decision prompt* (e.g. "high-conviction shorts on SOL lost 4/5 — add caution").
 Sample-gated on resolved-trade count; output is plain prompt text a human reviews
 and promotes. It never edits sizing or caps — only the words the decision model reads.

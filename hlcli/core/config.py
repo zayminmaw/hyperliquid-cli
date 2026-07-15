@@ -116,9 +116,9 @@ class Caps(BaseSettings):
     decision_source: Literal["llm", "rule"] = "llm"
 
     # --- models + token budgets (configurable, but a hard cap on spend/choice) ---
-    decision_model: str = "claude-sonnet-4-6"
+    decision_model: str = "claude-sonnet-5"
     decision_max_tokens: int = 1024
-    tuner_model: str = "claude-opus-4-8"
+    tuner_model: str = "claude-sonnet-5"
     tuner_max_tokens: int = 4096
     journal_model: str = "claude-opus-4-8"  # daily narrative — out-of-path, one call/day
     journal_max_tokens: int = 2048

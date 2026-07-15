@@ -165,7 +165,7 @@ prerequisite — has been **confirmed**, not left on default.)
 | `websocket-client` | ≥1.7 | (future) native subscriptions | `[exchange]` extra |
 | `anthropic` | ≥0.40 | the LLM decision + tuner calls | `[llm]` extra, **lazy** |
 | `pytest` | ≥8 | test suite | `[dev]` extra |
-| Anthropic API | — | `claude-sonnet-4-6` (decision), `claude-opus-4-8` (tuner) | needs `ANTHROPIC_API_KEY` |
+| Anthropic API | — | `claude-sonnet-5` (decision), `claude-sonnet-5` (tuner) | needs `ANTHROPIC_API_KEY` |
 | Hyperliquid API | — | marks/book (public) + order placement (signed) | testnet + mainnet endpoints |
 
 The keyless invariant is load-bearing: **never add a top-level import of
