@@ -50,6 +50,9 @@ class Caps(BaseSettings):
     # into the decision/management context. Hard caps: the inject can't bloat.
     agent_reflect_inject_max: int = 3
     agent_reflect_max_chars: int = 240
+    # Liveness (audit F): age past which the supervisor's heartbeat is read as dead by a
+    # separate reader (`agent status` / `agent watchdog`). 0 ⇒ derive as 3× the intake poll.
+    agent_stale_after_seconds: float = 0.0
 
     @model_validator(mode="after")
     def _anchor_config_path(self) -> "Caps":

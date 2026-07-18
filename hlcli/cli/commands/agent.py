@@ -15,6 +15,7 @@ import typer
 
 from hlcli.agent.daily import run_daily
 from hlcli.agent.intake_watch import intake_dir, poll
+from hlcli.agent.liveness import Liveness, classify, stale_after_seconds
 from hlcli.agent.supervisor import (
     LAST_DAILY, LAST_EXEC, LAST_INTAKE, LAST_SENTRY, LAST_TICK,
     Cadence, Supervisor,
@@ -50,6 +51,13 @@ def run(
         check_mainnet_graduation(g)
     exchange, state, caps, tunable = open_env(g, for_write=True)
     alerter = network_alerter(caps, g.network)
+    # Reconcile-before-respawn (audit F): resuming after a stale heartbeat with positions still
+    # open means they sat unmanaged during the downtime — page before resuming (the first sentry
+    # tick then reconciles them). A clean restart with a fresh/empty book stays quiet.
+    prior = classify(_age(state, LAST_TICK, time.time()),
+                     stale_after_seconds(tunable.agent.intake_poll_seconds, caps.agent_stale_after_seconds))
+    if prior is Liveness.STALE and (resumed := len(exchange.get_positions())):
+        alerter.alert("agent_resumed_with_unmanaged", level="warning", open_positions=resumed)
     directory = intake_dir(caps, g.network)
     directory.mkdir(parents=True, exist_ok=True)
     a = tunable.agent
@@ -106,11 +114,15 @@ def status(ctx: typer.Context) -> None:
     now = time.time()
     last_tick = _age(state, LAST_TICK, now)
     positions = exchange.get_positions()
+    stale_after = stale_after_seconds(tunable.agent.intake_poll_seconds, caps.agent_stale_after_seconds)
+    live = classify(last_tick, stale_after)
     emit(
         {
             "network": g.network.value,
-            # "running" = a tick landed within 3 poll intervals; anything older means stopped/stuck
-            "running": last_tick is not None and last_tick < 3 * tunable.agent.intake_poll_seconds,
+            # liveness: never (no heartbeat) | alive (tick within threshold) | stale (loop stopped/stuck)
+            "liveness": live.value,
+            "running": live is Liveness.ALIVE,  # back-compat: alive ⇒ running
+            "stale_after_s": stale_after,
             "last_tick_age_s": last_tick,
             "last_intake_age_s": _age(state, LAST_INTAKE, now),
             "last_exec_age_s": _age(state, LAST_EXEC, now),
@@ -127,6 +139,39 @@ def status(ctx: typer.Context) -> None:
         },
         as_json=g.json_out, title="agent status",
     )
+
+
+@app.command("watchdog")
+def watchdog(ctx: typer.Context) -> None:
+    """Page if the supervisor looks dead while positions are open — run from cron/systemd.
+
+    A hard-killed loop (SIGKILL, host crash) can't alert for itself, and its open positions
+    then sit unmanaged behind only their native SL/TP. This separate reader emits a critical
+    `agent_stale` alert when the last tick is older than the staleness threshold AND the book
+    is non-empty, and exits non-zero so a monitor can escalate. Quiet (exit 0) when the loop
+    is alive, never started, or stale with nothing at risk."""
+    g = state_of(ctx)
+    exchange, state, caps, tunable = open_env(g, for_write=False)
+    now = time.time()
+    last_tick = _age(state, LAST_TICK, now)
+    stale_after = stale_after_seconds(tunable.agent.intake_poll_seconds, caps.agent_stale_after_seconds)
+    live = classify(last_tick, stale_after)
+    open_positions = len(exchange.get_positions())
+    paged = live is Liveness.STALE and open_positions > 0
+    if paged:
+        network_alerter(caps, g.network).alert(
+            "agent_stale", level="critical", last_tick_age_s=last_tick,
+            stale_after_s=stale_after, open_positions=open_positions,
+        )
+    emit(
+        {
+            "network": g.network.value, "liveness": live.value, "last_tick_age_s": last_tick,
+            "stale_after_s": stale_after, "open_positions": open_positions, "paged": paged,
+        },
+        as_json=g.json_out, title="agent watchdog",
+    )
+    if paged:
+        raise typer.Exit(1)
 
 
 def _age(state: StateStore, key: str, now: float) -> float | None:

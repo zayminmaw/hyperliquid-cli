@@ -98,7 +98,16 @@ def test_agent_status_paper(isolated_caps):
     payload = json.loads(result.output)
     assert payload["network"] == "paper"
     assert payload["running"] is False
+    assert payload["liveness"] == "never"  # no heartbeat ever written (audit F)
     assert payload["pending_proposals"] == []
+
+
+def test_agent_watchdog_paper_never_run(isolated_caps):
+    # No heartbeat + empty book: nothing to page about, clean exit.
+    result = runner.invoke(app, ["--json", "agent", "watchdog"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["liveness"] == "never" and payload["paged"] is False
 
 
 def test_journal_write_show_ls_paper(isolated_caps):
