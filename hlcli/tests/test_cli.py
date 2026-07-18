@@ -110,6 +110,28 @@ def test_agent_watchdog_paper_never_run(isolated_caps):
     assert payload["liveness"] == "never" and payload["paged"] is False
 
 
+def test_agent_watchdog_pages_when_stale_with_positions(isolated_caps, tmp_path, monkeypatch):
+    # A dead loop (stale heartbeat) holding an open position must page and exit non-zero (audit F).
+    import time
+    from hlcli.agent.supervisor import LAST_TICK
+    from hlcli.core.types import Side
+    from hlcli.state.store import open_state
+    from hlcli.core.config import get_caps as _get_caps
+    from hlcli.core.types import Network
+
+    monkeypatch.setattr("hlcli.exchange.paper.PaperExchange.get_marks",
+                        lambda self, *a, **k: {"BTC": 100.0})  # no network in the test
+    state = open_state(_get_caps(), Network.PAPER)
+    state.meta_set(LAST_TICK, str(time.time() - 100_000))  # long stale
+    state.upsert_paper_position("BTC", Side.LONG, 0.1, 100.0)
+    state.close()
+
+    result = runner.invoke(app, ["--json", "agent", "watchdog"])
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["liveness"] == "stale" and payload["paged"] is True
+
+
 def test_journal_write_show_ls_paper(isolated_caps):
     result = runner.invoke(app, ["--json", "journal", "write", "--no-narrative"])
     assert result.exit_code == 0

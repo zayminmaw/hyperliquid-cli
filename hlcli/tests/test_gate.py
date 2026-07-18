@@ -231,6 +231,30 @@ def test_gross_caps_disabled_pass_through():
     assert out.approved
 
 
+def test_gross_exposure_reason_shared_helper():
+    # The same check Mode A `trade` runs (audit A / review #1).
+    from hlcli.executor.gate import gross_exposure_reason
+    caps = _caps(max_total_exposure_usd=1_000.0, max_gross_leverage=0.0)
+    assert gross_exposure_reason(caps, 600.0, 500.0, 10_000.0) is not None  # 1100 > 1000
+    assert gross_exposure_reason(caps, 300.0, 500.0, 10_000.0) is None      # 800 < 1000
+
+
+def test_gross_leverage_skipped_on_nonpositive_equity():
+    # Mode A has no upstream equity>0 guard, so the helper must not divide by zero.
+    from hlcli.executor.gate import gross_exposure_reason
+    caps = _caps(max_total_exposure_usd=0.0, max_gross_leverage=2.0)
+    assert gross_exposure_reason(caps, 100.0, 100.0, 0.0) is None
+
+
+def test_book_gross_notional_marks_with_entry_fallback():
+    from hlcli.core.types import Position
+    from hlcli.executor.gate import book_gross_notional
+    positions = [Position(coin="BTC", side=Side.LONG, size=2.0, entry_price=100.0),
+                 Position(coin="ETH", side=Side.SHORT, size=-1.0, entry_price=50.0)]  # short → abs()
+    marks = {"BTC": 110.0}  # ETH mark missing → falls back to entry_price (fail-closed)
+    assert book_gross_notional(positions, marks) == 2.0 * 110.0 + 1.0 * 50.0
+
+
 # --- daily new-entry cap (audit B) ---
 
 def test_rejects_at_daily_entry_limit():

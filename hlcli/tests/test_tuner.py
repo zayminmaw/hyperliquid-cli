@@ -146,6 +146,25 @@ def test_config_tuner_preserves_untuned_agent(tmp_path):
     assert res.proposed.agent.sentry_interval_seconds == 120.0
 
 
+def test_config_tuner_promote_preserves_trail_and_agent(tmp_path):
+    # End-to-end (review coverage gap): a tuned trail survives promote, and the untuned agent
+    # cadence is not reset — the reset-bug regression guard.
+    from hlcli.core.config_schema import load_tunable
+    from hlcli.tuner.promote import paths, promote, write_proposed_config
+
+    state = StateStore(tmp_path / "s.db")
+    _seed(state, 6)
+    caps = _caps(tmp_path)
+    current = clamp(TunableConfig(agent=AgentConfig(sentry_interval_seconds=120.0)))
+    cfg = {**_VALID_CFG, "trail": {**current.trail.model_dump(), "style": "percent", "scale_out_r": 1.5}}
+    res = propose_config(state, caps, current, client=FakeTool("submit_config", cfg))
+    write_proposed_config(caps, res.proposed)
+    promote(caps)
+    active = load_tunable(paths(caps).active_config)
+    assert active.trail.style == "percent" and active.trail.scale_out_r == 1.5
+    assert active.agent.sentry_interval_seconds == 120.0
+
+
 # --- prompt tuner ---
 
 def test_prompt_tuner_gated_without_data(tmp_path):

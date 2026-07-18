@@ -6,16 +6,21 @@
 
 ## 🎯 CURRENT TASK
 
-- Task: Vibe-Trading executor-feature shortlist (`hl-cli-feature-audit.md` §4) — implemented on branch `feat/executor-audit-shortlist`
-- Goal: A→B→C(+D)→F→J — **ALL DONE**, committed per-item (branch, not pushed); 504 tests pass
-- Status: complete. J shipped its *measurement* half (delta-R attribution + management cohorts + surfacing); the sentry TrailConfig/prompt auto-proposer is the enabled follow-on (evidence now exists)
-- Next action: (optional) build the sentry config proposer on `management_cohorts`/`sentry_exit_attribution`, wiring into the `tune` promote pipeline; or push/PR the branch when the user asks
+- Task: Vibe-Trading executor-feature shortlist (`hl-cli-feature-audit.md` §4) + J follow-on + fresh-eyes review fixes — branch `feat/executor-audit-shortlist`
+- Goal: A→B→C(+D)→F→J + sentry config proposer + all 7 review findings — **ALL DONE**; 512 tests pass; docs synced
+- Status: complete, committed per-item (branch, NOT pushed). Review found no regressions; 7 findings fixed (Mode A gross wiring, abort-count consistency, liveness DRY, sortino dbl-call, perf-scope doc, DAY_SECONDS, .env placement)
+- Next action: push / open PR when the user asks; then OPERATIONAL (testnet drill — see below)
 - Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
+- Did: **Fresh-eyes review (074e58b..HEAD) → fixed all 7 findings + synced docs.** #1 Mode A now enforces the account-wide gross-exposure/leverage caps via shared `gate.gross_exposure_reason`/`book_gross_notional` (daily-count stays executor-only — ledger-derived); #2 `trades_today` increments next to `open_trade` so an aborted entry counts consistently with `count_trades_opened_since`; #3 `_liveness` helper de-dups the 3 agent call sites; #4 sortino computes `_downside_deviation` once + symmetric guards; #5 `performance()` docstring states whole-DB (real+shadow) scope; #6 `DAY_SECONDS` centralized in `core/types`; #7 `.env.example` liveness cap moved to the agent block. 6 new tests (gross helpers, abort-count, watchdog paging, promote-preserves-trail). Docs synced: CLAUDE.md, docs/{cli,setup,modules,architecture}.md, .env.example.
+- Result: **512 pass**. Mode A gross reject + watchdog paging + promote-preserves-trail all drive-verified. Branch NOT pushed.
+- File(s) touched: executor/{gate,runner}.py, core/types.py, sentry/shadow.py, tuner/{stats,config_tuner}.py, cli/commands/{trade,agent,exec_,sentry}.py, state/store.py, .env.example, CLAUDE.md, docs/*, tests/{test_gate,test_executor,test_tuner,test_cli}.py
+
+### Prior action (audit shortlist A–J + J follow-on)
 - Did: **Implemented the whole audit shortlist A–J** on branch `feat/executor-audit-shortlist`, one commit per item:
   - **A** gross-exposure/leverage cap (`HL_MAX_TOTAL_EXPOSURE_USD` 0=off, `HL_MAX_GROSS_LEVERAGE` 5.0) — gate check after sizing; running gross mutated per fire/shadow (mirrors `open_coins`); mark-priced, entry-price fallback (fail-closed).
   - **B** daily new-entry cap (`HL_MAX_TRADES_PER_DAY` 0=off) — count derived from the ledger (`opened_at ≥ UTC-midnight`), restart-safe; running count mutated per fire.
@@ -110,6 +115,8 @@
 - `resolved_trades(limit=N)` = most recent N (newest-closed first) — don't assume oldest-first.
 - FakeLiveExchange (test_protect) models positions/open_orders/canceled; `fail_triggers="tp"` = partial-protection case; `fail_close=True|"raise"` = the abort_failed cases. `protect._sleep` is monkeypatched in retry tests — keep it a module attribute.
 - Add tests opt IN to a budget (`_add_caps`/`sentry_max_adds_per_position=2`) — the default is 0. Gate conviction tests opt IN to scaling (`_scaling_on()`) — the default is flat 1.0. Don't "fix" a failing new test by flipping the production default back.
+- Account-wide caps (audit A/B): gross exposure/leverage (`gate.gross_exposure_reason`) is enforced on BOTH the Mode B gate AND Mode A `trade` entries (reduce-only closes skip it). Daily new-entry cap is EXECUTOR-ONLY (ledger-derived — Mode A doesn't write the trades ledger). `trades_today` increments next to `open_trade` so aborts count (matches `count_trades_opened_since`); `gross_notional` only on a confirmed-protected fire (an abort is flat). Don't move either increment back below the abort returns.
+- Config tuner proposes `trail` too now; `_validate` MERGES the payload onto the current config so untuned nested fields (`agent`) survive promote — don't revert to `model_validate(payload)` (it resets them to defaults). `DAY_SECONDS` lives in `core/types` — don't reinline `86400`.
 - `order_status_by_cloid`'s parse *logic* is fixture-locked (filled/resting/canceled/partial-cancel ⇒ fill for origSz−sz) — but the LIVE response shape still needs the first testnet drill before trusting the recovery path on mainnet. A resting recovered entry gets canceled by `_resolve_unknown`, never left live-untracked.
 - Evidence hygiene (2026-07-15): `assess` + `conviction_calibration` exclude aborted/abort_failed/adopted rows; `_alert_unmanaged` counts only REAL rows (`shadow=False`). Don't "simplify" the filters away — CLAUDE.md's evidence-gate section is binding.
 - Native SL/TP cancels are now BY OID (`trades.sl_oid/tp_oid`): use `cancel_trade_triggers` for one row; `cancel_coin_triggers` is the last-row-only sweep — never call it while a sibling slice is open. Legacy/oid-less rows fall back to the type-match cancel (safe: they have no sibling). Entry path + adopt + `apply_add` all record oids.

@@ -1,8 +1,10 @@
 """`hl trade` — manual (Mode A) orders.
 
-No LLM, no risk gate: just the hard caps (allowed-coin, notional, leverage) plus
-the exchange's own validation. This is the human-in-control path for discretionary
-trades and for manually closing what the executor opened.
+No LLM, no risk gate: just the hard caps (allowed-coin, notional, leverage, and the
+account-wide gross-exposure ceiling) plus the exchange's own validation. This is the
+human-in-control path for discretionary trades and for manually closing what the
+executor opened. (The daily new-entry cap is executor-only — it's derived from the
+executor's trade ledger, which manual orders don't write.)
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from hlcli.cli.context import GlobalState, build_for, state_of
 from hlcli.cli.output import emit, note
 from hlcli.core.config import Caps, get_caps
 from hlcli.core.types import Order, OrderType, Side
+from hlcli.executor.gate import book_gross_notional, gross_exposure_reason
 
 app = typer.Typer(no_args_is_help=True, help="Manual (Mode A) trading.")
 order_app = typer.Typer(no_args_is_help=True, help="Place an order: limit | market | stop-loss | take-profit.")
@@ -37,10 +40,18 @@ def _submit(state: GlobalState, order: Order) -> None:
     _enforce_allowed_coin(order.coin, caps)
 
     exchange = build_for(state, for_write=True)
-    ref_price = order.price or order.trigger_price or exchange.get_marks().get(order.coin)
+    marks = exchange.get_marks()
+    ref_price = order.price or order.trigger_price or marks.get(order.coin)
     if ref_price is None:
         raise typer.BadParameter(f"no mark available for {order.coin}.")
     _enforce_notional(order.size, ref_price, caps)
+    # Account-wide exposure is a hard cap, so a manual entry honors it too (a reduce-only
+    # close only lowers exposure — never blocked). Same check the Mode B gate runs.
+    if not order.reduce_only:
+        gross = book_gross_notional(exchange.get_positions(), marks)
+        reason = gross_exposure_reason(caps, gross, order.size * ref_price, exchange.equity())
+        if reason is not None:
+            raise typer.BadParameter(reason)
 
     payload = {
         "coin": order.coin, "side": order.side.value, "type": order.order_type.value,

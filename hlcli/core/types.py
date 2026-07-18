@@ -10,6 +10,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+DAY_SECONDS = 86_400.0  # seconds in a UTC day — shared by the daily-count cap and sentry budgets
+
 
 class Network(StrEnum):
     PAPER = "paper"

@@ -132,8 +132,10 @@ equity ÷ |mark − sl|`, then scaled by a conviction fraction, then clamped by
 `max_notional_per_trade` and `max_leverage` (both computed at the mark).
 Conviction only scales size *within* the hard caps — it can never raise the
 ceiling. One-per-coin makes the per-trade cap the total per-coin cap. The
-leverage ceiling is per-order; aggregate exposure is bounded by
-`max_concurrent_positions × max_notional_per_trade`.
+leverage ceiling is per-order; the **account-wide** book total is bounded
+directly by `max_total_exposure_usd` and `max_gross_leverage` (audit A), a gate
+check applied to the running gross across the whole book — the same check Mode A
+`trade` runs on a manual entry.
 
 ---
 

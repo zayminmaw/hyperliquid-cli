@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
-from hlcli.core.types import Candle
+from hlcli.core.types import DAY_SECONDS, Candle
 from hlcli.exchange.base import Exchange
 from hlcli.executor.regime import classify
 from hlcli.journal.lessons import recent_lessons
@@ -32,7 +32,6 @@ ManageFn = Callable[..., ManagementResult]
 # Shadow log rows count against the same throttles as the live pass, so `sentry run
 # --shadow` left running for weeks can't exceed the .env LLM-call hard cap.
 _SHADOW_EVALUATED = ("shadow", "shadow_dropped")
-_DAY_SECONDS = 86_400.0
 
 
 @dataclass
@@ -65,7 +64,7 @@ def shadow_pass(
     summary = ShadowSummary()
     bars_cache: dict[str, tuple[list[Candle], list[Candle]]] = {}
     lessons = recent_lessons(state, caps, tunable)
-    calls_today = state.sentry_count_since(now - _DAY_SECONDS, _SHADOW_EVALUATED)
+    calls_today = state.sentry_count_since(now - DAY_SECONDS, _SHADOW_EVALUATED)
 
     for trade in state.open_trades():
         mark = marks.get(trade["coin"])

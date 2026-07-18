@@ -202,12 +202,15 @@ def performance(trades: list[dict], *, starting_equity: float) -> dict:
     the running equity (a fixed base — this tool has no deposits/withdrawals), ordered by
     close time. Sharpe/Sortino are None below two trades or on a zero-dispersion series;
     `profit_factor` is None with no losing trades; `avg_slip_pct` is None with no measured
-    fills. Drawdown is peak-to-trough on the reconstructed equity curve, in percent."""
+    fills. Drawdown is peak-to-trough on the reconstructed equity curve, in percent.
+
+    Computed over whatever resolved set the caller passes — for `exec report` that is the
+    whole book (real + shadow), same as graduation/calibration; on a DB that has run both
+    real and shadow passes the equity curve therefore blends the two."""
     resolved = [t for t in trades if t.get("realized") is not None and t.get("closed_at") is not None]
-    empty = {"n": 0, "profit_factor": None, "max_drawdown_pct": 0.0,
-             "sharpe": None, "sortino": None, "avg_slip_pct": None}
     if not resolved:
-        return empty
+        return {"n": 0, "profit_factor": None, "max_drawdown_pct": 0.0,
+                "sharpe": None, "sortino": None, "avg_slip_pct": None}
     ordered = sorted(resolved, key=lambda t: t["closed_at"])
 
     gains = sum(t["realized"] for t in ordered if t["realized"] > 0)
@@ -225,12 +228,16 @@ def performance(trades: list[dict], *, starting_equity: float) -> dict:
         if peak > 0:
             max_dd = max(max_dd, (peak - equity) / peak)
 
+    mu = mean(returns) if returns else 0.0
+    sortino = None
+    if len(returns) >= 2:
+        dd = _downside_deviation(returns)
+        sortino = round(mu / dd, 4) if dd > 0 else None
     return {
         "n": len(ordered),
         "profit_factor": profit_factor,
         "max_drawdown_pct": round(max_dd * 100.0, 3),
-        "sharpe": _ratio(mean(returns), returns) if returns else None,
-        "sortino": (round(mean(returns) / _downside_deviation(returns), 4)
-                    if len(returns) >= 2 and _downside_deviation(returns) > 0 else None),
+        "sharpe": _ratio(mu, returns),
+        "sortino": sortino,
         "avg_slip_pct": _avg_entry_slip_pct(ordered),
     }

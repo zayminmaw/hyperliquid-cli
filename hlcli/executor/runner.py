@@ -31,13 +31,13 @@ from pydantic import BaseModel
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
-from hlcli.core.types import Action, Candidate, Network, OrderResult, Position, Side, Timing
+from hlcli.core.types import DAY_SECONDS, Action, Candidate, Network, OrderResult, Position, Side, Timing
 from hlcli.exchange.base import Exchange
 from hlcli.executor.decision import DecisionResult, decider_for
 from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
 from hlcli.executor.intake import injection_flags
-from hlcli.executor.gate import GateContext, evaluate
+from hlcli.executor.gate import GateContext, book_gross_notional, evaluate
 from hlcli.executor.protect import (
     cancel_placed,
     emergency_close,
@@ -126,10 +126,8 @@ def run_once(
     equity = exchange.equity()
     positions = exchange.get_positions()
     open_coins = {p.coin for p in positions}
-    # Account-wide exposure at pass start (audit A), priced at the mark; a position whose mark
-    # is momentarily missing falls back to its entry price so a dropped quote can't undercount
-    # the book (fail-closed — an undercount would loosen the cap).
-    gross_notional = sum(abs(p.size) * (marks.get(p.coin) or p.entry_price) for p in positions)
+    # Account-wide exposure at pass start (audit A), mark-priced (entry-price fallback is fail-closed).
+    gross_notional = book_gross_notional(positions, marks)
     if not fire_enabled:
         # Shadow's book is hypothetical — feed its open trades into one-per-coin /
         # max-concurrent (and gross exposure) so shadow discipline matches what live would do.
@@ -137,8 +135,8 @@ def run_once(
         open_coins |= {t["coin"] for t in shadow_open}
         gross_notional += sum(abs(t["size"]) * (marks.get(t["coin"]) or t["entry"]) for t in shadow_open)
     # New entries opened this UTC day (audit B); grows as this pass fires so a burst can't blow
-    # the budget. `now` is unix (UTC-epoch) so `now % 86400` is the offset into the day.
-    trades_today = state.count_trades_opened_since(now - (now % 86400.0), shadow=not fire_enabled)
+    # the budget. `now` is unix (UTC-epoch) so `now % DAY_SECONDS` is the offset into the day.
+    trades_today = state.count_trades_opened_since(now - (now % DAY_SECONDS), shadow=not fire_enabled)
     realized = state.paper_realized() if exchange.network is Network.PAPER else None
     recent = state.recent_decisions(limit=10)
     outcomes = state.resolved_trades(limit=10)  # newest first — the model's track record
@@ -376,6 +374,11 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
         candidate.sl, candidate.tp, filled, decision.conviction, regime, common.now,
         mark_at_entry=common.marks.get(candidate.coin),  # entry_price − mark = realized slip (audit D)
     )
+    # A row now exists in the ledger, so it counts toward today's entries even if protection
+    # later aborts it — this keeps the running count in step with count_trades_opened_since,
+    # which counts every opened row (audit B). Exposure (gross_notional) is added only once the
+    # position is confirmed protected below, since an aborted entry is flattened.
+    common.trades_today += 1
     if common.protected:
         secured = _secure(exchange, candidate, filled, common.alerter)
         if not secured.protected:
@@ -397,7 +400,6 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
     common.tally.fired += 1
     common.open_coins.add(candidate.coin)
     common.gross_notional += filled * entry_price  # so later candidates this pass see the new exposure
-    common.trades_today += 1
     _emit(common.alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
           size=filled, conviction=decision.conviction, order_id=fill.order_id)
     return "fired", fill

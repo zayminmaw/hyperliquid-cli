@@ -127,12 +127,16 @@ hl asset book ETH --depth 10
 ## `hl trade` — manual orders (Mode A)
 
 Human-in-control. **No LLM, no risk gate** — only the hard caps (allowed-coin,
-notional, leverage) plus the exchange's own validation. Writes, so the mainnet gate
-applies. `--dry-run` prints the resolved order without placing it. A rejected order
-exits `1`.
+notional, leverage, and the account-wide gross-exposure ceiling) plus the exchange's
+own validation. Writes, so the mainnet gate applies. `--dry-run` prints the resolved
+order without placing it. A rejected order exits `1`.
 
 > Notional is checked against `price` (limit), `trigger` (stop/TP), or the current
-> mark (market) × size, vs `MAX_NOTIONAL_PER_TRADE`.
+> mark (market) × size, vs `MAX_NOTIONAL_PER_TRADE`. A non-reduce-only entry also
+> honors the account-wide `MAX_TOTAL_EXPOSURE_USD` / `MAX_GROSS_LEVERAGE` ceilings
+> (audit A) — the same check the Mode B gate runs; a reduce-only close is never
+> blocked. The daily new-entry cap (`MAX_TRADES_PER_DAY`) is executor-only — it's
+> derived from the executor ledger, which manual orders don't write.
 
 ### `trade order limit <coin> <side> <size> <price>`
 Resting limit order.
@@ -235,7 +239,11 @@ candidates are parked for re-check. `-w`/`--watch` for live refresh.
 ### `exec report`
 Account summary: equity, open positions, unrealized P&L, breaker state, the count of
 `deferred` (WAIT) candidates awaiting re-check, and the **graduation**
-(mainnet-readiness) verdict from resolved trades.
+(mainnet-readiness) verdict from resolved trades. Also carries the execution-quality
+`performance` block — profit factor, max drawdown, trade-based Sharpe/Sortino, and
+realized entry slippage (audit C/D) — `conviction_calibration`, and `management_cohorts`
+(realized R by which sentry management events fired — the sentry-tuning evidence, audit J).
+These span the whole resolved set (real + shadow), same as graduation.
 
 ---
 
@@ -311,14 +319,26 @@ unparseable ones to `failed/` plus an alert.
 
 ### `agent status`
 
-Cross-process pulse from the state store: `running` (a tick within 3 poll
-intervals), pass ages, last daily date, breaker, equity/book, realized-today,
-deferred count, pending tuner proposals, and the intake dir.
+Cross-process pulse from the state store: `liveness` (`never`/`alive`/`stale`, the
+verdict from the heartbeat's age vs the staleness threshold), `running` (kept for
+back-compat — true when `alive`), `stale_after_s`, pass ages, last daily date,
+breaker, equity/book, realized-today, deferred count, pending tuner proposals, and
+the intake dir.
+
+### `agent watchdog`
+
+A cron/systemd-friendly liveness reaper (audit F). A hard-killed supervisor
+(SIGKILL, host crash) can't alert for itself, so run this separately: it emits a
+**critical** `agent_stale` alert when the last tick is older than the staleness
+threshold **and** positions are open, and exits non-zero so a monitor can escalate.
+Quiet (exit `0`) when the loop is alive, never started, or stale with nothing at
+risk. The threshold is `HL_AGENT_STALE_AFTER_SECONDS` (0 → 3× the intake poll).
 
 ```bash
 hl agent run                       # paper by default, like everything else
 hl --network testnet -y agent run --manage
 hl --json agent status
+hl --network mainnet agent watchdog   # e.g. from cron every minute
 ```
 
 ---

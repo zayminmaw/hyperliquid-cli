@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import ConvictionSizing, TunableConfig
-from hlcli.core.types import Action, Candidate, Decision, Order, OrderType, Side, Timing
+from hlcli.core.types import Action, Candidate, Decision, Order, OrderType, Position, Side, Timing
 
 
 @dataclass
@@ -123,13 +123,9 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
     # opens a coin we don't already hold, so post-trade gross is current gross + this notional
     # with no netting. A hard cap: conviction and the LLM can never move it, and unlike the
     # per-order caps it bounds the *sum* across the whole book.
-    post_gross = ctx.gross_notional + notional
-    if ctx.caps.max_total_exposure_usd > 0 and post_gross > ctx.caps.max_total_exposure_usd:
-        return _reject(f"gross exposure {post_gross:.0f} > cap {ctx.caps.max_total_exposure_usd:g}")
-    if ctx.caps.max_gross_leverage > 0 and post_gross > ctx.equity * ctx.caps.max_gross_leverage:
-        return _reject(
-            f"gross leverage {post_gross / ctx.equity:.2f}x > cap {ctx.caps.max_gross_leverage:g}x"
-        )
+    exposure_reason = gross_exposure_reason(ctx.caps, ctx.gross_notional, notional, ctx.equity)
+    if exposure_reason is not None:
+        return _reject(exposure_reason)
 
     # A MARKET entry so an accepted order is a *filled* one — a resting GTC limit
     # would leave the ledger and protective triggers tracking a position that may
@@ -210,6 +206,25 @@ def _reward_risk_at(c: Candidate, mark: float) -> float:
 
 def _reject(reason: str) -> GateOutcome:
     return GateOutcome(approved=False, reason=reason)
+
+
+def book_gross_notional(positions: list[Position], marks: dict[str, float]) -> float:
+    """Total open-book notional, mark-priced with an entry-price fallback (fail-closed — a
+    dropped quote must not undercount the book and loosen the account-wide cap)."""
+    return sum(abs(p.size) * (marks.get(p.coin) or p.entry_price) for p in positions)
+
+
+def gross_exposure_reason(caps: Caps, gross_notional: float, notional: float, equity: float) -> str | None:
+    """First failing account-wide exposure cap for adding `notional` to a book already carrying
+    `gross_notional`, or None if within caps. Shared by the Mode B gate and Mode A `trade` so
+    both honor the same hard ceilings. Each cap is off when 0; leverage is skipped on
+    non-positive equity (the dollar cap still applies)."""
+    post_gross = gross_notional + notional
+    if caps.max_total_exposure_usd > 0 and post_gross > caps.max_total_exposure_usd:
+        return f"gross exposure {post_gross:.0f} > cap {caps.max_total_exposure_usd:g}"
+    if caps.max_gross_leverage > 0 and equity > 0 and post_gross > equity * caps.max_gross_leverage:
+        return f"gross leverage {post_gross / equity:.2f}x > cap {caps.max_gross_leverage:g}x"
+    return None
 
 
 def infer_side(entry: float, tp: float, sl: float) -> Side:

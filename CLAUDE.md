@@ -72,7 +72,7 @@ Every decision is logged with full input context + resulting fill + outcome. Tha
 
 This split is what makes self-tuning safe. Never let a tunable value reach the order path unclamped.
 
-- **`.env` — hard caps, off-limits to the LLM and the tuner.** Network/mainnet gate, paths, `STARTING_EQUITY`, `MAX_NOTIONAL_PER_TRADE`, `MAX_CONCURRENT_POSITIONS`, `DAILY_LOSS_LIMIT_PCT`, `MAX_LEVERAGE`, `RR_FLOOR`, `ALLOWED_COINS`, `MAX_SIGNAL_AGE_MINUTES`, model names + token budgets.
+- **`.env` — hard caps, off-limits to the LLM and the tuner.** Network/mainnet gate, paths, `STARTING_EQUITY`, `MAX_NOTIONAL_PER_TRADE`, `MAX_CONCURRENT_POSITIONS`, `MAX_TOTAL_EXPOSURE_USD` + `MAX_GROSS_LEVERAGE` (account-wide book ceilings, audit A), `MAX_TRADES_PER_DAY` (daily new-entry cap, audit B), `DAILY_LOSS_LIMIT_PCT`, `MAX_LEVERAGE`, `RR_FLOOR`, `ALLOWED_COINS`, `MAX_SIGNAL_AGE_MINUTES`, `AGENT_STALE_AFTER_SECONDS` (liveness, audit F), model names + token budgets.
 - **`config/active_config.json` — the tunable surface.** Regime gate, risk profile, `risk_per_trade_pct`, conviction→size mapping, decision-prompt parameters. **Loaded and clamped in code** so a bad value can't reach the order path. Missing file → safe defaults.
 
 ## The risk gate (deterministic, first-failure wins)
@@ -133,7 +133,7 @@ hl exec     propose | once | run | shadow | status | report | breaker           
 hl sentry   once | run | shadow | manage | adopt | status | log                              # in-trade manager (§14)
 hl tune     run | diff | promote | history
 hl config   show | set | edit
-hl agent    run | status        # autonomous supervisor (§15)
+hl agent    run | status | watchdog   # autonomous supervisor (§15); watchdog = cron liveness reaper (audit F)
 hl journal  write | show | ls   # daily journal (§15)
 ```
 

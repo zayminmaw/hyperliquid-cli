@@ -23,7 +23,8 @@ from hlcli.agent.supervisor import (
 from hlcli.cli.commands.sentry import check_mainnet_graduation, require_exclusive_modes
 from hlcli.cli.context import open_env, state_of
 from hlcli.cli.output import emit, note
-from hlcli.core.config_schema import load_tunable
+from hlcli.core.config import Caps
+from hlcli.core.config_schema import TunableConfig, load_tunable
 from hlcli.executor.protect import requires_native_protection
 from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import network_alerter
@@ -54,8 +55,7 @@ def run(
     # Reconcile-before-respawn (audit F): resuming after a stale heartbeat with positions still
     # open means they sat unmanaged during the downtime — page before resuming (the first sentry
     # tick then reconciles them). A clean restart with a fresh/empty book stays quiet.
-    prior = classify(_age(state, LAST_TICK, time.time()),
-                     stale_after_seconds(tunable.agent.intake_poll_seconds, caps.agent_stale_after_seconds))
+    prior, _, _ = _liveness(state, caps, tunable, time.time())
     if prior is Liveness.STALE and (resumed := len(exchange.get_positions())):
         alerter.alert("agent_resumed_with_unmanaged", level="warning", open_positions=resumed)
     directory = intake_dir(caps, g.network)
@@ -112,10 +112,8 @@ def status(ctx: typer.Context) -> None:
     g = state_of(ctx)
     exchange, state, caps, tunable = open_env(g, for_write=False)
     now = time.time()
-    last_tick = _age(state, LAST_TICK, now)
+    live, stale_after, last_tick = _liveness(state, caps, tunable, now)
     positions = exchange.get_positions()
-    stale_after = stale_after_seconds(tunable.agent.intake_poll_seconds, caps.agent_stale_after_seconds)
-    live = classify(last_tick, stale_after)
     emit(
         {
             "network": g.network.value,
@@ -153,9 +151,7 @@ def watchdog(ctx: typer.Context) -> None:
     g = state_of(ctx)
     exchange, state, caps, tunable = open_env(g, for_write=False)
     now = time.time()
-    last_tick = _age(state, LAST_TICK, now)
-    stale_after = stale_after_seconds(tunable.agent.intake_poll_seconds, caps.agent_stale_after_seconds)
-    live = classify(last_tick, stale_after)
+    live, stale_after, last_tick = _liveness(state, caps, tunable, now)
     open_positions = len(exchange.get_positions())
     paged = live is Liveness.STALE and open_positions > 0
     if paged:
@@ -177,6 +173,14 @@ def watchdog(ctx: typer.Context) -> None:
 def _age(state: StateStore, key: str, now: float) -> float | None:
     raw = state.meta_get(key)
     return None if raw is None else round(now - float(raw), 1)
+
+
+def _liveness(state: StateStore, caps: Caps, tunable: TunableConfig, now: float) -> tuple[Liveness, float, float | None]:
+    """(verdict, staleness threshold, last-tick age) for the supervisor heartbeat — the single
+    place `run`/`status`/`watchdog` derive liveness from LAST_TICK (audit F)."""
+    last_tick = _age(state, LAST_TICK, now)
+    stale_after = stale_after_seconds(tunable.agent.intake_poll_seconds, caps.agent_stale_after_seconds)
+    return classify(last_tick, stale_after), stale_after, last_tick
 
 
 def _realized_today(state: StateStore, now: float) -> float:

@@ -269,6 +269,16 @@ def test_daily_entry_cap_persists_across_passes(tmp_path):
     assert (s.fired, s.rejected) == (0, 1)
 
 
+def test_aborted_entry_still_counts_toward_daily_cap(tmp_path):
+    # Review #2: an aborted entry opened a real fill, so it counts toward the day's budget —
+    # the ledger-derived count and the intra-pass running count must agree that it does.
+    ex, state = _setup(tmp_path)
+    tid = state.open_trade("a", "BTC", Side.LONG, 100, 90, 120, 1.0, 0.8, "trend", NOW)
+    state.resolve_trade(tid, "aborted", 100, -0.5, -0.05, NOW)
+    day_start = NOW - (NOW % 86_400.0)
+    assert state.count_trades_opened_since(day_start, shadow=False) == 1
+
+
 def test_breaker_blocks_fire(tmp_path):
     ex, state = _setup(tmp_path)
     state.set_breaker(True)
