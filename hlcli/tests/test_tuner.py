@@ -5,7 +5,7 @@ tuner LLM is never hit — fake clients return canned payloads."""
 import json
 from types import SimpleNamespace
 
-from hlcli.core.config_schema import TunableConfig, clamp, load_tunable
+from hlcli.core.config_schema import AgentConfig, TunableConfig, clamp, load_tunable
 from hlcli.core.types import Side
 from hlcli.state.store import StateStore
 from hlcli.tuner.config_tuner import propose_config
@@ -121,6 +121,29 @@ def test_config_tuner_drops_invalid_output(tmp_path):
     bad = {**_VALID_CFG, "risk_per_trade_pct": "not a number"}  # type error → ValidationError
     res = propose_config(state, _caps(tmp_path), clamp(TunableConfig()), client=FakeTool("submit_config", bad))
     assert res.note == "invalid_output" and res.proposed is None
+
+
+def test_config_tuner_proposes_and_clamps_trail(tmp_path):
+    # audit J: the tuner now proposes sentry management params too; still clamped on the way out.
+    state = StateStore(tmp_path / "s.db")
+    _seed(state, 6)
+    cfg = {**_VALID_CFG, "trail": {
+        "style": "percent", "atr_multiple": 2.0, "trail_percent": 999.0,  # out of bounds
+        "trail_start_r": 1.0, "breakeven_trigger_r": 0.0, "breakeven_buffer_r": 0.05,
+        "scale_out_r": 1.5, "scale_out_fraction": 0.5, "min_move_r": 0.1}}
+    res = propose_config(state, _caps(tmp_path), clamp(TunableConfig()), client=FakeTool("submit_config", cfg))
+    assert res.proposed.trail.style == "percent" and res.proposed.trail.scale_out_r == 1.5
+    assert res.proposed.trail.trail_percent == 20.0  # clamped to the ceiling
+
+
+def test_config_tuner_preserves_untuned_agent(tmp_path):
+    # The tool schema doesn't expose `agent`, so a proposal must PRESERVE the current cadence,
+    # never silently reset it to defaults on promote (the merge-onto-current fix).
+    state = StateStore(tmp_path / "s.db")
+    _seed(state, 6)
+    current = clamp(TunableConfig(agent=AgentConfig(sentry_interval_seconds=120.0)))
+    res = propose_config(state, _caps(tmp_path), current, client=FakeTool("submit_config", _VALID_CFG))
+    assert res.proposed.agent.sentry_interval_seconds == 120.0
 
 
 # --- prompt tuner ---
