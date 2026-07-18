@@ -109,6 +109,62 @@ def summary(trades: list[dict]) -> dict:
     }
 
 
+_EXIT_ACTIONS = ("close", "reduce")
+
+
+def sentry_exit_attribution(proposals: list[dict], final_r: dict[int, float]) -> dict:
+    """Score the sentry-shadow log on realized R, not just agreement (audit J).
+
+    Each shadow proposal is paired with the 6a baseline and records the trade's R at that
+    instant (`r_now`). For a *diverging early exit* — the LLM said close/reduce where the rules
+    would have held — the counterfactual is computable from realized R alone: banking `r_now`
+    now versus letting the trade run to its final `r_multiple`. `delta_r = r_now − final_r`;
+    a positive mean means the LLM's exits would have added R over the rules, a negative mean
+    means it would have cut winners short. This is Vibe-Trading's delta-PnL idea in R units —
+    the promotable signal the agreement tally can't give.
+
+    Only close/reduce divergences are attributed: they're the proposals whose outcome follows
+    from realized R without re-simulating the price path (a tighten/extend changes the path).
+    `proposals` are the parsed shadow details (each carrying `trade_id`, `agrees`, `r_now`, and
+    `proposal.action`); `final_r` maps trade id → resolved r_multiple."""
+    deltas = []
+    for p in proposals:
+        if p.get("agrees") or p.get("proposal", {}).get("action") not in _EXIT_ACTIONS:
+            continue
+        r_now, fr = p.get("r_now"), final_r.get(p.get("trade_id"))
+        if r_now is None or fr is None:
+            continue
+        deltas.append(r_now - fr)
+    if not deltas:
+        return {"exit_divergences": 0, "avg_delta_r": None, "total_delta_r": 0.0}
+    return {"exit_divergences": len(deltas), "avg_delta_r": round(mean(deltas), 4),
+            "total_delta_r": round(sum(deltas), 4)}
+
+
+def management_cohorts(resolved: list[dict]) -> list[dict]:
+    """Realized R grouped by which trade-management events fired — the deterministic evidence a
+    sentry tuner acts on (audit J). `stop_moved` = the ratchet/trail moved the stop off its
+    initial level; `scaled` = the one-shot scale-out banked a partial. Excludes mechanical
+    failures (aborted/abort_failed) and rows without an R, the same hygiene the calibration
+    table uses — a management verdict, not a protection glitch, is what we're grading."""
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for t in resolved:
+        if t["status"] in ("aborted", "abort_failed") or t.get("r_multiple") is None:
+            continue
+        moved = t.get("initial_sl") is not None and t["sl"] != t["initial_sl"]
+        scaled = bool(t.get("scaled_out")) or t["status"] == "scaled"
+        key = ("stop_moved" if moved else "stop_initial") + "/" + ("scaled" if scaled else "full")
+        groups[key].append(t)
+
+    out = []
+    for key in sorted(groups):
+        ts = groups[key]
+        wins = sum(1 for t in ts if _is_win(t))
+        out.append({"cohort": key, "n": len(ts), "win_rate": round(wins / len(ts), 3),
+                    "avg_r": round(mean(t["r_multiple"] for t in ts), 4)})
+    return out
+
+
 def _ratio(numerator: float, series: list[float]) -> float | None:
     """`numerator ÷ dispersion(series)`, or None on a sample too small / degenerate to trust.
     Sample stdev (ddof=1) needs ≥2 points, and a zero-dispersion series has no risk to divide

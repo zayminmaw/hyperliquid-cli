@@ -22,7 +22,7 @@ from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.safety.graduation import assess
 from hlcli.state.store import open_state
-from hlcli.tuner.stats import conviction_calibration, performance
+from hlcli.tuner.stats import conviction_calibration, management_cohorts, performance
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
 
@@ -172,6 +172,9 @@ def report(ctx: typer.Context) -> None:
             # The evidence gate for re-enabling conviction→size scaling (audit L-1/L-4):
             # scaling stays off until higher buckets show higher avg_r on real sample.
             "conviction_calibration": conviction_calibration(resolved),
+            # Realized R by which management events fired (audit J) — the evidence a sentry
+            # tuner would act on: do trailed/scaled trades out-perform ones left on the initial stop?
+            "management_cohorts": management_cohorts(resolved),
         },
         as_json=g.json_out, title="exec report",
     )

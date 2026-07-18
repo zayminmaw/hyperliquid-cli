@@ -319,3 +319,48 @@ def test_performance_avg_entry_slip_signed_and_excludes_shadow():
         t("long", 200.0, 100.0, shadow=1),  # shadow enters at the mark: excluded
     ]
     assert performance(rows, starting_equity=1_000.0)["avg_slip_pct"] == 1.0
+
+
+# --- sentry self-tuning evidence (audit J) ---
+
+def test_sentry_exit_attribution_scores_divergent_exits():
+    from hlcli.tuner.stats import sentry_exit_attribution
+
+    proposals = [
+        # LLM wanted out at +1.5R where the rules held; the trade then stopped at -1R.
+        {"trade_id": 1, "agrees": False, "r_now": 1.5, "proposal": {"action": "close"}},
+        {"trade_id": 2, "agrees": True, "r_now": 0.5, "proposal": {"action": "close"}},   # agreed: skip
+        {"trade_id": 3, "agrees": False, "r_now": 0.8, "proposal": {"action": "tighten_stop"}},  # not exit
+        {"trade_id": 4, "agrees": False, "r_now": 1.0, "proposal": {"action": "close"}},  # still open: skip
+    ]
+    final_r = {1: -1.0, 2: 2.0, 3: 1.0}  # trade 4 unresolved
+    attr = sentry_exit_attribution(proposals, final_r)
+    assert attr["exit_divergences"] == 1
+    assert attr["avg_delta_r"] == 2.5  # 1.5 − (−1.0): the early close would have added 2.5R
+
+
+def test_sentry_exit_attribution_none_without_divergent_exits():
+    from hlcli.tuner.stats import sentry_exit_attribution
+
+    props = [{"trade_id": 1, "agrees": True, "r_now": 1.0, "proposal": {"action": "close"}}]
+    assert sentry_exit_attribution(props, {1: 0.5}) == {
+        "exit_divergences": 0, "avg_delta_r": None, "total_delta_r": 0.0}
+
+
+def test_management_cohorts_group_by_events():
+    from hlcli.tuner.stats import management_cohorts
+
+    def t(status, r, sl, initial_sl, scaled_out=0):
+        return {"status": status, "r_multiple": r, "realized": (r or 0) * 10,
+                "sl": sl, "initial_sl": initial_sl, "scaled_out": scaled_out}
+
+    rows = [
+        t("won", 2.0, 95.0, 90.0),           # stop ratcheted, full exit
+        t("lost", -1.0, 90.0, 90.0),         # stop never moved, full exit
+        t("scaled", 1.0, 95.0, 90.0, 1),     # stop moved + partial banked
+        t("aborted", -0.02, 90.0, 90.0),     # mechanical failure — excluded
+        t("won", None, 95.0, 90.0),          # no R — excluded
+    ]
+    by = {c["cohort"]: c for c in management_cohorts(rows)}
+    assert set(by) == {"stop_moved/full", "stop_initial/full", "stop_moved/scaled"}
+    assert by["stop_moved/full"]["n"] == 1 and by["stop_moved/full"]["avg_r"] == 2.0
