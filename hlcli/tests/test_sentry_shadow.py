@@ -106,7 +106,10 @@ def _ctx(tmp_path):
 
 def test_decide_management_ok(tmp_path):
     client = FakeClient(_good(action="close"))
-    res = decide_management(_ctx(tmp_path), caps(), tunable(), client=client)
+    # Overridden to a model that accepts temperature — the default order-path model
+    # (Sonnet 5) doesn't; the no-temperature path is the same seam as the entry decision.
+    res = decide_management(_ctx(tmp_path), caps(decision_model="claude-sonnet-4-6"),
+                            tunable(), client=client)
     assert not res.dropped and res.decision.action is ManagementAction.CLOSE
     assert client.kwargs["tool_choice"] == {"type": "tool", "name": "submit_management"}
     assert client.kwargs["temperature"] == tunable().decision_temperature
