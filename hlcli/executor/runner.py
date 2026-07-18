@@ -126,10 +126,16 @@ def run_once(
     equity = exchange.equity()
     positions = exchange.get_positions()
     open_coins = {p.coin for p in positions}
+    # Account-wide exposure at pass start (audit A), priced at the mark; a position whose mark
+    # is momentarily missing falls back to its entry price so a dropped quote can't undercount
+    # the book (fail-closed — an undercount would loosen the cap).
+    gross_notional = sum(abs(p.size) * (marks.get(p.coin) or p.entry_price) for p in positions)
     if not fire_enabled:
         # Shadow's book is hypothetical — feed its open trades into one-per-coin /
-        # max-concurrent so shadow discipline matches what live would have done.
-        open_coins |= {t["coin"] for t in state.open_trades(shadow=True)}
+        # max-concurrent (and gross exposure) so shadow discipline matches what live would do.
+        shadow_open = state.open_trades(shadow=True)
+        open_coins |= {t["coin"] for t in shadow_open}
+        gross_notional += sum(abs(t["size"]) * (marks.get(t["coin"]) or t["entry"]) for t in shadow_open)
     realized = state.paper_realized() if exchange.network is Network.PAPER else None
     recent = state.recent_decisions(limit=10)
     outcomes = state.resolved_trades(limit=10)  # newest first — the model's track record
@@ -159,7 +165,8 @@ def run_once(
         caps=caps, tunable=tunable, decide_fn=decide_fn, marks=marks,
         market=_market_context(exchange, coins), equity=equity, positions=positions,
         realized=realized, recent=recent, outcomes=outcomes,
-        lessons=recent_lessons(state, caps, tunable), open_coins=open_coins, now=now,
+        lessons=recent_lessons(state, caps, tunable), open_coins=open_coins,
+        gross_notional=gross_notional, now=now,
         breaker_tripped=breaker_tripped, daily_loss=daily_loss, protected=protected,
         fire_enabled=fire_enabled, dry_run=dry_run, alerter=alerter,
     )
@@ -199,8 +206,8 @@ class _Tally:
 
 @dataclass
 class _PassContext:
-    """Everything one pass shares across candidates. `open_coins` and `tally` are mutated
-    as candidates are processed; the rest is read-only per-pass state."""
+    """Everything one pass shares across candidates. `open_coins`, `gross_notional` and
+    `tally` are mutated as candidates are processed; the rest is read-only per-pass state."""
 
     caps: Caps
     tunable: TunableConfig
@@ -214,6 +221,7 @@ class _PassContext:
     outcomes: list[dict]  # recently resolved trades — the model's track record
     lessons: list[dict]  # distilled daily lessons (§15.4); [] when the inject is off
     open_coins: set[str]
+    gross_notional: float  # open-book notional (mark-priced); grows as this pass fires
     now: float
     breaker_tripped: bool
     daily_loss: bool
@@ -305,7 +313,7 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         caps=common.caps, tunable=common.tunable, equity=common.equity,
         open_coins=set(common.open_coins), open_count=len(common.open_coins),
         now=common.now, breaker_tripped=common.breaker_tripped, daily_loss_hit=common.daily_loss,
-        regime=regime, mark=common.marks.get(candidate.coin),
+        regime=regime, mark=common.marks.get(candidate.coin), gross_notional=common.gross_notional,
     )
     outcome = evaluate(candidate, decision, gate_ctx)
 
@@ -381,6 +389,7 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
         state.update_trade_triggers(trade_id, sl_oid=secured.sl_oid, tp_oid=secured.tp_oid)
     common.tally.fired += 1
     common.open_coins.add(candidate.coin)
+    common.gross_notional += filled * entry_price  # so later candidates this pass see the new exposure
     _emit(common.alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
           size=filled, conviction=decision.conviction, order_id=fill.order_id)
     return "fired", fill
@@ -398,6 +407,7 @@ def _open_shadow_trade(state: StateStore, candidate: Candidate, decision, outcom
         shadow=True,
     )
     common.open_coins.add(candidate.coin)  # the hypothetical book honors one-per-coin too
+    common.gross_notional += outcome.notional  # …and the account-wide exposure cap
 
 
 def _abort_pnl(side: Side, entry: float, sl: float, exit_price: float, size: float) -> tuple[float, float]:

@@ -7,7 +7,7 @@ short-circuit pipeline, **first-failure wins**, in exactly this order:
       → allowed-coin → regime sanity → level sanity → R:R floor
       → mark sanity (mark present, inside sl/tp, R:R at mark still clears)
       → one-per-coin → max-concurrent → sizing + notional/leverage caps
-      → conviction→size clamp
+      → conviction→size clamp → account-wide gross exposure/leverage
 
 The mark-sanity block is what keeps a stale thesis from becoming a bad MARKET
 fill: the entry is a market order, so the *mark* — not the proposed entry — is
@@ -46,6 +46,7 @@ class GateContext:
     daily_loss_hit: bool = False
     regime: str | None = None  # current regime signal (Phase 3 enrich); None = unknown, skip check
     mark: float | None = None  # current mark; None = no price → reject (a MARKET entry can't fire blind)
+    gross_notional: float = 0.0  # open-book notional priced at the mark; the account-wide caps add this order to it
 
 
 class GateOutcome(BaseModel):
@@ -115,6 +116,18 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
             f"notional {notional:.2f} below exchange minimum ${ctx.caps.min_order_notional:g}"
         )
 
+    # Account-wide exposure ceiling (audit A). One-per-coin (checked above) means this order
+    # opens a coin we don't already hold, so post-trade gross is current gross + this notional
+    # with no netting. A hard cap: conviction and the LLM can never move it, and unlike the
+    # per-order caps it bounds the *sum* across the whole book.
+    post_gross = ctx.gross_notional + notional
+    if ctx.caps.max_total_exposure_usd > 0 and post_gross > ctx.caps.max_total_exposure_usd:
+        return _reject(f"gross exposure {post_gross:.0f} > cap {ctx.caps.max_total_exposure_usd:g}")
+    if ctx.caps.max_gross_leverage > 0 and post_gross > ctx.equity * ctx.caps.max_gross_leverage:
+        return _reject(
+            f"gross leverage {post_gross / ctx.equity:.2f}x > cap {ctx.caps.max_gross_leverage:g}x"
+        )
+
     # A MARKET entry so an accepted order is a *filled* one — a resting GTC limit
     # would leave the ledger and protective triggers tracking a position that may
     # never open. The candidate's entry/sl/tp still drive sizing and protection.
@@ -133,9 +146,9 @@ def _size(candidate: Candidate, decision: Decision, ctx: GateContext) -> tuple[f
 
     Priced at the *mark*, not the proposed entry: the entry order is a MARKET order,
     so the mark is what the fill (and therefore the true stop distance and notional)
-    will actually be. Note the leverage ceiling is per-order — with N concurrent
-    positions total exposure can reach N × max_leverage × equity; the aggregate is
-    bounded by max_concurrent_positions × max_notional_per_trade.
+    will actually be. The leverage ceiling here is per-order; the *account-wide* gross
+    exposure/leverage bound (`max_total_exposure_usd` / `max_gross_leverage`) is a
+    separate check in `evaluate`, applied to the sum across the whole book.
     """
     price = ctx.mark if ctx.mark is not None else candidate.entry
     stop_distance = abs(price - candidate.sl)

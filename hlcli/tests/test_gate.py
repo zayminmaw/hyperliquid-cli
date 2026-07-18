@@ -202,6 +202,35 @@ def test_rejects_notional_below_exchange_minimum():
     assert not out.approved and "below exchange minimum" in out.reason
 
 
+# --- account-wide exposure caps (audit A) ---
+
+def test_rejects_gross_exposure_over_cap():
+    # This order's own notional ($500) is fine, but it would push the *book* past the cap.
+    caps = _caps(max_total_exposure_usd=600.0)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, gross_notional=200.0))
+    assert not out.approved and "gross exposure" in out.reason  # 200 + 500 = 700 > 600
+
+
+def test_gross_exposure_under_cap_approves():
+    caps = _caps(max_total_exposure_usd=2_000.0)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, gross_notional=200.0))
+    assert out.approved  # 200 + 500 = 700 < 2000
+
+
+def test_rejects_gross_leverage_over_cap():
+    # The existing book already sits near the leverage ceiling; this order tips it over.
+    caps = _caps(max_gross_leverage=1.0)  # gross notional cap = 1x equity (10000)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, gross_notional=9_800.0))
+    assert not out.approved and "gross leverage" in out.reason  # 9800 + 500 > 10000
+
+
+def test_gross_caps_disabled_pass_through():
+    # 0 disables each account-wide cap — a large book still fires; the per-trade caps stand.
+    caps = _caps(max_total_exposure_usd=0.0, max_gross_leverage=0.0)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, gross_notional=1_000_000.0))
+    assert out.approved
+
+
 def test_flat_sizing_ignores_conviction_by_default():
     # Scaling OFF (the default, audit L-1): every conviction sizes at the full
     # fixed-fractional target — 0.5% of 10000 = 50 risk / stop 10 = 5 units — and a

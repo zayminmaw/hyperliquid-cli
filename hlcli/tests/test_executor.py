@@ -237,6 +237,17 @@ def test_max_concurrent(tmp_path):
     assert (s.fired, s.rejected) == (1, 1)
 
 
+def test_gross_exposure_cap_within_pass(tmp_path):
+    # Two $500 orders on different coins; the account cap admits one but not the sum. The
+    # running gross must grow *within* the pass so the second fire sees the first's exposure
+    # (audit A) — the same intra-pass discipline as one-per-coin / max-concurrent above.
+    ex, state = _setup(tmp_path, marks={"BTC": 100.0, "ETH": 100.0})
+    state.enqueue(_cand("a", coin="BTC"))
+    state.enqueue(_cand("b", coin="ETH"))
+    s = run_once(ex, state, caps(max_total_exposure_usd=800.0), tunable(), decide_fn=act_now, now=NOW)
+    assert (s.fired, s.rejected) == (1, 1)
+
+
 def test_breaker_blocks_fire(tmp_path):
     ex, state = _setup(tmp_path)
     state.set_breaker(True)

@@ -6,16 +6,22 @@
 
 ## 🎯 CURRENT TASK
 
-- Task: 2026-07 audit improvement plan + 2026-07-15 review fixes (ACTION-ITEMS.md "Maintenance" section) — both code-complete
-- Goal: audit phases 1–6 ✅ (ac25150→ece484d) + all fresh-eyes review findings fixed (uncommitted working tree)
-- Status: 481 tests pass, paper-smoked; review fixes NOT yet committed
-- Next action: commit the review-fix working tree, then OPERATIONAL — fund a testnet agent wallet, run the Phase-1 testnet drill (forced protection-failure; confirm the orderStatus-by-cloid live shape — parse logic is now fixture-locked incl. partial-cancel), then `hl agent run` on paper/shadow for graduation evidence + the LLM-vs-rule A/B (docs/evidence-gate.md)
-- Blocked by: none (testnet drill waits on a funded testnet agent wallet; also gates 7d's live check)
+- Task: Implementing the Vibe-Trading executor-feature shortlist in `hl-cli-feature-audit.md` (§4 ranked plan)
+- Goal: port A→B→C(+D)→F→J (gross-exposure cap · daily-entry-count cap · exec-report equity metrics+slippage · liveness watchdog · sentry delta-PnL self-tuner)
+- Status: **A DONE** (gross-exposure/leverage cap, 486 tests pass, working tree uncommitted); B next
+- Next action: implement B — daily new-entry count cap (reuse `breaker.py` day-rollover: `meta _COUNT_KEY`, `persist=`, `HL_MAX_TRADES_PER_DAY`, one gate/pass check)
+- Blocked by: none (was: nothing committed — user hasn't asked to commit)
 
 ---
 
 ## 📍 LAST ACTION
 
+- Did: **Audit item A — account-wide gross-exposure/leverage cap** (Vibe `enforcement.check_mandate` §5-6). New hard caps `HL_MAX_TOTAL_EXPOSURE_USD` (0=off) + `HL_MAX_GROSS_LEVERAGE` (default 5.0, 0=off); gate check after sizing (`post_gross = gross + notional`, one-per-coin ⇒ no netting); running gross threaded through `_PassContext` and mutated on every fire/shadow-open (mirrors `open_coins`) so an intra-pass burst can't collectively over-expose; mark-priced w/ entry-price fallback (fail-closed). Also fixed a PRE-EXISTING failure `464f8f6` left: `test_sentry_shadow.py::test_decide_management_ok` asserted a `temperature` kwarg the Sonnet-5 path drops — mirrored `test_decision.py`'s model override.
+- Result: 486 pass (5 new + 1 pre-existing fix). Env wiring smoke-tested. Working tree uncommitted.
+- File(s) touched: hlcli/{core/config.py, executor/gate.py, executor/runner.py}, .env.example, hlcli/tests/{test_gate.py, test_executor.py, test_sentry_shadow.py}
+- Feature audit deliverable: `hl-cli-feature-audit.md` (repo root) — ranked A–J plan driving this work.
+
+### Prior session
 - Did: **Fresh-eyes review of 074e58b..HEAD** (2 phases: static + end-to-end flows), then fixed every confirmed finding + synced docs (ACTION-ITEMS.md R.1–R.6). Headline fixes: `exec shadow` was dropping the O-2 alerter (reconciliation silently skipped through that CLI path); shadow ledger rows masked real unmanaged positions (`_alert_unmanaged` now `shadow=False`); a canceled-partial-fill IOC in cloid recovery read as "never booked" (key released, live position untracked) — now returns the partial as a fill, parser fixture-locked; graduation/`conviction_calibration` no longer graded by `aborted`/`abort_failed`/adopted rows (`assess` surfaces an `aborts` count); decision prompt's conviction section made truthful for calibration mode (flat sizing kept — deliberate L-1 default, prompt was the bug); injection heuristics de-noised ("price action:" / "should act as support" no longer page); `KeystoreError` → `DOMAIN_ERRORS` (replacing never-raised `NotImplementedError`); slippage default single-sourced (exchange ctor param required); `adopt_unmanaged` reuses pass positions; `trade order market` help documents the shared IOC cap.
 - Result: 481 pass (14 new). Smoked: `exec shadow` e2e on paper, market help, injection probes. **Working tree uncommitted.**
 - File(s) touched: executor/{decision,runner,execute,protect,intake}.py, exchange/hyperliquid.py, sentry/{adopt,decision}.py, tuner/stats.py, safety/graduation.py, cli/errors.py, cli/commands/{exec_,trade}.py, tests/{test_executor,test_protect,test_intake,test_tuner,test_graduation,test_cli,test_hyperliquid_reads}.py, .env.example, CLAUDE.md, docs/evidence-gate.md, ACTION-ITEMS.md

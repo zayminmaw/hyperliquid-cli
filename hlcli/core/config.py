@@ -65,6 +65,15 @@ class Caps(BaseSettings):
     max_concurrent_positions: int = 3
     daily_loss_limit_pct: float = 5.0
     max_leverage: float = 3.0
+    # Account-wide ceilings across the *whole book* (audit A — Vibe `enforcement.check_mandate`
+    # §5-6). The per-trade notional + per-order leverage + concurrent-*count* caps bound each
+    # order and how many run at once, but never their sum: N concurrent max-notional trades
+    # carry N× the intended exposure. These bound the total, priced at the mark.
+    # `max_total_exposure_usd` is an absolute dollar ceiling (0 disables — set one explicitly);
+    # `max_gross_leverage` bounds gross book notional ÷ equity (0 disables). Off-limits to the
+    # LLM and the tuner, like every cap here.
+    max_total_exposure_usd: float = 0.0
+    max_gross_leverage: float = 5.0
     rr_floor: float = 1.5
     max_signal_age_minutes: int = 30
     # Exchange-enforced floor (Hyperliquid rejects orders under $10 notional) — the gate
