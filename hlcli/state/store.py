@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS trades (
     scaled_out INTEGER NOT NULL DEFAULT 0, -- 1 = the one-shot scale-out already happened
     adopted INTEGER NOT NULL DEFAULT 0,    -- 1 = a Mode A position sentry adopted (PLAN.md §15.5)
     sl_oid TEXT,                           -- exchange oid of this row's native stop trigger (§14 slice-scoped cancel)
-    tp_oid TEXT                            -- exchange oid of this row's native take-profit trigger
+    tp_oid TEXT,                           -- exchange oid of this row's native take-profit trigger
+    mark_at_entry REAL                     -- mark at fire; `entry` − this = realized entry slippage (audit D)
 );
 CREATE TABLE IF NOT EXISTS sentry_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,6 +118,8 @@ class StateStore:
             self._conn.execute("ALTER TABLE trades ADD COLUMN sl_oid TEXT")
         if "tp_oid" not in cols:
             self._conn.execute("ALTER TABLE trades ADD COLUMN tp_oid TEXT")
+        if "mark_at_entry" not in cols:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN mark_at_entry REAL")
         # Pre-sentry rows never had their SL moved, so today's `sl` IS the initial one.
         self._conn.execute("UPDATE trades SET initial_sl = sl WHERE initial_sl IS NULL")
 
@@ -220,14 +223,14 @@ class StateStore:
         self, candidate_id: str, coin: str, side: Side, entry: float, sl: float, tp: float,
         size: float, conviction: float, regime: str | None, opened_at: float,
         *, shadow: bool = False, adopted: bool = False,
-        sl_oid: str | None = None, tp_oid: str | None = None,
+        sl_oid: str | None = None, tp_oid: str | None = None, mark_at_entry: float | None = None,
     ) -> int:
         cur = self._conn.execute(
             "INSERT INTO trades(candidate_id, coin, side, entry, sl, tp, size, conviction,"
-            " regime, opened_at, shadow, initial_sl, adopted, sl_oid, tp_oid)"
-            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " regime, opened_at, shadow, initial_sl, adopted, sl_oid, tp_oid, mark_at_entry)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (candidate_id, coin, side.value, entry, sl, tp, size, conviction, regime,
-             opened_at, int(shadow), sl, int(adopted), sl_oid, tp_oid),
+             opened_at, int(shadow), sl, int(adopted), sl_oid, tp_oid, mark_at_entry),
         )
         self._conn.commit()
         return cur.lastrowid

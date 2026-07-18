@@ -22,7 +22,7 @@ from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.safety.graduation import assess
 from hlcli.state.store import open_state
-from hlcli.tuner.stats import conviction_calibration
+from hlcli.tuner.stats import conviction_calibration, performance
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
 
@@ -166,6 +166,9 @@ def report(ctx: typer.Context) -> None:
             "breaker": "tripped" if Breaker(state, caps).tripped() else "clear",
             "deferred": state.deferred_count(),  # WAIT candidates parked for re-check
             "graduation": assess(resolved, caps),
+            # Risk-adjusted + path-risk view win-rate/expectancy hide (audit C/D): Sharpe,
+            # Sortino, max drawdown, profit factor, and realized entry slippage.
+            "performance": performance(resolved, starting_equity=caps.starting_equity),
             # The evidence gate for re-enabling conviction→size scaling (audit L-1/L-4):
             # scaling stays off until higher buckets show higher avg_r on real sample.
             "conviction_calibration": conviction_calibration(resolved),

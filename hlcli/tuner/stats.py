@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from statistics import mean
+from statistics import mean, stdev
 
 MIN_COHORT_SAMPLES = 5  # below this a cohort is too thin to learn from
 
@@ -106,4 +106,75 @@ def summary(trades: list[dict]) -> dict:
         "win_rate": round(wins / len(trades), 3),
         "avg_r": round(mean(t["r_multiple"] for t in trades), 4),
         "total_realized": round(sum(t["realized"] for t in trades), 4),
+    }
+
+
+def _ratio(numerator: float, series: list[float]) -> float | None:
+    """`numerator ÷ dispersion(series)`, or None on a sample too small / degenerate to trust.
+    Sample stdev (ddof=1) needs ≥2 points, and a zero-dispersion series has no risk to divide
+    by — either way the ratio is meaningless, so report None rather than a fabricated number."""
+    if len(series) < 2:
+        return None
+    sd = stdev(series)
+    return round(numerator / sd, 4) if sd > 0 else None
+
+
+def _downside_deviation(returns: list[float]) -> float:
+    """Root-mean-square of the negative returns (zeros for the rest) — the Sortino denominator."""
+    downside = [min(0.0, r) for r in returns]
+    return (sum(d * d for d in downside) / len(returns)) ** 0.5
+
+
+def _avg_entry_slip_pct(trades: list[dict]) -> float | None:
+    """Mean *adverse* entry slippage vs the mark at fire, over real fills that recorded one
+    (audit D). Positive = filled worse than the mark: paid up on a long, sold cheap on a short.
+    Shadow rows enter at the mark by construction (slip 0), so they're excluded."""
+    slips = []
+    for t in trades:
+        mark = t.get("mark_at_entry")
+        if t.get("shadow") or not mark:
+            continue
+        adverse = (t["entry"] - mark) if t["side"] == "long" else (mark - t["entry"])
+        slips.append(adverse / mark * 100.0)
+    return round(mean(slips), 4) if slips else None
+
+
+def performance(trades: list[dict], *, starting_equity: float) -> dict:
+    """Execution-quality metrics resolved trades hide behind win-rate/expectancy (audit C).
+
+    Trade-based, not annualised: the return series is each closed trade's realized P&L over
+    the running equity (a fixed base — this tool has no deposits/withdrawals), ordered by
+    close time. Sharpe/Sortino are None below two trades or on a zero-dispersion series;
+    `profit_factor` is None with no losing trades; `avg_slip_pct` is None with no measured
+    fills. Drawdown is peak-to-trough on the reconstructed equity curve, in percent."""
+    resolved = [t for t in trades if t.get("realized") is not None and t.get("closed_at") is not None]
+    empty = {"n": 0, "profit_factor": None, "max_drawdown_pct": 0.0,
+             "sharpe": None, "sortino": None, "avg_slip_pct": None}
+    if not resolved:
+        return empty
+    ordered = sorted(resolved, key=lambda t: t["closed_at"])
+
+    gains = sum(t["realized"] for t in ordered if t["realized"] > 0)
+    losses = -sum(t["realized"] for t in ordered if t["realized"] < 0)
+    profit_factor = round(gains / losses, 4) if losses > 0 else None
+
+    equity = peak = starting_equity
+    max_dd = 0.0
+    returns: list[float] = []
+    for t in ordered:
+        if equity > 0:
+            returns.append(t["realized"] / equity)
+        equity += t["realized"]
+        peak = max(peak, equity)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - equity) / peak)
+
+    return {
+        "n": len(ordered),
+        "profit_factor": profit_factor,
+        "max_drawdown_pct": round(max_dd * 100.0, 3),
+        "sharpe": _ratio(mean(returns), returns) if returns else None,
+        "sortino": (round(mean(returns) / _downside_deviation(returns), 4)
+                    if len(returns) >= 2 and _downside_deviation(returns) > 0 else None),
+        "avg_slip_pct": _avg_entry_slip_pct(ordered),
     }

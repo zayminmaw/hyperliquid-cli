@@ -269,3 +269,53 @@ def test_conviction_calibration_skips_adopted_and_missing_r():
 
     only_missing = conviction_calibration([t(0.9, "closed", None)])
     assert only_missing[0]["avg_r"] is None  # no R evidence reads as none, not as flat
+
+
+# --- execution-quality metrics (audit C/D) ---
+
+def test_performance_empty_book():
+    from hlcli.tuner.stats import performance
+
+    perf = performance([], starting_equity=1_000.0)
+    assert perf["n"] == 0 and perf["sharpe"] is None and perf["max_drawdown_pct"] == 0.0
+
+
+def test_performance_over_equity_curve():
+    from hlcli.tuner.stats import performance
+
+    def t(realized, closed_at):
+        return {"realized": realized, "closed_at": closed_at, "status": "won", "shadow": 0}
+
+    # +20, -10, +20, -10 on a 1000 base → equity 1020,1010,1030,1020; PF = 40/20 = 2.0;
+    # deepest dip is 1030→1020 vs the earlier 1020→1010: 10/1020 = 0.98% is the worst.
+    rows = [t(20, 1), t(-10, 2), t(20, 3), t(-10, 4)]
+    perf = performance(rows, starting_equity=1_000.0)
+    assert perf["profit_factor"] == 2.0
+    assert perf["max_drawdown_pct"] == 0.98
+    assert perf["sharpe"] is not None and perf["sortino"] is not None
+
+
+def test_performance_ratios_none_when_untrustworthy():
+    from hlcli.tuner.stats import performance
+
+    one = performance([{"realized": 5.0, "closed_at": 1, "status": "won"}], starting_equity=1_000.0)
+    assert one["sharpe"] is None  # a single trade has no dispersion to divide by
+
+    winners = [{"realized": r, "closed_at": i, "status": "won"} for i, r in enumerate([5.0, 7.0, 3.0])]
+    perf = performance(winners, starting_equity=1_000.0)
+    assert perf["profit_factor"] is None and perf["sortino"] is None  # no losers = no downside
+
+
+def test_performance_avg_entry_slip_signed_and_excludes_shadow():
+    from hlcli.tuner.stats import performance
+
+    def t(side, entry, mark, shadow=0):
+        return {"realized": 5.0, "closed_at": 1, "status": "won",
+                "side": side, "entry": entry, "mark_at_entry": mark, "shadow": shadow}
+
+    rows = [
+        t("long", 101.0, 100.0),           # paid 1% above the mark
+        t("short", 99.0, 100.0),           # sold 1% below the mark — also adverse
+        t("long", 200.0, 100.0, shadow=1),  # shadow enters at the mark: excluded
+    ]
+    assert performance(rows, starting_equity=1_000.0)["avg_slip_pct"] == 1.0

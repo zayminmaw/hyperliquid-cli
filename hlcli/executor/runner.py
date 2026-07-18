@@ -374,6 +374,7 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
     trade_id = state.open_trade(
         candidate.id, candidate.coin, candidate.side, entry_price,
         candidate.sl, candidate.tp, filled, decision.conviction, regime, common.now,
+        mark_at_entry=common.marks.get(candidate.coin),  # entry_price − mark = realized slip (audit D)
     )
     if common.protected:
         secured = _secure(exchange, candidate, filled, common.alerter)
