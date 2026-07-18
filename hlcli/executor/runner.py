@@ -136,6 +136,9 @@ def run_once(
         shadow_open = state.open_trades(shadow=True)
         open_coins |= {t["coin"] for t in shadow_open}
         gross_notional += sum(abs(t["size"]) * (marks.get(t["coin"]) or t["entry"]) for t in shadow_open)
+    # New entries opened this UTC day (audit B); grows as this pass fires so a burst can't blow
+    # the budget. `now` is unix (UTC-epoch) so `now % 86400` is the offset into the day.
+    trades_today = state.count_trades_opened_since(now - (now % 86400.0), shadow=not fire_enabled)
     realized = state.paper_realized() if exchange.network is Network.PAPER else None
     recent = state.recent_decisions(limit=10)
     outcomes = state.resolved_trades(limit=10)  # newest first — the model's track record
@@ -166,7 +169,7 @@ def run_once(
         market=_market_context(exchange, coins), equity=equity, positions=positions,
         realized=realized, recent=recent, outcomes=outcomes,
         lessons=recent_lessons(state, caps, tunable), open_coins=open_coins,
-        gross_notional=gross_notional, now=now,
+        gross_notional=gross_notional, trades_today=trades_today, now=now,
         breaker_tripped=breaker_tripped, daily_loss=daily_loss, protected=protected,
         fire_enabled=fire_enabled, dry_run=dry_run, alerter=alerter,
     )
@@ -206,8 +209,9 @@ class _Tally:
 
 @dataclass
 class _PassContext:
-    """Everything one pass shares across candidates. `open_coins`, `gross_notional` and
-    `tally` are mutated as candidates are processed; the rest is read-only per-pass state."""
+    """Everything one pass shares across candidates. `open_coins`, `gross_notional`,
+    `trades_today` and `tally` are mutated as candidates are processed; the rest is
+    read-only per-pass state."""
 
     caps: Caps
     tunable: TunableConfig
@@ -222,6 +226,7 @@ class _PassContext:
     lessons: list[dict]  # distilled daily lessons (§15.4); [] when the inject is off
     open_coins: set[str]
     gross_notional: float  # open-book notional (mark-priced); grows as this pass fires
+    trades_today: int  # new entries opened this UTC day; grows as this pass fires
     now: float
     breaker_tripped: bool
     daily_loss: bool
@@ -314,6 +319,7 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         open_coins=set(common.open_coins), open_count=len(common.open_coins),
         now=common.now, breaker_tripped=common.breaker_tripped, daily_loss_hit=common.daily_loss,
         regime=regime, mark=common.marks.get(candidate.coin), gross_notional=common.gross_notional,
+        trades_today=common.trades_today,
     )
     outcome = evaluate(candidate, decision, gate_ctx)
 
@@ -390,6 +396,7 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
     common.tally.fired += 1
     common.open_coins.add(candidate.coin)
     common.gross_notional += filled * entry_price  # so later candidates this pass see the new exposure
+    common.trades_today += 1
     _emit(common.alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
           size=filled, conviction=decision.conviction, order_id=fill.order_id)
     return "fired", fill
@@ -408,6 +415,7 @@ def _open_shadow_trade(state: StateStore, candidate: Candidate, decision, outcom
     )
     common.open_coins.add(candidate.coin)  # the hypothetical book honors one-per-coin too
     common.gross_notional += outcome.notional  # …and the account-wide exposure cap
+    common.trades_today += 1                    # …and the daily new-entry budget
 
 
 def _abort_pnl(side: Side, entry: float, sl: float, exit_price: float, size: float) -> tuple[float, float]:

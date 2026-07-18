@@ -3,7 +3,7 @@
 The LLM's decision is an **input** to the gate, never a bypass. Checks run as a
 short-circuit pipeline, **first-failure wins**, in exactly this order:
 
-    schema-valid decision → kill switch → daily-loss-limit → freshness
+    schema-valid decision → kill switch → daily-loss-limit → daily-entry-count → freshness
       → allowed-coin → regime sanity → level sanity → R:R floor
       → mark sanity (mark present, inside sl/tp, R:R at mark still clears)
       → one-per-coin → max-concurrent → sizing + notional/leverage caps
@@ -44,6 +44,7 @@ class GateContext:
     now: float
     breaker_tripped: bool = False
     daily_loss_hit: bool = False
+    trades_today: int = 0  # new entries already opened this UTC day (grows as this pass fires)
     regime: str | None = None  # current regime signal (Phase 3 enrich); None = unknown, skip check
     mark: float | None = None  # current mark; None = no price → reject (a MARKET entry can't fire blind)
     gross_notional: float = 0.0  # open-book notional priced at the mark; the account-wide caps add this order to it
@@ -66,6 +67,8 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
         return _reject("breaker tripped")
     if ctx.daily_loss_hit:
         return _reject("daily loss limit hit")
+    if ctx.caps.max_trades_per_day > 0 and ctx.trades_today >= ctx.caps.max_trades_per_day:
+        return _reject(f"daily entry limit reached ({ctx.caps.max_trades_per_day}/day)")
 
     age_minutes = (ctx.now - candidate.created_at) / 60.0
     if age_minutes > ctx.caps.max_signal_age_minutes:

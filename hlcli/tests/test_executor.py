@@ -248,6 +248,27 @@ def test_gross_exposure_cap_within_pass(tmp_path):
     assert (s.fired, s.rejected) == (1, 1)
 
 
+def test_daily_entry_cap_within_pass(tmp_path):
+    # Cap of 1/day: the first fires, the second sees the incremented count and is rejected
+    # (audit B) — same intra-pass discipline as gross exposure / max-concurrent.
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a", coin="BTC"))
+    state.enqueue(_cand("b", coin="ETH", entry=1500, tp=1800, sl=1400))
+    s = run_once(ex, state, caps(max_trades_per_day=1), tunable(), decide_fn=act_now, now=NOW)
+    assert (s.fired, s.rejected) == (1, 1)
+
+
+def test_daily_entry_cap_persists_across_passes(tmp_path):
+    # The count is derived from the ledger, so an earlier fire the same UTC day still counts
+    # after a restart — a second pass can't re-spend the budget.
+    ex, state = _setup(tmp_path)
+    state.enqueue(_cand("a", coin="BTC"))
+    run_once(ex, state, caps(max_trades_per_day=1), tunable(), decide_fn=act_now, now=NOW)
+    state.enqueue(_cand("b", coin="ETH", entry=1500, tp=1800, sl=1400))
+    s = run_once(ex, state, caps(max_trades_per_day=1), tunable(), decide_fn=act_now, now=NOW)
+    assert (s.fired, s.rejected) == (0, 1)
+
+
 def test_breaker_blocks_fire(tmp_path):
     ex, state = _setup(tmp_path)
     state.set_breaker(True)

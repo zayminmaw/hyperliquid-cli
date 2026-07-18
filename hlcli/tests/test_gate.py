@@ -231,6 +231,19 @@ def test_gross_caps_disabled_pass_through():
     assert out.approved
 
 
+# --- daily new-entry cap (audit B) ---
+
+def test_rejects_at_daily_entry_limit():
+    caps = _caps(max_trades_per_day=2)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, trades_today=2))
+    assert not out.approved and "daily entry limit" in out.reason
+
+
+def test_daily_entry_limit_disabled_pass_through():
+    out = evaluate(_candidate(), _decision(), _ctx(caps=_caps(max_trades_per_day=0), trades_today=99))
+    assert out.approved
+
+
 def test_flat_sizing_ignores_conviction_by_default():
     # Scaling OFF (the default, audit L-1): every conviction sizes at the full
     # fixed-fractional target — 0.5% of 10000 = 50 risk / stop 10 = 5 units — and a

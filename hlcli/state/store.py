@@ -239,6 +239,16 @@ class StateStore:
             sql += f" AND shadow = {int(shadow)}"
         return [dict(r) for r in self._conn.execute(sql + " ORDER BY id").fetchall()]
 
+    def count_trades_opened_since(self, t0: float, *, shadow: bool) -> int:
+        """Entries opened at/after `t0` (a UTC-day start) in the given book — the daily
+        new-entry cap (audit B). Counts every opened row regardless of how it later
+        resolved: an aborted entry still moved money and still spent the day's budget."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE opened_at >= ? AND shadow = ?",
+            (t0, int(shadow)),
+        ).fetchone()
+        return int(row[0])
+
     def resolve_trade(
         self, trade_id: int, status: str, exit_price: float, realized: float,
         r_multiple: float, closed_at: float,

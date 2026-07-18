@@ -64,6 +64,10 @@ class Caps(BaseSettings):
     max_notional_per_trade: float = 1_000.0
     max_concurrent_positions: int = 3
     daily_loss_limit_pct: float = 5.0
+    # New-entry frequency cap over a UTC calendar day (audit B — Vibe `daily_count.py`). An
+    # overtrading breaker independent of the loss limit: a run of small scratches or a
+    # misbehaving intake feed can fire many times without ever tripping daily-loss. 0 disables.
+    max_trades_per_day: int = 0
     max_leverage: float = 3.0
     # Account-wide ceilings across the *whole book* (audit A — Vibe `enforcement.check_mandate`
     # §5-6). The per-trade notional + per-order leverage + concurrent-*count* caps bound each
