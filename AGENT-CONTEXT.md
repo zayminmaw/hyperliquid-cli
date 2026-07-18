@@ -6,19 +6,25 @@
 
 ## 🎯 CURRENT TASK
 
-- Task: Implementing the Vibe-Trading executor-feature shortlist in `hl-cli-feature-audit.md` (§4 ranked plan)
-- Goal: port A→B→C(+D)→F→J (gross-exposure cap · daily-entry-count cap · exec-report equity metrics+slippage · liveness watchdog · sentry delta-PnL self-tuner)
-- Status: **A DONE** (gross-exposure/leverage cap, 486 tests pass, working tree uncommitted); B next
-- Next action: implement B — daily new-entry count cap (reuse `breaker.py` day-rollover: `meta _COUNT_KEY`, `persist=`, `HL_MAX_TRADES_PER_DAY`, one gate/pass check)
-- Blocked by: none (was: nothing committed — user hasn't asked to commit)
+- Task: Vibe-Trading executor-feature shortlist (`hl-cli-feature-audit.md` §4) — implemented on branch `feat/executor-audit-shortlist`
+- Goal: A→B→C(+D)→F→J — **ALL DONE**, committed per-item (branch, not pushed); 504 tests pass
+- Status: complete. J shipped its *measurement* half (delta-R attribution + management cohorts + surfacing); the sentry TrailConfig/prompt auto-proposer is the enabled follow-on (evidence now exists)
+- Next action: (optional) build the sentry config proposer on `management_cohorts`/`sentry_exit_attribution`, wiring into the `tune` promote pipeline; or push/PR the branch when the user asks
+- Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
-- Did: **Audit item A — account-wide gross-exposure/leverage cap** (Vibe `enforcement.check_mandate` §5-6). New hard caps `HL_MAX_TOTAL_EXPOSURE_USD` (0=off) + `HL_MAX_GROSS_LEVERAGE` (default 5.0, 0=off); gate check after sizing (`post_gross = gross + notional`, one-per-coin ⇒ no netting); running gross threaded through `_PassContext` and mutated on every fire/shadow-open (mirrors `open_coins`) so an intra-pass burst can't collectively over-expose; mark-priced w/ entry-price fallback (fail-closed). Also fixed a PRE-EXISTING failure `464f8f6` left: `test_sentry_shadow.py::test_decide_management_ok` asserted a `temperature` kwarg the Sonnet-5 path drops — mirrored `test_decision.py`'s model override.
-- Result: 486 pass (5 new + 1 pre-existing fix). Env wiring smoke-tested. Working tree uncommitted.
-- File(s) touched: hlcli/{core/config.py, executor/gate.py, executor/runner.py}, .env.example, hlcli/tests/{test_gate.py, test_executor.py, test_sentry_shadow.py}
+- Did: **Implemented the whole audit shortlist A–J** on branch `feat/executor-audit-shortlist`, one commit per item:
+  - **A** gross-exposure/leverage cap (`HL_MAX_TOTAL_EXPOSURE_USD` 0=off, `HL_MAX_GROSS_LEVERAGE` 5.0) — gate check after sizing; running gross mutated per fire/shadow (mirrors `open_coins`); mark-priced, entry-price fallback (fail-closed).
+  - **B** daily new-entry cap (`HL_MAX_TRADES_PER_DAY` 0=off) — count derived from the ledger (`opened_at ≥ UTC-midnight`), restart-safe; running count mutated per fire.
+  - **C/D** `stats.performance()` in `exec report` — profit factor, max drawdown, trade-based Sharpe/Sortino (None on <2 or zero-dispersion), + realized entry slippage via new additive `mark_at_entry` column.
+  - **F** liveness watchdog — `agent/liveness.py` (never/alive/stale, fail-closed); `agent status` gains `liveness`; new `agent watchdog` (cron) pages `agent_stale` when stale WITH open positions, exits nonzero; `agent run` warns on resume-after-stale-with-positions.
+  - **J** sentry self-tuning *evidence* — `sentry_exit_attribution()` (delta-R over diverging close/reduce proposals: `r_now − final_r`) in the sentry scoreboard + `management_cohorts()` in `exec report`. (Auto-proposer = follow-on.)
+  - Plus fixed a PRE-EXISTING `464f8f6` failure (stale `temperature` assertion in `test_sentry_shadow.py`).
+- Result: **504 pass**. Each item drive-verified (intra-pass caps, DB round-trips for D & J, watchdog paging). Branch NOT pushed.
+- File(s) touched: core/config.py, executor/{gate,runner}.py, state/store.py, tuner/stats.py, agent/liveness.py(new), cli/commands/{exec_,sentry,agent}.py, .env.example, tests/{test_gate,test_executor,test_tuner,test_liveness(new),test_cli,test_sentry_shadow}.py
 - Feature audit deliverable: `hl-cli-feature-audit.md` (repo root) — ranked A–J plan driving this work.
 
 ### Prior session
