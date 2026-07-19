@@ -12,8 +12,10 @@ class FakeInfo:
         return {
             "marginSummary": {"accountValue": "1234.5"},
             "assetPositions": [
-                {"position": {"coin": "BTC", "szi": "0.5", "entryPx": "60000", "unrealizedPnl": "12.3"}},
-                {"position": {"coin": "ETH", "szi": "-2", "entryPx": "1500", "unrealizedPnl": "-5"}},
+                {"position": {"coin": "BTC", "szi": "0.5", "entryPx": "60000", "unrealizedPnl": "12.3",
+                              "liquidationPx": "55000"}},
+                {"position": {"coin": "ETH", "szi": "-2", "entryPx": "1500", "unrealizedPnl": "-5",
+                              "liquidationPx": None}},  # null when far from liquidation (verified live)
                 {"position": {"coin": "SOL", "szi": "0", "entryPx": "0", "unrealizedPnl": "0"}},
             ],
         }
@@ -120,6 +122,13 @@ def test_positions_skip_zero_and_map_side():
     assert [p.coin for p in positions] == ["BTC", "ETH"]  # zero-size SOL dropped
     assert positions[0].side is Side.LONG and positions[0].size == 0.5
     assert positions[1].side is Side.SHORT and positions[1].size == 2.0
+
+
+def test_positions_map_liquidation_px_null_safe():
+    # Wave-2 M: liquidationPx maps to a float, and a null (far from liquidation) → None.
+    positions = _exchange().get_positions()
+    assert positions[0].liquidation_px == 55000.0   # BTC
+    assert positions[1].liquidation_px is None       # ETH: null in the response
 
 
 def test_open_orders_include_triggers():

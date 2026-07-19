@@ -92,6 +92,10 @@ class Position(BaseModel):
     size: float
     entry_price: float
     unrealized_pnl: float = 0.0
+    # Exchange-reported liquidation price, or None when there is none to report — verified
+    # live: Hyperliquid returns `liquidationPx: null` for a cross-margin position with ample
+    # collateral (far from liquidation). None ⇒ "no near liquidation risk" (wave-2 M).
+    liquidation_px: float | None = None
 
 
 class Fill(BaseModel):

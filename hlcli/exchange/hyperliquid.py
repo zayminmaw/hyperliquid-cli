@@ -113,6 +113,7 @@ class HyperliquidExchange:
             szi = float(p["szi"])
             if szi == 0:
                 continue
+            liq = p.get("liquidationPx")  # null when far from liquidation (verified live)
             positions.append(
                 Position(
                     coin=p["coin"],
@@ -120,6 +121,7 @@ class HyperliquidExchange:
                     size=abs(szi),
                     entry_price=float(p["entryPx"]),
                     unrealized_pnl=float(p.get("unrealizedPnl", 0.0)),
+                    liquidation_px=float(liq) if liq is not None else None,
                 )
             )
         return positions

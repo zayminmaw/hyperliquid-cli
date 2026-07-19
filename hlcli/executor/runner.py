@@ -152,6 +152,7 @@ def run_once(
             adopt_unmanaged(exchange, state, positions=positions, alerter=alerter, now=now)
         if alerter is not None:
             _alert_unmanaged(state, alerter, positions)
+            _alert_liquidation_near(state, alerter, positions, marks, caps.min_liquidation_distance_pct)
 
     # WAIT re-checks (skip in a dry-run preview, and while the kill switch is tripped — a
     # re-check can't fire anyway, so don't spend an LLM call or a follow-up attempt on it;
@@ -582,6 +583,35 @@ def _alert_unmanaged(state: StateStore, alerter: Alerter, positions: list[Positi
         if unmanaged:
             alerter.alert("unmanaged_position", level="critical", coins=unmanaged)
         state.meta_set(_UNMANAGED_ALERT_KEY, fingerprint)
+
+
+_LIQ_ALERT_KEY = "alert_liquidation_near_last"
+
+
+def _alert_liquidation_near(state: StateStore, alerter: Alerter, positions: list[Position],
+                            marks: dict[str, float], min_distance_pct: float) -> None:
+    """Alert (on change) when an open position's mark sits within `min_distance_pct` of its
+    exchange-reported liquidation price (wave-2 M). A position that close to liquidation means
+    its native stop is missing or set below liquidation — a human must act. Positions with no
+    `liquidation_px` (paper always; a well-collateralised cross position) carry no risk here
+    and are skipped. Edge-triggered like the unmanaged alert, so a lingering danger pages once
+    rather than every pass."""
+    if min_distance_pct <= 0:
+        return
+    near: list[str] = []
+    for p in positions:
+        mark = marks.get(p.coin)
+        if p.liquidation_px is None or not mark or mark <= 0:
+            continue
+        if abs(mark - p.liquidation_px) / mark * 100.0 < min_distance_pct:
+            near.append(p.coin)
+    near.sort()
+    fingerprint = ",".join(near)
+    if fingerprint != (state.meta_get(_LIQ_ALERT_KEY) or ""):
+        if near:
+            alerter.alert("liquidation_near", level="critical", coins=near,
+                          min_distance_pct=min_distance_pct)
+        state.meta_set(_LIQ_ALERT_KEY, fingerprint)
 
 
 def _note(*, dry_run: bool, fire_enabled: bool) -> str:

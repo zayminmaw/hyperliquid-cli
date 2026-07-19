@@ -82,6 +82,12 @@ class Caps(BaseSettings):
     max_total_exposure_usd: float = 0.0
     max_gross_leverage: float = 5.0
     rr_floor: float = 1.5
+    # Distance-to-liquidation floor in percent (wave-2 M). An open position whose mark sits
+    # within this % of its exchange-reported `liquidationPx` raises a critical alert — a stop
+    # that far under water means native protection is missing or set below liquidation. Only
+    # meaningful live (paper reports no liquidationPx); 0 disables. A pre-fire maintenance-
+    # margin gate (`crossMaintenanceMarginUsed`) is the tracked M follow-on.
+    min_liquidation_distance_pct: float = 5.0
     max_signal_age_minutes: int = 30
     # Exchange-enforced floor (Hyperliquid rejects orders under $10 notional) — the gate
     # rejects early with a clear reason instead of a late exchange error (audit X-2).
