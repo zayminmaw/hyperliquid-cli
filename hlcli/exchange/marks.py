@@ -7,11 +7,21 @@ run without the exchange extra installed. The SDK is only needed to *sign* write
 
 from __future__ import annotations
 
+import random
 import time
+from collections.abc import Callable
 
 import httpx
 
+from hlcli.core.backoff import backoff_delay
 from hlcli.core.types import Candle, Network
+
+# HL rate-limits the shared /info endpoint by IP (aggregate weight 1200/min; allMids
+# and l2Book cost 2 each) and returns 429 when a client exceeds it — verified against
+# the official rate-limits doc, 2026-07. 5xx and transport drops are transient too.
+# We retry those (bounded, jittered backoff) so a hot-loop read survives a brief limit
+# without a naked raise; a persistent failure still re-raises for the caller's own loop.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 # Public REST endpoints (mirrors the SDK's constants, without importing it).
 _API_URLS = {
@@ -33,17 +43,70 @@ def api_url(network: Network) -> str:
 
 
 class MarksFeed:
-    def __init__(self, base_url: str, *, ttl_seconds: float = 2.0, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        ttl_seconds: float = 2.0,
+        timeout: float = 10.0,
+        max_retries: int = 3,
+        retry_base: float = 0.5,
+        retry_max_delay: float = 4.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._ttl = ttl_seconds
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
         self._cache: dict[str, float] = {}
         self._fetched_at = 0.0
         self._sz_decimals: dict[str, int] | None = None  # static per session; fetched once
+        self._max_retries = max_retries
+        self._retry_base = retry_base
+        self._retry_max = retry_max_delay
+        self._sleep = sleep_fn  # injected so tests exercise the loop without real waits
 
     def _info(self, body: dict) -> dict:
-        response = self._client.post("/info", json=body)
-        response.raise_for_status()  # an HTTP error shouldn't surface as a parse error downstream
-        return response.json()
+        """POST to /info, retrying a bounded number of times on rate-limit (429), 5xx,
+        and transient transport errors before re-raising. A non-retryable HTTP error
+        (e.g. a 4xx that isn't 429) fails fast — retrying a bad request won't fix it.
+        Worst-case total wait is bounded (~a few seconds) so a hot-loop read can't hang."""
+        attempt = 0
+        while True:
+            try:
+                response = self._client.post("/info", json=body)
+                response.raise_for_status()  # an HTTP error shouldn't surface as a parse error downstream
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in _RETRYABLE_STATUS or attempt >= self._max_retries:
+                    raise
+                retry_after = self._retry_after(exc.response)
+            except httpx.TransportError:  # connect/read timeouts, network drops — transient
+                if attempt >= self._max_retries:
+                    raise
+                retry_after = None
+            attempt += 1
+            if retry_after is not None:  # server's Retry-After is authoritative, but clamp it
+                delay = min(retry_after, self._retry_max)  # so a hot-loop read can't stall unboundedly
+            else:
+                delay = self._jitter(backoff_delay(self._retry_base, attempt, self._retry_max))
+            self._sleep(delay)
+
+    @staticmethod
+    def _retry_after(response: httpx.Response) -> float | None:
+        """The `Retry-After` header in seconds, or None if absent/an HTTP-date form
+        (which HL doesn't send — fall back to computed backoff rather than parse dates)."""
+        raw = response.headers.get("retry-after")
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _jitter(delay: float) -> float:
+        """Equal jitter: keep half the backoff fixed, randomize the rest — spreads out
+        retries (avoids a thundering herd) while still guaranteeing a real pause."""
+        return delay * 0.5 + random.random() * delay * 0.5
 
     def all_marks(self, *, force: bool = False) -> dict[str, float]:
         now = time.monotonic()

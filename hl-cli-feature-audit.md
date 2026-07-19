@@ -429,7 +429,17 @@ One-liner: close the two CRUD gaps testing found — no in-place account edit (a
   and re-check perms. **MUST-VERIFY:** nothing exchange-side; keep the key handling identical to `account add`.
 - **Dependencies:** none.
 
-### 7️⃣ Q — Read-side rate-limit handling + WebSocket marks  ·  Impact **Med (autonomy)** / Effort **M–L**
+### 7️⃣ Q — Read-side rate-limit handling + WebSocket marks  ·  Impact **Med (autonomy)** / Effort **M–L**  ·  ✅ DONE (read-backoff) / ⏸ WS deferred
+**Shipped (2026-07-19):** bounded, jittered read-side retry in `MarksFeed._info` — retries 429 / 5xx / transient
+transport drops (`_RETRYABLE_STATUS`), honors a `Retry-After` header (clamped to `retry_max_delay` so a hot-loop read
+can't stall), fails fast on non-429 4xx, and re-raises after `max_retries` for the caller's own loop. Reuses
+`hlcli/core/backoff.py`; keeps the httpx `/info` path (paper stays keyless). Defaults `max_retries=3, base=0.5,
+max_delay=4.0` → worst-case ~7s bounded wait. **Verified against the official rate-limits doc (2026-07):** IP aggregate
+weight **1200/min**, `allMids`/`l2Book` weight **2**, over-limit → **HTTP 429** (may carry `Retry-After`); 5xx retryable.
+**WS marks feed deliberately deferred** — marks already carry a 2s TTL cache so poll load is low, and a persistent
+`Info.subscribe` connection adds a background thread + reconnect/staleness handling that needs its own evidence pass;
+the rate-limit hardening is the high-value slice. Revisit if a live loop actually hits limits.
+
 One-liner: make continuous `exec run` / `sentry run` / `agent run` resilient to HL info rate limits — bounded
 backoff on read 429s, and (optionally) a WebSocket marks feed to replace per-tick polling.
 - **Why hl-cli specifically:** marks/book/candles go through httpx `/info` polling (`hlcli/exchange/marks.py`);
@@ -455,7 +465,7 @@ backoff on read 429s, and (optionally) a WebSocket marks feed to replace per-tic
 5. **G (Wave-1) — reconciliation halt-on-divergence.** Elevated by the live run: now that hl-cli demonstrably
    fills/adopts/resolves real orders, a formal safe/requires-halt verdict on restart is a real mainnet backstop.
 6. **O, P — REPL header + CRUD completion.** Cheap UX wins; do whenever, no exchange risk.
-7. **Q — read rate-limit/WS.** Autonomy hardening; after the evidence/safety items.
+7. **Q — read rate-limit/WS.** ✅ read-backoff shipped; WS feed deferred (see Q entry). Autonomy hardening.
 
 ## 10. Wave-2 cross-cutting notes
 

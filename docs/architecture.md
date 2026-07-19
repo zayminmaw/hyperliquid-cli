@@ -150,8 +150,12 @@ check applied to the running gross across the whole book — the same check Mode
 | `mainnet` | real | real | agent wallet | **gated**: `HL_ENABLE_MAINNET=1` + `--network mainnet` + typed confirm; native SL/TP is a hard prerequisite |
 
 Reads (marks, book, positions) go over **httpx** against the public `/info` endpoint
-so paper mode never needs the SDK or a key. The `hyperliquid-python-sdk` and
-`eth_account` are **lazy-imported** and used only for signing writes.
+so paper mode never needs the SDK or a key. That shared endpoint is IP rate-limited
+(aggregate weight 1200/min), so `MarksFeed` wraps its reads in a **bounded, jittered
+retry** on 429 / 5xx / transient transport drops (honoring a `Retry-After` header,
+clamped so a hot-loop read can't stall) — reusing the same `core/backoff` formula the
+write paths use. The `hyperliquid-python-sdk` and `eth_account` are **lazy-imported**
+and used only for signing writes.
 
 ---
 
