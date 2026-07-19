@@ -263,5 +263,29 @@ def test_render_header_degrades_when_book_unreachable(monkeypatch, console):
         raise RuntimeError("unreachable")
 
     monkeypatch.setattr(repl, "open_env", boom)
+    monkeypatch.setattr(repl, "resolve_account", lambda state: None)
     render_header(_session(network=Network.TESTNET), console)  # must not raise
-    assert "positions unavailable" in console.file.getvalue()
+    out = console.file.getvalue()
+    assert "book unavailable" in out and "testnet" in out  # still shows network even when the book fails
+
+
+def test_render_header_shows_network_account_and_equity(monkeypatch, console):
+    # Wave-2 O: the header always shows which wallet on which network with what balance.
+    from hlcli.accounts.store import Account, AccountType
+    from hlcli.cli import repl
+
+    class _FakeEx:
+        def get_positions(self): return []
+        def get_marks(self): return {}
+        def equity(self): return 997.49
+
+    class _FakeStore:
+        def close(self): pass
+
+    monkeypatch.setattr(repl, "open_env", lambda state, *, for_write: (_FakeEx(), _FakeStore(), None, None))
+    monkeypatch.setattr(repl, "resolve_account", lambda state: Account(
+        alias="tn", address="0x8D6745c31f7416c3b3a97CF6F04DadC0Bb63360b",
+        network=Network.TESTNET, type=AccountType.TRADE))
+    render_header(_session(network=Network.TESTNET), console)
+    out = console.file.getvalue()
+    assert "testnet" in out and "tn (0x8D67…360b)" in out and "997.49" in out

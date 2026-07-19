@@ -71,6 +71,12 @@ List accounts. `--all` lists every network (default: just the current `--network
 ### `account set-default <alias>`
 Make `<alias>` the default for its network.
 
+### `account edit <alias>`
+Edit an existing account **in place** — `--address <0x…>` re-points it at a different
+main account, `--rekey` replaces the agent key (hidden prompt, same as `add`; refused on a
+read-only account). The alias and its default flag are kept. Renaming an alias isn't
+supported — `remove` + `add` for that.
+
 ### `account remove <alias>`
 Remove the account and delete its stored key (if any).
 
@@ -267,6 +273,11 @@ the same surface; `set`/`edit` are direct operator control over it.
 Open `config/active_config.json` in `$EDITOR` (seeded with the current clamped surface if
 absent). On save it is re-validated and clamped: an out-of-range edit is silently pulled
 back into range, malformed JSON fails loudly — nothing bad reaches the order path.
+
+### `config reset`
+Remove `config/active_config.json`, reverting the tunable surface to the built-in safe
+defaults. Hard caps (`.env`), the decision prompt, and any pending tuner proposals are left
+untouched.
 
 ---
 

@@ -27,7 +27,7 @@ from rich.table import Table
 # Typer 0.26 vendors click as `typer._click`; there is no standalone `click` here.
 from typer._click.exceptions import Abort, ClickException
 
-from hlcli.cli.context import GlobalState, open_env
+from hlcli.cli.context import GlobalState, open_env, resolve_account
 from hlcli.cli.errors import DOMAIN_ERRORS, render_domain_error, render_error
 from hlcli.core.config import get_caps
 from hlcli.core.network import resolve_network
@@ -148,15 +148,34 @@ def _watch_row(r: PositionRow) -> dict:
     }
 
 
-def render_header(session: Session, console: Console) -> None:
-    """Render the positions + live-PnL header above the next prompt.
+def _account_label(session: Session) -> str:
+    """`alias (0xabcd…wxyz)` for a resolved trading account, else a plain marker —
+    always shows *which wallet* the next order would hit (wave-2 O). Best-effort: a
+    bad alias / store error degrades to a dash rather than breaking the header."""
+    try:
+        acct = resolve_account(session.global_state())
+    except Exception:
+        return "?"
+    if acct is None:
+        return "paper book" if session.network is Network.PAPER else "no account"
+    short = f"{acct.address[:6]}…{acct.address[-4:]}" if len(acct.address) > 10 else acct.address
+    return f"{acct.alias} ({short})"
 
-    Decorative and best-effort: any failure to reach the book (e.g. a live
-    network with no account resolved yet) degrades to a dim one-liner and must
-    never break the loop — hence the deliberate broad catch at this UI boundary.
+
+def render_header(session: Session, console: Console) -> None:
+    """Render the network · account · balance summary + positions table above the next
+    prompt, so the operator always sees which wallet on which network with what balance
+    before any order (wave-2 O).
+
+    Decorative and best-effort: any failure to reach the book (e.g. a live network with
+    no account resolved yet) degrades to a dim one-liner and must never break the loop —
+    hence the deliberate broad catch at this UI boundary.
     """
     if not session.header or session.json:
         return
+    net = session.network.value
+    style = _NET_STYLE[session.network][0]
+    acct_label = _account_label(session)
     try:
         exchange, store, _caps, _tunable = open_env(session.global_state(), for_write=False)
         try:
@@ -166,16 +185,17 @@ def render_header(session: Session, console: Console) -> None:
         finally:
             store.close()
     except Exception as exc:  # UI boundary: degrade, never crash the shell
-        console.print(f"[dim]positions unavailable: {exc}[/dim]")
+        console.print(f"[{style}]{net}[/] · [dim]acct[/] {acct_label} · [dim]book unavailable:[/] {exc}")
         return
 
-    if not positions:
-        console.print("[dim]— no open positions —[/dim]")
-        return
-    rows = position_rows(positions, marks)
-    console.print(_positions_table(rows))
+    rows = position_rows(positions, marks) if positions else []
     total = round(sum(r.upnl for r in rows), 4)
-    console.print(f"[dim]equity[/] {_num(equity)}   [dim]open[/] {len(rows)}   [dim]uPnL[/] {_pnl(total)}")
+    console.print(
+        f"[{style}]{net}[/] · [dim]acct[/] {acct_label} · [dim]equity[/] {_num(equity)}"
+        f"   [dim]open[/] {len(rows)}   [dim]uPnL[/] {_pnl(total)}"
+    )
+    if rows:
+        console.print(_positions_table(rows))
 
 
 def _watch(session: Session, console: Console) -> None:

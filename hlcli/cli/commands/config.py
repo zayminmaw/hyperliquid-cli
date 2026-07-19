@@ -108,6 +108,24 @@ def edit(ctx: typer.Context) -> None:
     emit({"path": str(path), "status": "clamped_and_saved"}, as_json=state.json_out, title="config edit")
 
 
+@app.command("reset")
+def reset(ctx: typer.Context) -> None:
+    """Reset the tunable surface to the built-in safe defaults by removing
+    `config/active_config.json`. Hard caps (`.env`) are untouched; the decision prompt and
+    any pending tuner proposals are left alone — this reverts only the active tunable config.
+    """
+    state = state_of(ctx)
+    path = get_caps().config_path
+    existed = path.exists()
+    if existed:
+        path.unlink()
+    emit(
+        {"path": str(path), "removed": existed,
+         "note": "defaults restored" if existed else "already at defaults"},
+        as_json=state.json_out, title="config reset",
+    )
+
+
 def _launch_editor(path: Path) -> None:
     """Open `path` in the user's editor. A module-level indirection so tests can stub it."""
     editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"

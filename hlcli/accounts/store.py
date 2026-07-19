@@ -107,6 +107,17 @@ class AccountStore:
             self._conn.execute("DELETE FROM accounts WHERE alias = ?", (alias,))
         return account
 
+    def set_address(self, alias: str, address: str) -> Account:
+        """Re-point an existing account at a different main address (wave-2 P) — the alias,
+        default flag, and key reference are untouched."""
+        account = self.get(alias)
+        if account is None:
+            raise AccountError(f"no account '{alias}'.")
+        with self._conn:
+            self._conn.execute("UPDATE accounts SET address = ? WHERE alias = ?", (address, alias))
+        account.address = address
+        return account
+
     def set_default(self, alias: str) -> Account:
         account = self.get(alias)
         if account is None:

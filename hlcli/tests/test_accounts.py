@@ -50,6 +50,20 @@ def test_set_default_moves_flag_within_network(tmp_path):
     assert s.get_default(Network.TESTNET).alias == "b"
 
 
+def test_set_address_repoints_and_keeps_alias_default(tmp_path):
+    # Wave-2 P: account edit --address updates the traded address in place.
+    s = _store(tmp_path)
+    s.add(_acct(alias="main", key_ref="main"))  # first → default
+    updated = s.set_address("main", "0xdef")
+    assert updated.address == "0xdef" and updated.alias == "main" and updated.is_default
+    assert s.get("main").address == "0xdef"  # persisted
+
+
+def test_set_address_unknown_alias_raises(tmp_path):
+    with pytest.raises(AccountError):
+        _store(tmp_path).set_address("nope", "0xdef")
+
+
 def test_resolve_prefers_explicit_alias_then_default(tmp_path):
     s = _store(tmp_path)
     s.add(_acct(alias="a"))

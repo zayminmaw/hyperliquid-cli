@@ -79,6 +79,14 @@ def test_config_edit_reclamps_on_save(isolated_caps, monkeypatch):
     assert load_tunable(path).risk_per_trade_pct == 5.0  # clamped back on save
 
 
+def test_config_reset_restores_defaults(isolated_caps):
+    runner.invoke(app, ["config", "set", "risk_per_trade_pct", "1.0"])
+    r = runner.invoke(app, ["--json", "config", "reset"])
+    assert r.exit_code == 0 and json.loads(r.output)["removed"] is True
+    show = runner.invoke(app, ["--json", "config", "show"])
+    assert json.loads(show.output)["risk_per_trade_pct"] == 0.5  # back to the built-in default
+
+
 def test_tune_run_no_ops_on_empty_record(isolated_caps):
     # No resolved trades → both tuners are sample-gated, no model is called, nothing written.
     result = runner.invoke(app, ["--json", "tune", "run"])
