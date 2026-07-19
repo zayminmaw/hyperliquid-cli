@@ -256,3 +256,218 @@ allowed universe. H is an optimization behind the native-stop backstop.)*
   rows, consistent with the existing evidence-hygiene rules.
 - None of the shortlist needs anything new from thirdeye-core's output — the signal boundary is already
   sufficient.
+
+---
+
+# Wave 2 — Live-run findings (first testnet drill, 2026-07-19) + Hyperliquid unified accounts
+
+**Date added:** 2026-07-19
+**Provenance:** Wave 1 (§§1–6, items A–J) was *static analysis of the Vibe-Trading source, written before
+hl-cli had ever placed a live order.* Wave 2 is grounded in the **first real testnet drill** — the first
+time hl-cli actually signed, filled, protected, resolved, and adopted real orders — and in Hyperliquid's
+**unified-account** rollout (now the default for new accounts). Where Wave 1 could only reason about code,
+Wave 2 reports what the exchange **actually returned**. New items are lettered **K onward** to stay distinct
+from A–J. Every claim cites a verified `file:line` or an HL doc; anything not yet verifiable against a live
+position is marked **MUST-VERIFY**, never asserted.
+
+> ## ⚠️ BINDING RULE FOR WAVE 2 — DO NOT GUESS. LOOK IT UP.
+>
+> Every item here touches money, the exchange wire, or the evidence the graduation/tuner decisions ride on.
+> **Do not infer an API field, a fee formula, a funding cadence, a sign convention, or a response shape from
+> memory or from another exchange.** Before writing code for any item:
+>
+> 1. **Read the Hyperliquid docs for the exact endpoint/field** — [Info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint),
+>    [Perpetuals info](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals),
+>    [Fees](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees),
+>    [Funding](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding),
+>    [Margining](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margining),
+>    [Account abstraction modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes).
+> 2. **Confirm the field on a *live* response** — capture the real JSON from a funded account with an open
+>    position and a completed fill (testnet is fine) and assert the shape in a fixture, exactly as the
+>    `order_status_by_cloid` recovery path already demands (`AGENT-CONTEXT.md` gotcha).
+> 3. **Confirm sign conventions empirically** — is `cumFunding` a cost (positive = paid) or a credit? Is
+>    `closedPnl` already net of `fee`? Do **not** assume; open a tiny position, hold it across a funding
+>    hour, close it, and read back the ledger.
+> 4. **Cite the doc URL + the live-capture fixture in the PR.** A number without a citation is a guess.
+>
+> The F2 unified-account equity bug (below) is the cautionary tale: it existed *because* an earlier version
+> read a field (`marginSummary.accountValue`) that was correct on the old account model and silently wrong
+> under unified accounts. The only reason it was caught is that the drill read the **live** response. Guessing
+> would have shipped it to mainnet.
+
+## 7. What the first live run exposed (context for Wave 2)
+
+The drill surfaced one shipped bug and three structural gaps, all verified in code this session:
+
+- **F2 (fixed) — `equity()` was unified-account-blind.** It read `clearinghouseState.marginSummary.accountValue`,
+  which under a **unified account** is only *committed position margin* (~0 when flat) — the tradeable
+  collateral lives in the spot clearinghouse. Live proof: 998 USDC present, `equity()` returned `0.0` →
+  Mode-B sizing and the `equity>0` gate would have blocked every fire on testnet. Fixed to detect
+  `userAbstraction=="unifiedAccount"` and read spot USDC + Σ open-position uPnL (`hlcli/exchange/hyperliquid.py`).
+  **This proves the whole class of "field means something different under unified accounts" risk is real** —
+  Wave 2's K/M items exist because the same class of gap remains in P&L and margin accounting.
+- **Fees: absent.** `grep -rniE 'fee|taker|maker|commission' hlcli/` → nothing in any P&L path. → item **K**.
+- **Funding: absent.** `grep -rniE 'funding' hlcli/` → nothing anywhere. → items **K** (accounting) + **N** (signal).
+- **Externally-closed positions book the *mark*, not the fill.** `hlcli/executor/resolve.py:186`:
+  `return "closed", mark` — a manual flatten / liquidation / any close hl-cli didn't place is valued at the
+  current mark. Live proof: a flatten filled at 64699 but the ledger booked exit 64703.5. → item **L**.
+- **Margin health: absent.** `grep -rniE 'liquidation|maintenanceMargin|withdrawable|buying_power' hlcli/` →
+  nothing. No pre-fire or in-trade distance-to-liquidation check — newly consequential because unified margin
+  lets a perp loss consume spot collateral. → item **M**.
+
+## 8. Wave-2 candidate features
+
+### 🥇 K — Fee- and funding-honest realized P&L  ·  Impact **High** / Effort **M**  ·  🎯 EVIDENCE
+One-liner: make every realized-P&L number the ledger stores (`trades.realized`, `r_multiple`) net of the
+**taker fees actually paid** and the **funding actually accrued**, so graduation expectancy and the tuner
+cohorts stop being systematically optimistic.
+- **Why hl-cli specifically:** graduation (`safety/graduation.assess`) and both tuners promote on `exec report`
+  expectancy. Today that expectancy ignores two real costs:
+  - **Fees:** HL perps are **0.015% maker / 0.045% taker** at the entry tier ([Fees docs](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees)).
+    hl-cli entries are slippage-capped **IOC takers** (`hlcli/exchange/hyperliquid.py`, audit X-1) → ~**0.045% in + 0.045% out ≈ 0.09% round-trip**, paid on notional. For a trade risking 0.5% of equity at 1R, that fee is a meaningful fraction of the edge and is currently invisible.
+  - **Funding:** charged/paid **hourly** on open positions ([Funding docs](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding)); a multi-hour hold silently accrues carry the ledger never sees.
+- **Overlap check:** not in hl-cli (grep-verified empty); explicitly executor territory (thirdeye-core owns the
+  *suggestion stream*, not the *equity curve* — `validation.py:26`). Complements Wave-1 D (realized slippage) —
+  D, K together make "realized R" mean realized-net-of-costs.
+- **The right data source (verify before coding):** HL already computes both for you — do **not** re-derive
+  fees from a rate table if the exchange reports the actual charge:
+  - **Per-fill fee + realized:** `Info.user_fills_by_time` / `user_fills` returns per-fill `fee` and
+    `closedPnl`. **MUST-VERIFY:** confirm the exact field names and **whether `closedPnl` is already net of
+    `fee`** (HL fills are documented to carry both; capture a real fill and check — do not assume the sign or
+    the netting). Doc: [Info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint).
+  - **Funding accrued on an open position:** `clearinghouseState` position object carries
+    `cumFunding {allTime, sinceOpen, sinceChange}` (field names **confirmed** against the Perpetuals info doc
+    this session). `sinceOpen` is the funding accrued since the position opened. **MUST-VERIFY:** the **sign
+    convention** (is positive = paid-out cost or received-credit?) on a live position held across a funding hour.
+  - **Closed-position funding ledger:** `Info.user_funding_history` / `userFunding` deltas carry
+    `{coin, szi, fundingRate, usdc, nSamples}` (**confirmed** field names). `usdc` is the settled amount per event.
+- **Effort:** additive ledger columns (`fee_paid`, `funding_paid`) set at resolve time from the fill/funding
+  reads; fold into `_pnl` (`resolve.py:189`) and the report. Paper mode must **model** the taker fee (a
+  constant from a `HL_TAKER_FEE_PCT`-style hard cap, or `Info.user_fees` for the live tier) so paper→testnet
+  expectancy stays comparable — **MUST-VERIFY** the paper fee model matches how HL actually charges (notional × rate).
+- **Dependencies:** none external beyond the reads above. Evidence-hygiene: keep excluding `aborted`/`abort_failed`/adopted.
+- **MUST-VERIFY checklist:** fill `fee`/`closedPnl` field names + netting + sign; `cumFunding.sinceOpen` sign;
+  `user_fees` shape for the live tier; whether HL charges fees on the **reduce-only close** too (it does — both legs).
+
+### 🥈 L — Book the real exit fill for externally-closed positions  ·  Impact **Med–High** / Effort **S–M**  ·  🎯 EVIDENCE
+One-liner: when a position hl-cli was tracking disappears from the book (manual flatten, native-stop hit that
+the resolver only *infers*, liquidation), resolve it at the **actual exit fill price**, not the current mark.
+- **Why hl-cli specifically:** `resolve.py:186` returns `("closed", mark)` for any externally-closed position,
+  and `resolve.py:79` books an SL/TP hit at the **trigger level** (`level_price`) rather than the fill — both
+  are estimates. Live proof from the drill: flatten filled 64699, ledger booked 64703.5 (a 4.5-point,
+  ~0.007% error that compounds across the sample and biases graduation/tuner R). Only executor-*placed* closes
+  use the true `result.avg_price` (`resolve.py:87`).
+- **Overlap check:** partial — the resolve path exists; what's missing is a lookup of the real exit. Composes
+  with Wave-1 G (reconciliation): the same fill read that fixes the price also tells G whether the disappearance
+  was expected.
+- **The right data source (verify before coding):** `Info.user_fills_by_time(start=position_open_ts)` filtered
+  to the coin + reduce/again the closing `dir`; the closing fill(s)' `px` (size-weighted if partial) is the
+  true exit, and its `closedPnl` is HL's own realized number (ties into K). **MUST-VERIFY** the fill `dir`
+  vocabulary (e.g. "Close Long" / "Close Short") and that a **liquidation** shows as a fill here (it should),
+  so a liquidated position books its real liquidation price, not the mark.
+- **Effort:** one info read in the vanished-position branch of `resolve.py`; fall back to the mark **only** if
+  no matching fill is found (fail-honest: annotate the row as mark-estimated so evidence can down-weight it).
+- **Dependencies:** none. **MUST-VERIFY:** fill dir vocabulary; partial-close aggregation; liquidation-as-fill.
+
+### 🥉 M — Margin-health / liquidation-distance guard  ·  Impact **High** / Effort **M**  ·  🎯 SAFETY
+One-liner: a pre-fire gate check **and** a sentry read that reject/flag when a position would sit too close to
+its liquidation price or push cross-maintenance-margin past a safe fraction of equity.
+- **Why hl-cli specifically:** hl has **no** liquidation or maintenance-margin awareness (grep-verified empty).
+  Under **unified margin** the spot↔perp firewall is gone ([Account abstraction modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes)) —
+  "a severe loss on a leveraged perp can consume capital you intended to keep in spot." The existing per-order
+  `max_leverage` cap bounds a single order's *nominal* leverage, not the **cross-margin liquidation proximity**
+  of the resulting book. For an autonomous manager this is a real, unbounded tail.
+- **Overlap check:** not in hl-cli; related to Wave-1 A (gross exposure) but distinct — A bounds *notional*, M
+  bounds *distance to liquidation* (a 3× book can be safe with deep margin; a 2× book near maintenance is not).
+- **The right data source (field names CONFIRMED this session):** `clearinghouseState` gives, per position,
+  `liquidationPx`, `marginUsed`, `maxLeverage`, `positionValue`; and top-level `crossMaintenanceMarginUsed`
+  and `withdrawable`. A pre-fire check can compute post-fire distance-to-liquidation from `liquidationPx` vs
+  mark; an in-trade sentry read can page/flag when `(equity − crossMaintenanceMarginUsed)` drops below a hard
+  buffer. **MUST-VERIFY:** how `liquidationPx` behaves for a *cross-margin* position under unified accounts
+  (it depends on the whole book, not one position) — read it live before trusting a single-position formula;
+  and confirm `crossMaintenanceMarginUsed` units (USDC) on a live position.
+- **Effort:** a `Caps` hard cap (`HL_MIN_LIQUIDATION_DISTANCE_PCT` and/or `HL_MAX_MAINTENANCE_MARGIN_FRAC`);
+  a gate check after sizing; a sentry status field + alert. Fail-closed on missing `liquidationPx`.
+- **Dependencies:** none. This is a **hard-cap** surface item (off-limits to the LLM/tuner), like A/B.
+
+### 4️⃣ N — Funding-rate awareness as a forward-looking signal  ·  Impact **Med** / Effort **M**
+One-liner: surface the **current/predicted funding rate** in the decision context (so the LLM weighs carry in
+act/skip/timing) and give sentry a rule to reconsider a position bleeding funding against a flat thesis.
+- **Distinction from K:** K *accounts* for funding already paid (backward, evidence). N *anticipates* funding
+  as a cost of the decision (forward, judgment). Both, but different surfaces.
+- **Why hl-cli specifically:** `enrich` (`hlcli/executor/enrich.py`) assembles mark, candles, regime, book,
+  outcomes — but **no funding**. A setup that's marginal on price can be clearly negative once an adverse
+  hourly funding is priced in, especially for a WAIT that intends to hold.
+- **The right data source (field names CONFIRMED):** `Info.funding_history(coin)` → `{fundingRate, premium, time}`
+  per hour; `meta_and_asset_ctxs` carries the current `funding` per asset in the asset context. **MUST-VERIFY:**
+  which field is the *predicted next* vs *last realized* funding, and the rate's period (HL funding is **hourly**
+  and rate is per-hour, cap 4%/hr in extremis — [Funding docs](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding)); do not annualize or hourly-ize by guess.
+- **Overlap check:** not in hl-cli; sits on the **tunable/context** surface (advisory to the LLM, clamped),
+  not a hard gate — funding is a cost input, not a safety limit.
+- **Effort:** add a funding field to `EnrichedContext`, one line in the decision prompt, and an optional sentry
+  consideration. Keep it advisory (the LLM weighs it); the gate stays deterministic.
+- **Dependencies:** none. **MUST-VERIFY:** predicted-vs-realized field; period; sign (long pays positive funding).
+
+### 5️⃣ O — REPL header: network + active account + balance  ·  Impact **Low (UX/safety)** / Effort **S**
+One-liner: show the **active account alias + short address** alongside the network and live equity in the REPL
+header, so the operator always sees *which wallet on which network with what balance* before any order.
+- **Why hl-cli specifically:** the prompt already colors the network (`hl(testnet)>`) and the header shows
+  equity/uPnL (`hlcli/cli/repl.py`), but **not which account** is resolved — the exact thing that determines
+  the address you trade. On a machine with multiple testnet/mainnet accounts this is a wrong-wallet foot-gun.
+- **Overlap check:** pure hl-cli UX; not order-path. Cheap, high day-to-day clarity, zero risk.
+- **Effort:** the REPL already resolves the account for the header's `open_env`; add alias + `masked` address
+  to the header line. **MUST-VERIFY:** nothing exchange-side — but keep the key masked (reuse the existing
+  address-truncation, never print the key).
+
+### 6️⃣ P — CRUD completeness: `account edit`/re-key + `config reset`  ·  Impact **Low** / Effort **S**
+One-liner: close the two CRUD gaps testing found — no in-place account edit (address/alias/re-key: today you
+`remove`+`add`) and no `config reset/unset` (today you delete `active_config.json` by hand).
+- **Why hl-cli specifically:** `account` supports add/ls/set-default/remove but no edit; `config` now has
+  show/set/edit (built this session) but no reset-to-defaults. Both are small ergonomic completions.
+- **Overlap check:** pure hl-cli; `config reset` must go through the same clamp-on-write path as `set`/`edit`
+  (delete-or-rewrite `active_config.json`); `account edit --rekey` must reuse the hidden-prompt keystore write
+  and re-check perms. **MUST-VERIFY:** nothing exchange-side; keep the key handling identical to `account add`.
+- **Dependencies:** none.
+
+### 7️⃣ Q — Read-side rate-limit handling + WebSocket marks  ·  Impact **Med (autonomy)** / Effort **M–L**
+One-liner: make continuous `exec run` / `sentry run` / `agent run` resilient to HL info rate limits — bounded
+backoff on read 429s, and (optionally) a WebSocket marks feed to replace per-tick polling.
+- **Why hl-cli specifically:** marks/book/candles go through httpx `/info` polling (`hlcli/exchange/marks.py`);
+  the agent polls on tunable cadences. HL info endpoints are rate-limited; the reduce-only *write* paths already
+  back off (audit D-2), but the **read** paths don't, and a tight autonomous loop can hit limits. Wave-1 already
+  flagged the WS upgrade as a deferred refinement (H / "watch modes are poll-based").
+- **Overlap check:** partial — write backoff exists (`hlcli/core/backoff.py`), read backoff + WS do not.
+- **The right facts (verify before coding):** **MUST-VERIFY** the current HL info rate-limit numbers and the
+  429 response shape against [the docs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)
+  (limits change — do not hard-code a number from a blog); confirm the SDK `Info.subscribe` WS message shape
+  before replacing the poll. Keep the httpx `/info` path (paper stays keyless — Wave-1 gotcha).
+- **Dependencies:** none external. Lower priority than K/L/M; it's an autonomy-hardening item.
+
+## 9. Wave-2 ranked shortlist (build in this order)
+
+1. **K — fee/funding-honest P&L.** The highest-leverage evidence fix: every graduation and tuner-promote
+   decision is currently made on cost-blind expectancy. Do first if mainnet is the goal. Pairs with Wave-1 D.
+2. **L — real exit fill for externally-closed positions.** Cheap, same `user_fills` read as K, removes a
+   standing bias in the ledger. Ship alongside K.
+3. **M — margin-health / liquidation guard.** The top *new* safety item under unified margin; a hard cap the
+   LLM/tuner can't move. Do before any mainnet size increase.
+4. **N — funding as a forward signal.** After K (same funding plumbing), advisory-only, improves judgment.
+5. **G (Wave-1) — reconciliation halt-on-divergence.** Elevated by the live run: now that hl-cli demonstrably
+   fills/adopts/resolves real orders, a formal safe/requires-halt verdict on restart is a real mainnet backstop.
+6. **O, P — REPL header + CRUD completion.** Cheap UX wins; do whenever, no exchange risk.
+7. **Q — read rate-limit/WS.** Autonomy hardening; after the evidence/safety items.
+
+## 10. Wave-2 cross-cutting notes
+
+- **The binding rule at the top of this wave is not optional.** K/L/M/N read fields that behave differently
+  under unified vs standard accounts and whose sign/units/netting are easy to get subtly wrong — exactly the
+  shape of the F2 bug. Cite the doc + a live-capture fixture for every field, per `docs/evidence-gate.md`.
+- **Surface placement:** K, L extend the **evidence** surface (ledger/report); M extends the **hard-cap** gate
+  surface (`.env`/`Caps`, off-limits to LLM+tuner); N extends the **tunable/context** surface (advisory);
+  O, P, Q are **CLI/runtime** only. Keep the split intact.
+- **Evidence hygiene:** K/L change what `realized`/`r_multiple` *mean* — re-baseline any graduation thresholds
+  and re-check `conviction_calibration` after landing them, and keep excluding `aborted`/`abort_failed`/adopted.
+- **Paper parity:** K's paper fee/funding model must mirror how HL actually charges, or paper→testnet→mainnet
+  expectancy stops being comparable and the validation ladder loses its meaning. Verify the model, don't assume it.
+- **None of Wave 2 needs anything from thirdeye-core** — all of it is exchange-side accounting/safety the
+  executor owns. The signal boundary (§1) is still sufficient.

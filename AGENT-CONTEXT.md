@@ -1,6 +1,6 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-15 | Session: fresh-eyes review of 074e58b..HEAD (static + e2e flows) → all findings fixed + docs synced — 481 tests pass
+> Last updated: 2026-07-19 | Session: full feature test (paper + FIRST real testnet drill) → found+fixed F2 unified-account equity bug; 514 pass
 
 ---
 
@@ -16,6 +16,10 @@
 
 ## 📍 LAST ACTION
 
+- Did: **Full feature test across all hl command groups (paper + first real TESTNET drill).** Every group driven live: markets/asset/account reads, config, Mode A (leverage, market open/close, native SL/TP, limit, cancel, cancel-all, per-trade cap reject), Mode B (paper LLM skip + rule fire; **testnet live fire + native protection + oid-tracked ledger + vanished-position resolve**), sentry (paper shadow LLM + testnet adopt on a real book), tuner (sample-gate no-op + full seeded propose→diff→promote→history), agent (status/watchdog never+stale/run loop+daily), journal (digest/show/ls; reflection defers on open day by design), repl. **Found + fixed F2 (HIGH):** live `equity()` read only perp `accountValue`, ~0 under HL **unified accounts** (now testnet default) → testnet equity 0 → Mode B sizing/gate broken. Fix: detect `userAbstraction=="unifiedAccount"` → read spot USDC + Σ uPnL. Verified live (0→997.98). **Also fixed F1 (low):** implemented real `config set`/`config edit` (were stale "Phase 4" stubs) — set refuses hard caps + coerces + clamps on write, edit re-clamps on save; removed now-dead `stubs.py`. Synced docs (cli/modules/decisions.md) + ran round-2 regression. **523 pass** (+11). Working tree NOT committed.
+- Result: Both fixes drive-verified + regression-smoked. Testnet `tn` (0x8D67…) FLAT + clean, ~998 unified USDC. Paper DB has harmless test trades. Findings: scratchpad/test-findings.md. Files: exchange/hyperliquid.py, core/config_schema.py, cli/commands/config.py, cli/app.py, (rm) cli/stubs.py, docs/{cli,modules,decisions}.md, tests/{test_hyperliquid_reads,test_config_schema,test_cli}.py.
+
+### Prior action (executor-audit shortlist review)
 - Did: **Fresh-eyes review (074e58b..HEAD) → fixed all 7 findings + synced docs.** #1 Mode A now enforces the account-wide gross-exposure/leverage caps via shared `gate.gross_exposure_reason`/`book_gross_notional` (daily-count stays executor-only — ledger-derived); #2 `trades_today` increments next to `open_trade` so an aborted entry counts consistently with `count_trades_opened_since`; #3 `_liveness` helper de-dups the 3 agent call sites; #4 sortino computes `_downside_deviation` once + symmetric guards; #5 `performance()` docstring states whole-DB (real+shadow) scope; #6 `DAY_SECONDS` centralized in `core/types`; #7 `.env.example` liveness cap moved to the agent block. 6 new tests (gross helpers, abort-count, watchdog paging, promote-preserves-trail). Docs synced: CLAUDE.md, docs/{cli,setup,modules,architecture}.md, .env.example.
 - Result: **512 pass**. Mode A gross reject + watchdog paging + promote-preserves-trail all drive-verified. Branch NOT pushed.
 - File(s) touched: executor/{gate,runner}.py, core/types.py, sentry/shadow.py, tuner/{stats,config_tuner}.py, cli/commands/{trade,agent,exec_,sentry}.py, state/store.py, .env.example, CLAUDE.md, docs/*, tests/{test_gate,test_executor,test_tuner,test_cli}.py
@@ -56,7 +60,7 @@
 | `PLAN.md` | Authoritative spec — resolves conflicts |
 | `ACTION-ITEMS.md` | Phase-by-phase status (source of truth) |
 | `hlcli/core/config.py` | Hard caps (`HL_*` env); `get_caps()`; relative `config_path` anchors to `data_dir` |
-| `hlcli/core/config_schema.py` | Tunable surface + `clamp()` (non-finite ⇒ field default) + `load_tunable()` |
+| `hlcli/core/config_schema.py` | Tunable surface + `clamp()` (non-finite ⇒ field default) + `load_tunable`/`save_tunable` + `set_field`/`get_field`/`tunable_keys` (manual `hl config set/edit`, hard caps refused) |
 | `hlcli/core/{network,types,llm}.py` | network gate · domain types (`OpenOrder.is_trigger`) · llm: the ONE lazy anthropic import; key from shell env or `.env`, never on Caps; `masked_api_key()` |
 | `hlcli/cli/context.py` | `GlobalState`, `build_for(state, for_write)` — account/key resolution, mainnet gate; `open_env` (stateful paper book / keyless live reads) |
 | `hlcli/cli/repl.py` | `hl repl` shell: dispatches via `get_command(app)` (callback keeps gate/resolution); stateful session flags injected per line; live-PnL header + `watch`; readline history/completion |
@@ -119,6 +123,7 @@
 - Config tuner proposes `trail` too now; `_validate` MERGES the payload onto the current config so untuned nested fields (`agent`) survive promote — don't revert to `model_validate(payload)` (it resets them to defaults). `DAY_SECONDS` lives in `core/types` — don't reinline `86400`.
 - `order_status_by_cloid`'s parse *logic* is fixture-locked (filled/resting/canceled/partial-cancel ⇒ fill for origSz−sz) — but the LIVE response shape still needs the first testnet drill before trusting the recovery path on mainnet. A resting recovered entry gets canceled by `_resolve_unknown`, never left live-untracked.
 - Evidence hygiene (2026-07-15): `assess` + `conviction_calibration` exclude aborted/abort_failed/adopted rows; `_alert_unmanaged` counts only REAL rows (`shadow=False`). Don't "simplify" the filters away — CLAUDE.md's evidence-gate section is binding.
+- **HL UNIFIED ACCOUNTS** (2026-07-19, now the testnet default): perp `clearinghouseState.marginSummary.accountValue` reflects ONLY committed position margin (~0 when flat), NOT tradeable equity — that lives in the unified spot USDC balance. `equity()` detects `userAbstraction=="unifiedAccount"` (cached) and returns spot USDC total + Σ open-position uPnL; standard accounts unchanged. Don't revert to the accountValue-only read. `get_positions()` still uses clearinghouseState.assetPositions (fine under unified). The spot→perp swap is DISABLED under unified — funds go straight to the unified balance; never tell a user to transfer spot→perp on a unified account. Faucet lands in SPOT; agent wallet is a SIGNER only (don't send funds to it).
 - Native SL/TP cancels are now BY OID (`trades.sl_oid/tp_oid`): use `cancel_trade_triggers` for one row; `cancel_coin_triggers` is the last-row-only sweep — never call it while a sibling slice is open. Legacy/oid-less rows fall back to the type-match cancel (safe: they have no sibling). Entry path + adopt + `apply_add` all record oids.
 - `record_fire` now returns bool (atomic claim). `fire()` and the sentry apply helpers claim-then-act; don't reintroduce a separate `already_fired` check before it.
 - Graduation counts positions, not partials (`assess` drops `status='scaled'`); the tuner's `summary`/cohorts still COUNT scaled (banked profit is a real outcome). Don't unify them.
