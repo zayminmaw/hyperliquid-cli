@@ -91,6 +91,12 @@ class Caps(BaseSettings):
     # fill worse than the cap (leverage multiplies slippage into margin). Entries only:
     # closes must fill and stay wide.
     max_entry_slippage_pct: float = 0.3
+    # Taker fee rate in percent (Hyperliquid entry tier ≈ 0.045% taker; verify your live
+    # tier via `Info.user_fees`). hl-cli entries and closes are takers, so realized P&L
+    # and R are booked NET of the round-trip taker fee (wave-2 K), keeping graduation and
+    # the tuner cost-honest. Paper *models* this fee so paper→testnet→mainnet expectancy
+    # stays comparable. 0 disables (the test caps pin it to keep gross assertions).
+    taker_fee_pct: float = 0.045
     # How many times the executor re-checks a candidate the LLM said to WAIT on before
     # giving up. 0 disables follow-ups (a `wait` becomes a terminal reject, as before).
     followup_max_attempts: int = 3

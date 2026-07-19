@@ -76,6 +76,8 @@ def caps(**kw) -> Caps:
         allowed_coins="BTC,ETH,SOL", starting_equity=10_000.0, max_notional_per_trade=1_000.0,
         max_concurrent_positions=3, max_leverage=3.0, rr_floor=1.5, max_signal_age_minutes=30,
         daily_loss_limit_pct=5.0,
+        # Gross by default so P&L/R assertions stay exact; a fee-aware test opts in (wave-2 K).
+        taker_fee_pct=0.0,
         # An absolute path that can never exist — prompt/config reads fall back to
         # built-in defaults instead of picking up a dev's real ~/.hyperliquid-cli.
         config_path=Path("/nonexistent/hlcli-tests/active_config.json"),

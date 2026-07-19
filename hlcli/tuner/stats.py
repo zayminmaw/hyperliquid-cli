@@ -210,7 +210,7 @@ def performance(trades: list[dict], *, starting_equity: float) -> dict:
     resolved = [t for t in trades if t.get("realized") is not None and t.get("closed_at") is not None]
     if not resolved:
         return {"n": 0, "profit_factor": None, "max_drawdown_pct": 0.0,
-                "sharpe": None, "sortino": None, "avg_slip_pct": None}
+                "sharpe": None, "sortino": None, "avg_slip_pct": None, "total_fees": 0.0}
     ordered = sorted(resolved, key=lambda t: t["closed_at"])
 
     gains = sum(t["realized"] for t in ordered if t["realized"] > 0)
@@ -240,4 +240,7 @@ def performance(trades: list[dict], *, starting_equity: float) -> dict:
         "sharpe": _ratio(mu, returns),
         "sortino": sortino,
         "avg_slip_pct": _avg_entry_slip_pct(ordered),
+        # Round-trip taker fees already subtracted from the realized/PF/expectancy above
+        # (wave-2 K) — surfaced so the operator can see the cost drag on the net numbers.
+        "total_fees": round(sum(t.get("fee_paid") or 0.0 for t in ordered), 4),
     }

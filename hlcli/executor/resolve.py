@@ -31,7 +31,7 @@ from hlcli.core.config_schema import TunableConfig
 from hlcli.core.types import Order, OrderType, Side
 from hlcli.exchange.base import Exchange
 from hlcli.executor.protect import cancel_coin_triggers, cancel_trade_triggers
-from hlcli.executor.rmath import initial_risk
+from hlcli.executor.rmath import initial_risk, taker_fee
 from hlcli.state.store import StateStore
 
 
@@ -58,7 +58,7 @@ def resolve_open_trades(
 
     for trade in state.open_trades():
         if trade["shadow"]:
-            closed += _resolve_shadow(state, trade, marks, now, tunable)
+            closed += _resolve_shadow(state, trade, marks, now, tunable, caps.taker_fee_pct)
             continue
         if shadow_only:
             continue  # a shadow pass never touches real trades
@@ -91,8 +91,9 @@ def resolve_open_trades(
             # level; paper fills its LIMIT exactly at the level by construction.
             if native_protected and result.avg_price is not None:
                 exit_price = result.avg_price
-        realized, r_multiple = _pnl(trade, side, exit_price)
-        state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now)
+        fee = taker_fee(caps.taker_fee_pct, trade["size"], trade["entry"], exit_price)
+        realized, r_multiple = _pnl(trade, side, exit_price, fee)
+        state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now, fee)
         if native_protected:
             _cancel_after_close(exchange, state, trade)
         closed += 1
@@ -111,8 +112,10 @@ def _cancel_after_close(exchange: Exchange, state: StateStore, trade: dict) -> N
 
 
 def _resolve_shadow(state: StateStore, trade: dict, marks: dict[str, float], now: float,
-                    tunable: TunableConfig) -> int:
-    """Book a shadow trade's outcome at its trigger level — no order, no book."""
+                    tunable: TunableConfig, fee_rate: float) -> int:
+    """Book a shadow trade's outcome at its trigger level — no order, no book. The same
+    modeled taker fee is netted as a real trade's, so shadow expectancy (the tuner's
+    training data) stays cost-comparable with the live book."""
     mark = marks.get(trade["coin"])
     if mark is None:
         return 0
@@ -120,8 +123,9 @@ def _resolve_shadow(state: StateStore, trade: dict, marks: dict[str, float], now
     if outcome is None:
         return 0
     status, level_price = outcome
-    realized, r_multiple = _pnl(trade, Side(trade["side"]), level_price)
-    state.resolve_trade(trade["id"], status, level_price, realized, r_multiple, now)
+    fee = taker_fee(fee_rate, trade["size"], trade["entry"], level_price)
+    realized, r_multiple = _pnl(trade, Side(trade["side"]), level_price, fee)
+    state.resolve_trade(trade["id"], status, level_price, realized, r_multiple, now, fee)
     return 1
 
 
@@ -215,15 +219,18 @@ def _real_exit_price(exchange: Exchange, trade: dict) -> float | None:
     return sum(f.px * f.size for f in closing) / total
 
 
-def _pnl(trade: dict, side: Side, exit_price: float) -> tuple[float, float]:
-    """Realized P&L and R-multiple (reward in units of the trade's initial risk).
+def _pnl(trade: dict, side: Side, exit_price: float, fee_paid: float = 0.0) -> tuple[float, float]:
+    """Realized P&L and R-multiple, **net of `fee_paid`** (wave-2 K), so graduation and
+    the tuner see cost-honest outcomes. `fee_paid=0` reproduces the pre-K gross numbers
+    exactly (the test caps disable the fee to keep gross assertions).
 
     Risk anchors to `initial_sl`: once sentry has ratcheted the working `sl` toward
     profit, |entry − sl| shrinks and would inflate the R the tuner learns from."""
     per_unit = (exit_price - trade["entry"]) if side is Side.LONG else (trade["entry"] - exit_price)
-    risk = initial_risk(trade)
-    realized = round(per_unit * trade["size"], 6)
-    r_multiple = round(per_unit / risk, 4) if risk > 0 else 0.0
+    dollar_risk = initial_risk(trade) * trade["size"]
+    net = per_unit * trade["size"] - fee_paid
+    realized = round(net, 6)
+    r_multiple = round(net / dollar_risk, 4) if dollar_risk > 0 else 0.0
     return realized, r_multiple
 
 

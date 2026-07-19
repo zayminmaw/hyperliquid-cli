@@ -165,6 +165,31 @@ def test_vanished_scaled_trade_keeps_the_mark_estimate(tmp_path):
     assert t["exit_price"] == 103.0     # mark estimate kept — the fill lookup is skipped
 
 
+def test_realized_and_r_are_net_of_taker_fee(tmp_path):
+    # Wave-2 K: with a taker fee configured, realized P&L and R are booked net of the
+    # round-trip fee (charged on entry + exit notional), so graduation/tuner see the cost.
+    import pytest
+
+    state, ex = _state_ex(tmp_path, {"BTC": 120.0})  # TP at 120
+    _open(state)  # long, entry 100, tp 120, size 1.0 → gross 20, dollar-risk 10 → gross R 2.0
+    resolve_open_trades(ex, state, caps(taker_fee_pct=0.045), clamp(TunableConfig()), NOW,
+                        marks={"BTC": 120.0})
+    t = state.resolved_trades()[0]
+    fee = 0.045 / 100 * 1.0 * (100 + 120)  # 0.099
+    assert t["fee_paid"] == pytest.approx(fee)
+    assert t["realized"] == round(20 - fee, 6)          # 19.901, not the gross 20
+    assert t["r_multiple"] == round((20 - fee) / 10, 4)  # 1.9901, not the gross 2.0
+
+
+def test_zero_fee_reproduces_gross_pnl(tmp_path):
+    # The default test caps pin taker_fee_pct=0, so fee-off must be byte-identical to pre-K.
+    state, ex = _state_ex(tmp_path, {"BTC": 120.0})
+    _open(state)
+    resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW, marks={"BTC": 120.0})
+    t = state.resolved_trades()[0]
+    assert t["realized"] == 20.0 and t["r_multiple"] == 2.0 and t["fee_paid"] == 0.0
+
+
 def test_live_close_cancels_the_surviving_trigger(tmp_path):
     # After the SL side of the pair closes the trade, the orphaned TP trigger must
     # be cancelled or it will close the NEXT position in this coin.

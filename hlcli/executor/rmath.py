@@ -35,3 +35,13 @@ def r_now(trade: dict, mark: float) -> float | None:
     if risk <= 0:
         return None
     return favorable_move(trade, mark) / risk
+
+
+def taker_fee(rate_pct: float, size: float, entry: float, exit_price: float) -> float:
+    """Round-trip taker fee for closing `size` at `exit_price` (wave-2 K): the rate is
+    charged on both the entry notional and the exit notional. Composes across partial
+    closes — summing per-close `size × (entry + exit)` recovers the full both-legs fee,
+    since the entry-fee component sums to `rate × entry × total_size`. `rate_pct` is
+    percent (Hyperliquid taker ≈ 0.045 — verify your live tier); 0 disables (the
+    paper-parity switch the test caps use to keep gross assertions)."""
+    return rate_pct / 100.0 * size * (entry + exit_price)

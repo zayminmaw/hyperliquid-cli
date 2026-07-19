@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS trades (
     adopted INTEGER NOT NULL DEFAULT 0,    -- 1 = a Mode A position sentry adopted (PLAN.md §15.5)
     sl_oid TEXT,                           -- exchange oid of this row's native stop trigger (§14 slice-scoped cancel)
     tp_oid TEXT,                           -- exchange oid of this row's native take-profit trigger
-    mark_at_entry REAL                     -- mark at fire; `entry` − this = realized entry slippage (audit D)
+    mark_at_entry REAL,                    -- mark at fire; `entry` − this = realized entry slippage (audit D)
+    fee_paid REAL NOT NULL DEFAULT 0       -- round-trip taker fee already subtracted from `realized`/`r_multiple` (wave-2 K)
 );
 CREATE TABLE IF NOT EXISTS sentry_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +121,8 @@ class StateStore:
             self._conn.execute("ALTER TABLE trades ADD COLUMN tp_oid TEXT")
         if "mark_at_entry" not in cols:
             self._conn.execute("ALTER TABLE trades ADD COLUMN mark_at_entry REAL")
+        if "fee_paid" not in cols:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN fee_paid REAL NOT NULL DEFAULT 0")
         # Pre-sentry rows never had their SL moved, so today's `sl` IS the initial one.
         self._conn.execute("UPDATE trades SET initial_sl = sl WHERE initial_sl IS NULL")
 
@@ -254,12 +257,14 @@ class StateStore:
 
     def resolve_trade(
         self, trade_id: int, status: str, exit_price: float, realized: float,
-        r_multiple: float, closed_at: float,
+        r_multiple: float, closed_at: float, fee_paid: float = 0.0,
     ) -> None:
+        """`realized`/`r_multiple` are stored as given (already net of `fee_paid` — the
+        caller subtracts it); `fee_paid` is recorded for transparency and reporting."""
         self._conn.execute(
-            "UPDATE trades SET status=?, exit_price=?, realized=?, r_multiple=?, closed_at=?"
-            " WHERE id=?",
-            (status, exit_price, realized, r_multiple, closed_at, trade_id),
+            "UPDATE trades SET status=?, exit_price=?, realized=?, r_multiple=?, closed_at=?,"
+            " fee_paid=? WHERE id=?",
+            (status, exit_price, realized, r_multiple, closed_at, fee_paid, trade_id),
         )
         self._conn.commit()
 
