@@ -79,6 +79,27 @@ def test_config_edit_reclamps_on_save(isolated_caps, monkeypatch):
     assert load_tunable(path).risk_per_trade_pct == 5.0  # clamped back on save
 
 
+def test_exec_reconcile_halts_on_unexpected_position(isolated_caps):
+    # Wave-2 G: a paper position with no ledger row is an unsafe divergence → the breaker
+    # trips so a restart can't fire into the inconsistent book.
+    from hlcli.core.types import Network, Order, OrderType, Side
+    from hlcli.exchange.paper import PaperExchange
+    from hlcli.state.store import open_state
+    from hlcli.tests._helpers import FakeMarks
+
+    st = open_state(get_caps(), Network.PAPER)
+    ex = PaperExchange(10_000.0, marks=FakeMarks({"BTC": 100.0}), state=st)
+    ex.place_order(Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=1.0))
+    st.close()  # a paper position now exists with no trades-ledger row
+
+    r = runner.invoke(app, ["--json", "exec", "reconcile"])
+    assert r.exit_code == 0
+    out = json.loads(r.output)
+    assert out["requires_halt"] is True and out["breaker_tripped"] is True
+    assert out["divergences"][0]["kind"] == "unexpected_position"
+    assert json.loads(runner.invoke(app, ["--json", "exec", "breaker"]).output)["breaker"] == "tripped"
+
+
 def test_config_reset_restores_defaults(isolated_caps):
     runner.invoke(app, ["config", "set", "risk_per_trade_pct", "1.0"])
     r = runner.invoke(app, ["--json", "config", "reset"])

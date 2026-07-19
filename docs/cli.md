@@ -238,6 +238,14 @@ hl exec breaker --on       # trip
 hl exec breaker --off      # clear
 ```
 
+### `exec reconcile`
+Diff the exchange (positions + resting orders) against the ledger and return a
+**safe / requires-halt** verdict (wave-2 G). Flags an unexpected position (on the exchange,
+not in the ledger), a size mismatch, or a live position with no native protection. On an
+unsafe divergence it **trips the breaker** (and emits a critical `reconcile_halt` alert) so a
+restart can't fire into an inconsistent book — run it after any crash, especially on mainnet.
+`--no-halt` reports only; `--dry-run` never trips.
+
 ### `exec status`
 Live position-health view for the executor's book, with a note of how many WAIT
 candidates are parked for re-check. `-w`/`--watch` for live refresh.

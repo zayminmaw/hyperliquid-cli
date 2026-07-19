@@ -17,6 +17,7 @@ from hlcli.core.config import get_caps
 from hlcli.core.config_schema import load_tunable
 from hlcli.executor.intake import make_candidate, parse_batch
 from hlcli.executor.monitor import position_health
+from hlcli.executor.reconcile import reconcile
 from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
@@ -130,6 +131,43 @@ def breaker(
     emit(
         {"network": g.network.value, "breaker": "tripped" if b.tripped() else "clear"},
         as_json=g.json_out, title="exec breaker",
+    )
+
+
+@app.command("reconcile")
+def reconcile_cmd(
+    ctx: typer.Context,
+    halt: bool = typer.Option(True, "--halt/--no-halt", help="trip the kill switch if unsafe"),
+) -> None:
+    """Diff the exchange against the ledger (wave-2 G) → safe / requires-halt.
+
+    On an unsafe divergence (an unexpected position, a size mismatch, or a live position with
+    no native protection) it trips the breaker so a restart can't fire into an inconsistent
+    book — run it after any crash, especially on mainnet. `--no-halt` reports only.
+    """
+    g = state_of(ctx)
+    caps = get_caps()
+    exchange, state, _caps, _tunable = open_env(g, for_write=False)
+    try:
+        report = reconcile(exchange, state)
+        tripped = False
+        if report.requires_halt and halt and not g.dry_run:
+            Breaker(state, caps).set(True)
+            tripped = True
+            network_alerter(caps, g.network).alert(
+                "reconcile_halt", level="critical",
+                divergences=[{"kind": d.kind, "coin": d.coin} for d in report.divergences])
+    finally:
+        state.close()
+    emit(
+        {
+            "network": g.network.value,
+            "safe": report.is_safe,
+            "requires_halt": report.requires_halt,
+            "divergences": [{"kind": d.kind, "coin": d.coin, **d.detail} for d in report.divergences],
+            "breaker_tripped": tripped,
+        },
+        as_json=g.json_out, title="exec reconcile",
     )
 
 
