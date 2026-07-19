@@ -94,6 +94,25 @@ class Position(BaseModel):
     unrealized_pnl: float = 0.0
 
 
+class Fill(BaseModel):
+    """One execution from the exchange's user-fills feed. Field meanings are verified
+    against a live Hyperliquid testnet fill (2026-07-19), not assumed:
+      - `dir` is "Open Long" | "Close Long" | "Open Short" | "Close Short" (a manual
+        close, native-trigger fill, and — MUST-VERIFY — a liquidation all surface here);
+      - `closed_pnl` is the fill's **gross** price P&L in USDC and does **not** include
+        the fee (a −0.008 close on a 0.0005 BTC long matched the raw price move exactly);
+      - `fee` is the taker/maker fee actually paid, in USDC, positive = a cost.
+    So the honest realized for a fill is `closed_pnl − fee` (see resolve `_pnl`)."""
+
+    coin: str
+    px: float
+    size: float
+    dir: str
+    closed_pnl: float = 0.0
+    fee: float = 0.0
+    time_ms: int = 0
+
+
 class Candle(BaseModel):
     """One OHLCV bar from the public candleSnapshot feed."""
 

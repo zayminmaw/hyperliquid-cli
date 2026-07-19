@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from hlcli._lazy import require
 from hlcli.core.types import (
+    Fill,
     Network,
     OpenOrder,
     Order,
@@ -140,6 +141,23 @@ class HyperliquidExchange:
                 is_trigger=bool(o.get("isTrigger", False)),
             )
             for o in raw
+        ]
+
+    def recent_fills(self, since_ms: int) -> list[Fill]:
+        # Keyless read. Field names verified against a live testnet fill (see `Fill`):
+        # `dir` classifies open/close, `closedPnl` is gross (excludes `fee`), `fee` is USDC.
+        raw = self._info_client().user_fills_by_time(self._account_address, since_ms)
+        return [
+            Fill(
+                coin=f["coin"],
+                px=float(f["px"]),
+                size=float(f["sz"]),
+                dir=str(f.get("dir", "")),
+                closed_pnl=float(f.get("closedPnl", 0.0)),
+                fee=float(f.get("fee", 0.0)),
+                time_ms=int(f.get("time", 0)),
+            )
+            for f in raw
         ]
 
     # --- writes ---

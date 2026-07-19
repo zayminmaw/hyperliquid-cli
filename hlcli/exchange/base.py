@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from hlcli.core.types import Candle, Network, OpenOrder, Order, OrderResult, Position
+from hlcli.core.types import Candle, Fill, Network, OpenOrder, Order, OrderResult, Position
 
 
 @runtime_checkable
@@ -37,6 +37,11 @@ class Exchange(Protocol):
     def get_positions(self) -> list[Position]: ...
 
     def get_open_orders(self) -> list[OpenOrder]: ...
+
+    def recent_fills(self, since_ms: int) -> list[Fill]:
+        """Executions since `since_ms` (epoch ms), oldest→newest. Empty on backends
+        with no fill feed (paper realizes at the level, so it has none)."""
+        ...
 
     # --- writes ---
     def place_order(self, order: Order) -> OrderResult: ...

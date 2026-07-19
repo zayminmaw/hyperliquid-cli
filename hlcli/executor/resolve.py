@@ -15,10 +15,11 @@ resolver stays the ledger's source of truth and the close is a `reduce_only`
 Live reconciliation goes beyond the mark: a native trigger can fire on a wick and
 the mark can recover before the next pass, leaving the exchange flat while the
 ledger still says "open". So on a protected network a *vanished* position is also
-resolved — outcome inferred from the mark, else from the candle extremes since
-entry, else booked `closed` at the mark (an external/manual close). After any live
-close the coin's surviving reduce-only triggers are cancelled, so half of an old
-SL/TP pair can never ambush the next position.
+resolved — the outcome (won/lost/closed) inferred from the mark, else the candle
+extremes since entry — and priced at the **actual closing fill** when the backend
+reports one (item L: `_real_exit_price`), falling back to the mark/level only when
+no fill is found. After any live close the coin's surviving reduce-only triggers are
+cancelled, so half of an old SL/TP pair can never ambush the next position.
 """
 
 from __future__ import annotations
@@ -69,8 +70,13 @@ def resolve_open_trades(
         outcome = _classify(trade, mark, now, tunable)
         if outcome is None and vanished:
             # The exchange is flat but the ledger says open — a native trigger (or a
-            # manual close) beat the mark check. Book the outcome anyway.
+            # manual close) beat the mark check. Book the outcome anyway, at the *actual*
+            # closing fill when the backend reports one (item L) — the mark/level is only
+            # an estimate, and a native-trigger/liquidation fill can be far from it.
             outcome = _classify_vanished(exchange, trade, mark)
+            real_exit = _real_exit_price(exchange, trade) if not trade["scaled_out"] else None
+            if real_exit is not None:
+                outcome = (outcome[0], real_exit)
         if outcome is None:
             continue  # still live
 
@@ -184,6 +190,29 @@ def _classify_vanished(exchange: Exchange, trade: dict, mark: float) -> tuple[st
         if lows and min(lows) <= trade["tp"]:
             return "won", trade["tp"]
     return "closed", mark  # closed externally (manual flatten, liquidation, …)
+
+
+def _real_exit_price(exchange: Exchange, trade: dict) -> float | None:
+    """Size-weighted price of this coin's closing fills since the trade opened — the true
+    exit for a position closed outside the resolver (native trigger, manual flatten,
+    liquidation). None when the backend reports no matching fill (paper always; a live
+    fill still settling), so the caller keeps the mark/level estimate.
+
+    Matches the exact `dir` for the trade's side (verified live: "Close Long"/"Close
+    Short"). A liquidation's `dir` is unverified (MUST-VERIFY on a real liquidation); if
+    it differs, this simply returns None and the mark estimate stands — never worse than
+    today. Scaled trades are skipped by the caller so an earlier scale-out fill can't
+    blend into the parent row's exit."""
+    want = "Close Long" if Side(trade["side"]) is Side.LONG else "Close Short"
+    try:
+        fills = exchange.recent_fills(int(trade["opened_at"] * 1000))
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        return None
+    closing = [f for f in fills if f.coin == trade["coin"] and f.dir == want]
+    total = sum(f.size for f in closing)
+    if total <= 0:
+        return None
+    return sum(f.px * f.size for f in closing) / total
 
 
 def _pnl(trade: dict, side: Side, exit_price: float) -> tuple[float, float]:

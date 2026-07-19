@@ -20,9 +20,11 @@ class FakeLiveExchange:
     """A live-network backend stand-in: fills entries, optionally rejects triggers."""
 
     def __init__(self, network=Network.TESTNET, marks=None, *, fail_triggers=False,
-                 fail_close=False, fill_size=None, fill_price=None, positions=None, open_orders=None):
+                 fail_close=False, fill_size=None, fill_price=None, positions=None, open_orders=None,
+                 fills=None):
         self.network = network
         self._marks = marks or {"BTC": 100.0}
+        self.fills = fills or []  # Fill list returned by recent_fills (item L)
         self.fail_triggers = fail_triggers
         # fail_close: True rejects the emergency market-close; "raise" makes it raise a
         # backend error (the transport-unknown flatten). Both must yield abort_failed.
@@ -42,6 +44,9 @@ class FakeLiveExchange:
 
     def get_candles(self, coin, *, interval="15m", lookback=48):
         return []
+
+    def recent_fills(self, since_ms):
+        return [f for f in self.fills if f.time_ms >= since_ms]
 
     def equity(self):
         return 10_000.0
