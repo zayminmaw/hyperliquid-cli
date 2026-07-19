@@ -2,8 +2,7 @@
 
 Noun → verb taxonomy. Command groups live in `cli/commands/`; this module owns the
 global callback (which parses the global flags into `GlobalState`) and assembles
-the groups. Verbs not yet built are phase-labelled stubs so `hl --help` is fully
-navigable from day one.
+the groups.
 
 Note: no `from __future__ import annotations` here — Typer reads the real
 annotation objects to build options.

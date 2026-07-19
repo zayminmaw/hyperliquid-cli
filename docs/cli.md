@@ -254,9 +254,19 @@ Print the resolved hard caps **and** the clamped tunable surface (network, mainn
 flag, the ceilings, allowed coins, model names, `risk_per_trade_pct`, regime
 on/off, min conviction).
 
-### `config set` · `config edit`
-**Not built** — editing the tunable surface is the tuner's job. These print a
-"not built yet (Phase 4)" notice and exit `1`. Use the `hl tune` flow instead.
+### `config set <key> <value>`
+Set one field of the **tunable surface** (`config/active_config.json`), then re-clamp
+on write. Keys are dotted paths into the tunable model — e.g. `risk_per_trade_pct`,
+`sizing.enabled`, `trail.style`, `regime.allowed_regimes` (comma-list). **Hard caps are
+refused** (`max_notional_per_trade`, `max_leverage`, …) — those live in `.env`. The value
+written is the *clamped* one, so a manual set can never widen the box; an unknown key
+lists the settable ones and exits `1`. The tuner (`hl tune`) is the data-driven path to
+the same surface; `set`/`edit` are direct operator control over it.
+
+### `config edit`
+Open `config/active_config.json` in `$EDITOR` (seeded with the current clamped surface if
+absent). On save it is re-validated and clamped: an out-of-range edit is silently pulled
+back into range, malformed JSON fails loudly — nothing bad reaches the order path.
 
 ---
 

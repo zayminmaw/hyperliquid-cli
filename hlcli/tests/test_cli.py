@@ -52,10 +52,31 @@ def test_config_show_works():
     assert result.exit_code == 0
 
 
-def test_unbuilt_verb_is_a_clear_stub():
-    result = runner.invoke(app, ["config", "set"])
-    assert result.exit_code == 1
-    assert "Phase 4" in result.output
+def test_config_set_clamps_and_persists(isolated_caps):
+    r = runner.invoke(app, ["--json", "config", "set", "risk_per_trade_pct", "999"])
+    assert r.exit_code == 0
+    assert json.loads(r.output)["effective"] == 5.0  # clamped on write
+    show = runner.invoke(app, ["--json", "config", "show"])
+    assert json.loads(show.output)["risk_per_trade_pct"] == 5.0  # persisted
+
+
+def test_config_set_rejects_hard_caps(isolated_caps):
+    r = runner.invoke(app, ["config", "set", "max_notional_per_trade", "500"])
+    assert r.exit_code == 1
+    assert "not a tunable field" in r.output  # hard caps live in .env
+
+
+def test_config_edit_reclamps_on_save(isolated_caps, monkeypatch):
+    import hlcli.cli.commands.config as config_cmd
+
+    path = get_caps().config_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"risk_per_trade_pct": 999}')  # a hand-broken value
+    monkeypatch.setattr(config_cmd, "_launch_editor", lambda p: None)  # no-op editor
+    r = runner.invoke(app, ["config", "edit"])
+    assert r.exit_code == 0
+    from hlcli.core.config_schema import load_tunable
+    assert load_tunable(path).risk_per_trade_pct == 5.0  # clamped back on save
 
 
 def test_tune_run_no_ops_on_empty_record(isolated_caps):
