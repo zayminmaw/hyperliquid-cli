@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from itertools import count
 
-from hlcli.core.types import Network, OpenOrder, Order, OrderResult, OrderType, Position, Side
+from hlcli.core.types import Fill, Network, OpenOrder, Order, OrderResult, OrderType, Position, Side
 from hlcli.exchange.marks import MarksFeed, api_url
 from hlcli.state.store import StateStore
 
@@ -65,6 +65,12 @@ class PaperExchange:
 
     def get_open_orders(self) -> list[OpenOrder]:
         return []  # paper fills immediately; no resting book in Phase 2
+
+    def recent_fills(self, since_ms: int) -> list[Fill]:
+        return []  # paper realizes at the resolver's level — no separate fill feed
+
+    def maintenance_margin(self) -> float:
+        return 0.0  # paper has no margin engine / liquidations
 
     def place_order(self, order: Order) -> OrderResult:
         oid = f"paper-{next(self._order_ids)}"

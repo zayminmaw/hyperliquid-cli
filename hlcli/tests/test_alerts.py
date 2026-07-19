@@ -100,6 +100,38 @@ def test_unmanaged_position_alert_is_edge_triggered(tmp_path):
     assert len(unmanaged) == 1 and unmanaged[0]["coins"] == ["ETH"]
 
 
+def test_liquidation_near_alert_is_edge_triggered(tmp_path):
+    # Wave-2 M: a position whose mark (100) sits within the 5% floor of its liquidation
+    # price (98 → 2% away) pages a critical alert once, not every pass.
+    from hlcli.core.types import Network, Position
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    pos = [Position(coin="BTC", side=Side.LONG, size=1.0, entry_price=105.0, liquidation_px=98.0)]
+    alerter = CapturingAlerter()
+    for _ in range(2):
+        ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 100.0}, positions=pos)
+        run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
+    near = [e for e in alerter.events if e["event"] == "liquidation_near"]
+    assert len(near) == 1 and near[0]["coins"] == ["BTC"]
+
+
+def test_no_liquidation_alert_when_far_or_unknown(tmp_path):
+    # Far from liquidation (50% away) or no liquidationPx at all (null — verified live) is safe.
+    from hlcli.core.types import Network, Position
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    pos = [
+        Position(coin="BTC", side=Side.LONG, size=1.0, entry_price=105.0, liquidation_px=50.0),
+        Position(coin="ETH", side=Side.LONG, size=1.0, entry_price=1500.0),  # liquidation_px None
+    ]
+    alerter = CapturingAlerter()
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 100.0, "ETH": 1500.0}, positions=pos)
+    run_once(ex, state, caps(), tunable(), decide_fn=act_now, alerter=alerter, now=NOW)
+    assert not [e for e in alerter.events if e["event"] == "liquidation_near"]
+
+
 def test_dry_run_writes_no_breaker_day_state(tmp_path):
     state = StateStore(tmp_path / "state.db")
     ex = PaperExchange(10_000.0, marks=FakeMarks(), state=state)

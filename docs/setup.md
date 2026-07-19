@@ -42,14 +42,18 @@ Copy `.env.example` to `.env` and adjust. Every var is `HL_`-prefixed.
 | `HL_MAX_NOTIONAL_PER_TRADE` | `1000` | hard notional ceiling per trade |
 | `HL_MAX_CONCURRENT_POSITIONS` | `3` | max open positions |
 | `HL_DAILY_LOSS_LIMIT_PCT` | `5` | day-start drawdown that halts new fires |
-| `HL_MAX_LEVERAGE` | `3` | hard leverage ceiling |
+| `HL_MAX_TRADES_PER_DAY` | `0` | new-entry cap per UTC day (overtrading breaker; `0` disables; executor path only — audit B) |
+| `HL_MAX_LEVERAGE` | `3` | hard leverage ceiling (per order) |
+| `HL_MAX_TOTAL_EXPOSURE_USD` | `0` | account-wide gross-notional ceiling across the whole book (`0` disables — audit A) |
+| `HL_MAX_GROSS_LEVERAGE` | `5` | account-wide gross leverage (book notional ÷ equity; `0` disables — audit A) |
 | `HL_RR_FLOOR` | `1.5` | minimum reward:risk to accept a candidate |
 | `HL_MAX_SIGNAL_AGE_MINUTES` | `30` | freshness cutoff for a candidate |
+| `HL_AGENT_STALE_AFTER_SECONDS` | `0` | age past which `agent status`/`watchdog` call the supervisor dead (`0` → 3× intake poll — audit F) |
 | `HL_FOLLOWUP_MAX_ATTEMPTS` | `3` | max WAIT re-checks before a deferred candidate is dropped (`0` disables deferral) |
 | `HL_ALLOWED_COINS` | `BTC,ETH,SOL` | the only tradable coins |
 | `HL_GRADUATION_MIN_TRADES` / `_DAYS` / `_EXPECTANCY` | `20` / `7` / `0.0` | mainnet-readiness thresholds |
-| `HL_DECISION_MODEL` / `_MAX_TOKENS` | `claude-sonnet-4-6` / `1024` | order-path model |
-| `HL_TUNER_MODEL` / `_MAX_TOKENS` | `claude-opus-4-8` / `4096` | daily-tuner model |
+| `HL_DECISION_MODEL` / `_MAX_TOKENS` | `claude-sonnet-5` / `1024` | order-path model |
+| `HL_TUNER_MODEL` / `_MAX_TOKENS` | `claude-sonnet-5` / `4096` | daily-tuner model |
 
 `HL_DATA_DIR` (default `~/.hyperliquid-cli`) and `HL_CONFIG_PATH` are also
 configurable. A **relative** `HL_CONFIG_PATH` resolves against `HL_DATA_DIR`

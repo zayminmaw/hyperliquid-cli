@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import typer
 
-from hlcli.accounts.keystore import Keystore, agent_address
+from hlcli.accounts.keystore import Keystore, agent_address, keystore_passphrase
 from hlcli.accounts.store import Account, AccountType, open_store
 from hlcli.cli.context import build_for, state_of
 from hlcli.cli.output import emit, emit_rows, note
@@ -46,7 +46,9 @@ def add(
     )
     if private_key is not None:
         try:
-            Keystore(caps.data_dir / "keys").save(alias, private_key)
+            # With HL_KEYSTORE_PASSPHRASE set, the key lands encrypted at rest (V3
+            # keystore JSON); unset, plaintext hex — both load transparently.
+            Keystore(caps.data_dir / "keys").save(alias, private_key, passphrase=keystore_passphrase())
         except Exception:
             store.remove(alias)  # don't leave a row pointing at a key that never landed
             raise
@@ -86,6 +88,48 @@ def remove(ctx: typer.Context, alias: str = typer.Argument(...)) -> None:
     note(f"removed [yellow]{alias}[/yellow]")
     if account.is_default:
         note(f"[dim]{account.network.value} has no default account now — set one with `hl account set-default`.[/dim]")
+
+
+@app.command("edit")
+def edit(
+    ctx: typer.Context,
+    alias: str = typer.Argument(..., help="account to edit"),
+    address: str = typer.Option("", "--address", help="re-point at a different main address"),
+    rekey: bool = typer.Option(False, "--rekey", help="replace the agent key (prompts, hidden)"),
+) -> None:
+    """Edit an existing account's traded address and/or agent key **in place** — the alias
+    and its default flag are kept (unlike remove + add). Renaming an alias is not supported;
+    remove + add for that."""
+    state = state_of(ctx)
+    caps = get_caps()
+    store = open_store(caps)
+    account = store.get(alias)
+    if account is None:
+        raise typer.BadParameter(f"no account '{alias}'.")
+    if account.network is not state.network:
+        raise typer.BadParameter(
+            f"'{alias}' is a {account.network.value} account — select --network {account.network.value}.")
+    if not address and not rekey:
+        raise typer.BadParameter("nothing to edit — pass --address and/or --rekey.")
+
+    if rekey:
+        if account.type is not AccountType.TRADE:
+            raise typer.BadParameter("a read-only account has no key to replace.")
+        # Same discipline as `add`: key off the hidden prompt, validated before it lands,
+        # never a CLI arg or a log line. save() overwrites the existing key file in place.
+        private_key = typer.prompt("New agent private key", hide_input=True)
+        derived = agent_address(private_key)
+        Keystore(caps.data_dir / "keys").save(account.key_ref or alias, private_key,
+                                               passphrase=keystore_passphrase())
+        note(f"[dim]agent wallet: {derived} (approve this agent for {account.address} on Hyperliquid)[/dim]")
+    if address:
+        account = store.set_address(alias, address)
+
+    emit(
+        {"alias": account.alias, "address": account.address, "network": account.network.value,
+         "type": account.type.value, "rekeyed": rekey},
+        as_json=state.json_out, title="account edited",
+    )
 
 
 @app.command("positions")

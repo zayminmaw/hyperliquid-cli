@@ -10,6 +10,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+DAY_SECONDS = 86_400.0  # seconds in a UTC day — shared by the daily-count cap and sentry budgets
+
 
 class Network(StrEnum):
     PAPER = "paper"
@@ -78,6 +80,10 @@ class Order(BaseModel):
     price: float | None = None  # None for market orders
     reduce_only: bool = False
     trigger_price: float | None = None  # for stop_loss / take_profit
+    # Client order id ("0x" + 32 hex = 16 bytes) — lets a transport-unknown submit be
+    # resolved against the exchange by client id instead of guessed. Set on the entry
+    # (see executor/execute.py); None elsewhere.
+    cloid: str | None = None
 
 
 class Position(BaseModel):
@@ -86,6 +92,29 @@ class Position(BaseModel):
     size: float
     entry_price: float
     unrealized_pnl: float = 0.0
+    # Exchange-reported liquidation price, or None when there is none to report — verified
+    # live: Hyperliquid returns `liquidationPx: null` for a cross-margin position with ample
+    # collateral (far from liquidation). None ⇒ "no near liquidation risk" (wave-2 M).
+    liquidation_px: float | None = None
+
+
+class Fill(BaseModel):
+    """One execution from the exchange's user-fills feed. Field meanings are verified
+    against a live Hyperliquid testnet fill (2026-07-19), not assumed:
+      - `dir` is "Open Long" | "Close Long" | "Open Short" | "Close Short" (a manual
+        close, native-trigger fill, and — MUST-VERIFY — a liquidation all surface here);
+      - `closed_pnl` is the fill's **gross** price P&L in USDC and does **not** include
+        the fee (a −0.008 close on a 0.0005 BTC long matched the raw price move exactly);
+      - `fee` is the taker/maker fee actually paid, in USDC, positive = a cost.
+    So the honest realized for a fill is `closed_pnl − fee` (see resolve `_pnl`)."""
+
+    coin: str
+    px: float
+    size: float
+    dir: str
+    closed_pnl: float = 0.0
+    fee: float = 0.0
+    time_ms: int = 0
 
 
 class Candle(BaseModel):

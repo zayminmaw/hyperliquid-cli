@@ -12,14 +12,23 @@ from __future__ import annotations
 from hlcli.core.config import Caps
 from hlcli.tuner.stats import summary
 
+# Rows that never grade the strategy: partials of a position, and mechanical
+# protection failures (the entry's setup was never allowed to play out).
+_UNGRADED_STATUSES = ("scaled", "aborted", "abort_failed")
+
 
 def assess(trades: list[dict], caps: Caps) -> dict:
     """Pass/fail readiness verdict plus the numbers behind each check.
 
     `scaled` rows are partial exits of a position, not distinct trading decisions —
     excluded here so `min_trades` counts positions, not banked partials (which would
-    let a scale-out ladder inflate the track record and unlock mainnet early)."""
-    graded = [t for t in trades if t.get("status") != "scaled"]
+    let a scale-out ladder inflate the track record and unlock mainnet early).
+    `aborted`/`abort_failed` are protection failures — verdicts on the rig, not the
+    strategy — and `adopted` rows carry no LLM verdict at all; none of them may pad
+    `n` or dilute expectancy. Aborts are still counted and surfaced: a rig that
+    keeps failing to protect entries is its own reason not to go to mainnet."""
+    graded = [t for t in trades
+              if t.get("status") not in _UNGRADED_STATUSES and not t.get("adopted")]
     stats = summary(graded)
     span_days = _span_days(graded)
     checks = {
@@ -32,6 +41,7 @@ def assess(trades: list[dict], caps: Caps) -> dict:
         "n": stats["n"],
         "win_rate": stats["win_rate"],
         "avg_r": stats["avg_r"],
+        "aborts": sum(1 for t in trades if t.get("status") in ("aborted", "abort_failed")),
         "span_days": span_days,
         "checks": checks,
         "thresholds": {

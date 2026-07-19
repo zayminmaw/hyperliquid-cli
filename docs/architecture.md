@@ -58,7 +58,7 @@ One `run_once` pass (`hlcli/executor/runner.py`) is the heart of Mode B:
                                    enrich  (marks, equity, positions, recent decisions, tunable,
                                            │   candle tail + regime via Kaufman ER — None if no feed)
                                            ▼
-                                   decide  (LLM: claude-sonnet-4-6, strict tool, low temp)
+                                   decide  (LLM: claude-sonnet-5, strict tool, low temp)
                                            │   schema-invalid → DROP + tally + log (never guessed)
                                            │   act + wait → DEFER (park for re-check, advance HWM)
                                            ▼
@@ -117,7 +117,7 @@ skips them. `PassSummary` reports `rechecked` and `deferred`; `exec report` and
 schema-valid decision → kill switch → daily-loss-limit → freshness
   → allowed-coin → regime sanity → level sanity (entry/sl/tp coherent)
   → R:R floor → mark sanity (mark present, inside sl/tp, R:R at mark ≥ floor)
-  → one-per-coin → max-concurrent → equity>0
+  → one-per-coin → max-concurrent → equity>0 → maintenance-margin buffer (M)
   → sizing + notional cap + leverage cap → conviction→size clamp
 ```
 
@@ -132,8 +132,10 @@ equity ÷ |mark − sl|`, then scaled by a conviction fraction, then clamped by
 `max_notional_per_trade` and `max_leverage` (both computed at the mark).
 Conviction only scales size *within* the hard caps — it can never raise the
 ceiling. One-per-coin makes the per-trade cap the total per-coin cap. The
-leverage ceiling is per-order; aggregate exposure is bounded by
-`max_concurrent_positions × max_notional_per_trade`.
+leverage ceiling is per-order; the **account-wide** book total is bounded
+directly by `max_total_exposure_usd` and `max_gross_leverage` (audit A), a gate
+check applied to the running gross across the whole book — the same check Mode A
+`trade` runs on a manual entry.
 
 ---
 
@@ -148,8 +150,12 @@ leverage ceiling is per-order; aggregate exposure is bounded by
 | `mainnet` | real | real | agent wallet | **gated**: `HL_ENABLE_MAINNET=1` + `--network mainnet` + typed confirm; native SL/TP is a hard prerequisite |
 
 Reads (marks, book, positions) go over **httpx** against the public `/info` endpoint
-so paper mode never needs the SDK or a key. The `hyperliquid-python-sdk` and
-`eth_account` are **lazy-imported** and used only for signing writes.
+so paper mode never needs the SDK or a key. That shared endpoint is IP rate-limited
+(aggregate weight 1200/min), so `MarksFeed` wraps its reads in a **bounded, jittered
+retry** on 429 / 5xx / transient transport drops (honoring a `Retry-After` header,
+clamped so a hot-loop read can't stall) — reusing the same `core/backoff` formula the
+write paths use. The `hyperliquid-python-sdk` and `eth_account` are **lazy-imported**
+and used only for signing writes.
 
 ---
 

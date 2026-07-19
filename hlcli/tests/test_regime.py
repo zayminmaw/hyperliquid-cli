@@ -27,7 +27,7 @@ def test_classify_range_on_flat_line():
 def test_summarize_returns_compact_recent_tail():
     out = summarize(_candles([100 + i for i in range(20)]))
     assert len(out) == 12  # _SUMMARY_TAIL
-    assert set(out[0]) == {"o", "h", "l", "c"}
+    assert set(out[0]) == {"o", "h", "l", "c", "v"}
     assert out[-1]["c"] == 119
 
 

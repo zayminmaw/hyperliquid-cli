@@ -12,8 +12,10 @@ class FakeInfo:
         return {
             "marginSummary": {"accountValue": "1234.5"},
             "assetPositions": [
-                {"position": {"coin": "BTC", "szi": "0.5", "entryPx": "60000", "unrealizedPnl": "12.3"}},
-                {"position": {"coin": "ETH", "szi": "-2", "entryPx": "1500", "unrealizedPnl": "-5"}},
+                {"position": {"coin": "BTC", "szi": "0.5", "entryPx": "60000", "unrealizedPnl": "12.3",
+                              "liquidationPx": "55000"}},
+                {"position": {"coin": "ETH", "szi": "-2", "entryPx": "1500", "unrealizedPnl": "-5",
+                              "liquidationPx": None}},  # null when far from liquidation (verified live)
                 {"position": {"coin": "SOL", "szi": "0", "entryPx": "0", "unrealizedPnl": "0"}},
             ],
         }
@@ -27,6 +29,23 @@ class FakeInfo:
              "orderType": "Stop Market", "isTrigger": True, "reduceOnly": True},
         ]
 
+    def query_user_abstraction_state(self, user):
+        return "standard"  # non-unified default; the unified subclass overrides
+
+
+class UnifiedFakeInfo(FakeInfo):
+    """Unified-account mode: perp accountValue is only committed margin; the tradeable
+    balance is the unified USDC in the spot clearinghouse (HL account abstraction)."""
+
+    def query_user_abstraction_state(self, user):
+        return "unifiedAccount"
+
+    def spot_user_state(self, address):
+        return {"balances": [
+            {"coin": "USDC", "total": "1000.0", "hold": "0.0"},
+            {"coin": "TZERO", "total": "5.0", "hold": "0.0"},  # ignored — not the collateral
+        ]}
+
 
 class FakeExchangeClient:
     """Records writes; accepts everything."""
@@ -35,12 +54,16 @@ class FakeExchangeClient:
         self.orders = []
         self.canceled = []
 
-    def market_open(self, coin, is_buy, sz):
-        self.orders.append(("market_open", coin, is_buy, sz))
+    def market_open(self, coin, is_buy, sz, slippage=0.05, cloid=None):
+        self.orders.append(("market_open", coin, is_buy, sz, slippage, cloid))
         return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"oid": 9, "totalSz": str(sz), "avgPx": "100"}}]}}}
 
-    def order(self, coin, is_buy, sz, px, order_spec, reduce_only=False):
-        self.orders.append(("order", coin, is_buy, sz, px, order_spec, reduce_only))
+    def market_close(self, coin, sz=None, cloid=None):
+        self.orders.append(("market_close", coin, sz, cloid))
+        return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"oid": 9, "totalSz": str(sz), "avgPx": "100"}}]}}}
+
+    def order(self, coin, is_buy, sz, px, order_spec, reduce_only=False, cloid=None):
+        self.orders.append(("order", coin, is_buy, sz, px, order_spec, reduce_only, cloid))
         return {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": 10}}]}}}
 
     def cancel(self, coin, oid):
@@ -59,7 +82,7 @@ class FakeMeta:
 
 
 def _exchange(with_writes: bool = False) -> HyperliquidExchange:
-    ex = HyperliquidExchange(Network.TESTNET, account_address="0xabc")
+    ex = HyperliquidExchange(Network.TESTNET, account_address="0xabc", max_entry_slippage_pct=0.3)
     ex._info = FakeInfo()  # bypass the lazy SDK client
     ex._marks.sz_decimals = FakeMeta().sz_decimals
     if with_writes:
@@ -69,7 +92,29 @@ def _exchange(with_writes: bool = False) -> HyperliquidExchange:
 
 
 def test_equity():
-    assert _exchange().equity() == 1234.5
+    assert _exchange().equity() == 1234.5  # standard account: perp accountValue
+
+
+def test_equity_unified_reads_spot_usdc_plus_upnl():
+    # Unified: perp accountValue is meaningless; equity = spot USDC (1000) marked to
+    # market by open-position uPnL (12.3 + -5 + 0 = 7.3) → 1007.3, NOT accountValue 1234.5.
+    ex = _exchange()
+    ex._info = UnifiedFakeInfo()
+    assert ex.equity() == 1007.3
+
+
+def test_unified_mode_is_detected_once_and_cached():
+    ex = _exchange()
+    calls = {"n": 0}
+    real = ex._info.query_user_abstraction_state
+
+    def counting(user):
+        calls["n"] += 1
+        return real(user)
+
+    ex._info.query_user_abstraction_state = counting
+    ex.equity(); ex.equity()
+    assert calls["n"] == 1  # abstraction state probed once, then cached
 
 
 def test_positions_skip_zero_and_map_side():
@@ -77,6 +122,13 @@ def test_positions_skip_zero_and_map_side():
     assert [p.coin for p in positions] == ["BTC", "ETH"]  # zero-size SOL dropped
     assert positions[0].side is Side.LONG and positions[0].size == 0.5
     assert positions[1].side is Side.SHORT and positions[1].size == 2.0
+
+
+def test_positions_map_liquidation_px_null_safe():
+    # Wave-2 M: liquidationPx maps to a float, and a null (far from liquidation) → None.
+    positions = _exchange().get_positions()
+    assert positions[0].liquidation_px == 55000.0   # BTC
+    assert positions[1].liquidation_px is None       # ETH: null in the response
 
 
 def test_open_orders_include_triggers():
@@ -104,7 +156,18 @@ def test_writes_blocked_without_key():
 def test_market_size_is_floored_to_sz_decimals():
     ex = _exchange(with_writes=True)
     ex.place_order(Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=0.123456789))
-    assert ex._exchange.orders[0] == ("market_open", "BTC", True, 0.12345)  # floored, never up
+    # floored size, never up; entry slippage capped at the caps value (not the SDK's 5%)
+    assert ex._exchange.orders[0] == ("market_open", "BTC", True, 0.12345, 0.003, None)
+
+
+def test_entry_slippage_cap_is_plumbed_from_caps():
+    ex = HyperliquidExchange(Network.TESTNET, account_address="0xabc", max_entry_slippage_pct=0.15)
+    ex._info = FakeInfo()
+    ex._marks.sz_decimals = FakeMeta().sz_decimals
+    ex._agent_key = "0x" + "1" * 64
+    ex._exchange = FakeExchangeClient()
+    ex.place_order(Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=1.0))
+    assert ex._exchange.orders[0][4] == 0.0015  # pct → fraction on the wire
 
 
 def test_trigger_price_is_rounded_for_the_wire():
@@ -113,7 +176,7 @@ def test_trigger_price_is_rounded_for_the_wire():
         coin="ETH", side=Side.SHORT, order_type=OrderType.STOP_LOSS,
         size=1.00009, trigger_price=1234.5678, reduce_only=True,
     ))
-    kind, coin, is_buy, sz, px, spec, reduce_only = ex._exchange.orders[0]
+    kind, coin, is_buy, sz, px, spec, reduce_only, cloid = ex._exchange.orders[0]
     assert sz == 1.0  # floored at 4 decimals
     assert px == 1234.6 == spec["trigger"]["triggerPx"]  # 5 sig figs
     assert reduce_only is True
@@ -130,3 +193,56 @@ def test_unknown_coin_passes_through_unrounded():
     ex = _exchange(with_writes=True)
     ex.place_order(Order(coin="DOGE", side=Side.LONG, order_type=OrderType.MARKET, size=0.123456789))
     assert ex._exchange.orders[0][3] == 0.123456789  # exchange's own reject is clearer
+
+
+# --- order_status_by_cloid: the transport-unknown recovery parser (D-3) ---
+# Fixture shapes follow the documented orderStatus response; the testnet drill
+# confirms the live shape, these lock the parse logic.
+
+_CLOID = "0x" + "ab" * 16
+
+
+def _status_exchange(response) -> HyperliquidExchange:
+    ex = _exchange()
+
+    class FakeStatusInfo(FakeInfo):
+        def query_order_by_cloid(self, address, cloid):
+            return response
+
+    ex._info = FakeStatusInfo()
+    return ex
+
+
+def _order_status(status: str, *, orig="1.0", remaining="0.0"):
+    return {"status": "order", "order": {
+        "status": status,
+        "order": {"oid": 77, "coin": "BTC", "limitPx": "100.3", "origSz": orig, "sz": remaining},
+    }}
+
+
+def test_status_by_cloid_filled():
+    r = _status_exchange(_order_status("filled")).order_status_by_cloid(_CLOID)
+    assert r.accepted and r.status == "filled" and r.order_id == "77"
+    assert r.filled_size == 1.0 and r.avg_price == 100.3
+
+
+def test_status_by_cloid_resting():
+    r = _status_exchange(_order_status("open", remaining="1.0")).order_status_by_cloid(_CLOID)
+    assert r.accepted and r.status == "resting" and r.filled_size == 0.0
+
+
+def test_status_by_cloid_canceled_zero_fill_is_not_on_book():
+    r = _status_exchange(_order_status("canceled", remaining="1.0")).order_status_by_cloid(_CLOID)
+    assert r is None
+
+
+def test_status_by_cloid_canceled_partial_fill_is_a_fill():
+    # An IOC that filled 0.6 before the remainder canceled left a REAL position —
+    # it must never read as "never on the book" (that would release the fire key).
+    r = _status_exchange(_order_status("canceled", orig="1.0", remaining="0.4")).order_status_by_cloid(_CLOID)
+    assert r.accepted and r.status == "filled" and r.filled_size == 0.6
+
+
+def test_status_by_cloid_unknown_oid_is_none():
+    assert _status_exchange({"status": "unknownOid"}).order_status_by_cloid(_CLOID) is None
+    assert _status_exchange("garbage").order_status_by_cloid(_CLOID) is None

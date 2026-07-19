@@ -32,6 +32,7 @@ from hlcli.sentry.apply import manage_open_trades
 from hlcli.sentry.live import graduation_for_management, manage_live
 from hlcli.sentry.shadow import shadow_pass
 from hlcli.state.store import StateStore, open_state
+from hlcli.tuner.stats import sentry_exit_attribution
 
 app = typer.Typer(no_args_is_help=True, help="In-trade manager (sentry).")
 
@@ -206,18 +207,23 @@ def status(ctx: typer.Context) -> None:
 
 
 def _shadow_stats(state: StateStore, window: int = 200) -> dict:
-    """Proposal tally over the recent shadow log — the 6b value-add scoreboard."""
+    """Proposal tally over the recent shadow log — the 6b value-add scoreboard. Beyond the
+    agreement count, `exit_attribution` scores diverging early-exit proposals on realized R
+    (audit J): would following the LLM's close/reduce calls have banked more R than the rules?"""
     rows = [r for r in state.recent_sentry(window) if r["action"] in ("shadow", "shadow_dropped")]
-    proposals = [json.loads(r["details"]) for r in rows if r["action"] == "shadow"]
+    proposals = [{"trade_id": r["trade_id"], **json.loads(r["details"])}
+                 for r in rows if r["action"] == "shadow"]
     by_action: dict[str, int] = {}
     for p in proposals:
         a = p["proposal"]["action"]
         by_action[a] = by_action.get(a, 0) + 1
+    final_r = {t["id"]: t["r_multiple"] for t in state.resolved_trades() if t["r_multiple"] is not None}
     return {
         "proposals": len(proposals),
         "dropped": sum(1 for r in rows if r["action"] == "shadow_dropped"),
         "agreed_with_baseline": sum(1 for p in proposals if p.get("agrees")),
         "by_action": by_action,
+        "exit_attribution": sentry_exit_attribution(proposals, final_r),
     }
 
 

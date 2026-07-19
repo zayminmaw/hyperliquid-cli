@@ -166,7 +166,8 @@ def manage_live(
             continue
 
         _apply(exchange, state, trade, outcome.plan, decision, mark, ctx.regime, now,
-               native_protected=native_protected, summary=applied, alerter=alerter)
+               native_protected=native_protected, summary=applied, alerter=alerter,
+               taker_fee_pct=caps.taker_fee_pct)
 
     # An ADD increments both `added` and (via its internal raise) `stops_moved`, so
     # summing everything would double-count it; the raise already represents it once.
@@ -178,15 +179,17 @@ def manage_live(
 
 
 def _apply(exchange, state, trade, plan, decision, mark, regime, now, *,
-           native_protected, summary, alerter) -> None:
+           native_protected, summary, alerter, taker_fee_pct: float = 0.0) -> None:
     extra = {"confidence": decision.confidence, "rationale": decision.rationale}
     kw = dict(native_protected=native_protected, summary=summary, alerter=alerter, extra=extra)
     if isinstance(plan, MoveStop):
         apply_move_stop(exchange, state, trade, plan, now, log_action="managed_tighten_stop", **kw)
     elif isinstance(plan, ScaleOut):
-        apply_scale_out(exchange, state, trade, plan, now, log_action="managed_reduce", **kw)
+        apply_scale_out(exchange, state, trade, plan, now, log_action="managed_reduce",
+                        taker_fee_pct=taker_fee_pct, **kw)
     elif isinstance(plan, CloseAll):
-        apply_close(exchange, state, trade, plan.level, now, log_action="managed_close", **kw)
+        apply_close(exchange, state, trade, plan.level, now, log_action="managed_close",
+                    taker_fee_pct=taker_fee_pct, **kw)
     elif isinstance(plan, MoveTP):
         apply_move_tp(exchange, state, trade, plan.new_tp, now, log_action="managed_extend_tp", **kw)
     elif isinstance(plan, AddTo):

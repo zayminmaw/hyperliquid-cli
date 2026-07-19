@@ -11,7 +11,11 @@ from hlcli.core.config_schema import (
     RegimeGate,
     TunableConfig,
     clamp,
+    get_field,
     load_tunable,
+    save_tunable,
+    set_field,
+    tunable_keys,
 )
 
 
@@ -95,6 +99,58 @@ def test_malformed_file_is_surfaced(tmp_path: Path):
     p.write_text("{ not json ")
     with pytest.raises(ConfigError):
         load_tunable(p)
+
+
+def test_set_field_scalar_and_nested_types():
+    cfg = TunableConfig()
+    assert set_field(cfg, "risk_per_trade_pct", "1.25").risk_per_trade_pct == 1.25
+    assert set_field(cfg, "sizing.enabled", "true").sizing.enabled is True
+    assert set_field(cfg, "sizing.enabled", "off").sizing.enabled is False
+    assert set_field(cfg, "trail.style", "atr").trail.style == "atr"
+    assert set_field(cfg, "max_candidates_per_pass", "7").max_candidates_per_pass == 7
+    # a comma list fills the tuple-typed allowed_regimes
+    assert set_field(cfg, "regime.allowed_regimes", "trend, range").regime.allowed_regimes == ("trend", "range")
+
+
+def test_set_field_rejects_hard_caps_unknowns_and_submodels():
+    cfg = TunableConfig()
+    for bad in ("max_notional_per_trade", "max_leverage", "bogus", "trail.bogus", "sizing"):
+        with pytest.raises(KeyError):
+            set_field(cfg, bad, "1")  # hard caps / typos / a whole submodel are not settable leaves
+
+
+def test_set_field_bad_bool_is_a_value_error():
+    with pytest.raises(ValueError):
+        set_field(TunableConfig(), "sizing.enabled", "maybe")
+
+
+def test_set_field_does_not_mutate_input():
+    cfg = TunableConfig()
+    set_field(cfg, "risk_per_trade_pct", "3.0")
+    assert cfg.risk_per_trade_pct == TunableConfig().risk_per_trade_pct  # returned a copy
+
+
+def test_save_tunable_clamps_on_write_and_round_trips(tmp_path: Path):
+    p = tmp_path / "active_config.json"
+    # an out-of-range value written via save_tunable comes back clamped, not raw
+    save_tunable(TunableConfig(risk_per_trade_pct=999.0), p)
+    assert load_tunable(p).risk_per_trade_pct == 5.0
+    save_tunable(set_field(load_tunable(p), "trail.style", "percent"), p)
+    assert load_tunable(p).trail.style == "percent"
+
+
+def test_tunable_keys_lists_nested_leaves():
+    keys = tunable_keys()
+    assert "risk_per_trade_pct" in keys
+    assert "sizing.enabled" in keys
+    assert "trail.style" in keys
+    assert "agent.exec_interval_minutes" in keys
+    assert "sizing" not in keys  # submodels are not leaves
+
+
+def test_get_field_reads_nested():
+    cfg = set_field(TunableConfig(), "sizing.min_conviction", "0.42")
+    assert get_field(cfg, "sizing.min_conviction") == 0.42
 
 
 def test_clamp_bounds_agent_cadences():

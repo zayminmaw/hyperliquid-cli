@@ -52,10 +52,60 @@ def test_config_show_works():
     assert result.exit_code == 0
 
 
-def test_unbuilt_verb_is_a_clear_stub():
-    result = runner.invoke(app, ["config", "set"])
-    assert result.exit_code == 1
-    assert "Phase 4" in result.output
+def test_config_set_clamps_and_persists(isolated_caps):
+    r = runner.invoke(app, ["--json", "config", "set", "risk_per_trade_pct", "999"])
+    assert r.exit_code == 0
+    assert json.loads(r.output)["effective"] == 5.0  # clamped on write
+    show = runner.invoke(app, ["--json", "config", "show"])
+    assert json.loads(show.output)["risk_per_trade_pct"] == 5.0  # persisted
+
+
+def test_config_set_rejects_hard_caps(isolated_caps):
+    r = runner.invoke(app, ["config", "set", "max_notional_per_trade", "500"])
+    assert r.exit_code == 1
+    assert "not a tunable field" in r.output  # hard caps live in .env
+
+
+def test_config_edit_reclamps_on_save(isolated_caps, monkeypatch):
+    import hlcli.cli.commands.config as config_cmd
+
+    path = get_caps().config_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"risk_per_trade_pct": 999}')  # a hand-broken value
+    monkeypatch.setattr(config_cmd, "_launch_editor", lambda p: None)  # no-op editor
+    r = runner.invoke(app, ["config", "edit"])
+    assert r.exit_code == 0
+    from hlcli.core.config_schema import load_tunable
+    assert load_tunable(path).risk_per_trade_pct == 5.0  # clamped back on save
+
+
+def test_exec_reconcile_halts_on_unexpected_position(isolated_caps):
+    # Wave-2 G: a paper position with no ledger row is an unsafe divergence → the breaker
+    # trips so a restart can't fire into the inconsistent book.
+    from hlcli.core.types import Network, Order, OrderType, Side
+    from hlcli.exchange.paper import PaperExchange
+    from hlcli.state.store import open_state
+    from hlcli.tests._helpers import FakeMarks
+
+    st = open_state(get_caps(), Network.PAPER)
+    ex = PaperExchange(10_000.0, marks=FakeMarks({"BTC": 100.0}), state=st)
+    ex.place_order(Order(coin="BTC", side=Side.LONG, order_type=OrderType.MARKET, size=1.0))
+    st.close()  # a paper position now exists with no trades-ledger row
+
+    r = runner.invoke(app, ["--json", "exec", "reconcile"])
+    assert r.exit_code == 0
+    out = json.loads(r.output)
+    assert out["requires_halt"] is True and out["breaker_tripped"] is True
+    assert out["divergences"][0]["kind"] == "unexpected_position"
+    assert json.loads(runner.invoke(app, ["--json", "exec", "breaker"]).output)["breaker"] == "tripped"
+
+
+def test_config_reset_restores_defaults(isolated_caps):
+    runner.invoke(app, ["config", "set", "risk_per_trade_pct", "1.0"])
+    r = runner.invoke(app, ["--json", "config", "reset"])
+    assert r.exit_code == 0 and json.loads(r.output)["removed"] is True
+    show = runner.invoke(app, ["--json", "config", "show"])
+    assert json.loads(show.output)["risk_per_trade_pct"] == 0.5  # back to the built-in default
 
 
 def test_tune_run_no_ops_on_empty_record(isolated_caps):
@@ -98,7 +148,38 @@ def test_agent_status_paper(isolated_caps):
     payload = json.loads(result.output)
     assert payload["network"] == "paper"
     assert payload["running"] is False
+    assert payload["liveness"] == "never"  # no heartbeat ever written (audit F)
     assert payload["pending_proposals"] == []
+
+
+def test_agent_watchdog_paper_never_run(isolated_caps):
+    # No heartbeat + empty book: nothing to page about, clean exit.
+    result = runner.invoke(app, ["--json", "agent", "watchdog"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["liveness"] == "never" and payload["paged"] is False
+
+
+def test_agent_watchdog_pages_when_stale_with_positions(isolated_caps, tmp_path, monkeypatch):
+    # A dead loop (stale heartbeat) holding an open position must page and exit non-zero (audit F).
+    import time
+    from hlcli.agent.supervisor import LAST_TICK
+    from hlcli.core.types import Side
+    from hlcli.state.store import open_state
+    from hlcli.core.config import get_caps as _get_caps
+    from hlcli.core.types import Network
+
+    monkeypatch.setattr("hlcli.exchange.paper.PaperExchange.get_marks",
+                        lambda self, *a, **k: {"BTC": 100.0})  # no network in the test
+    state = open_state(_get_caps(), Network.PAPER)
+    state.meta_set(LAST_TICK, str(time.time() - 100_000))  # long stale
+    state.upsert_paper_position("BTC", Side.LONG, 0.1, 100.0)
+    state.close()
+
+    result = runner.invoke(app, ["--json", "agent", "watchdog"])
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["liveness"] == "stale" and payload["paged"] is True
 
 
 def test_journal_write_show_ls_paper(isolated_caps):
@@ -112,3 +193,30 @@ def test_journal_write_show_ls_paper(isolated_caps):
 
     listed = runner.invoke(app, ["--json", "journal", "ls"])
     assert json.loads(listed.output)["days"] == [day]
+
+
+def test_exec_shadow_wires_the_reconciliation_alerter(isolated_caps, monkeypatch):
+    # O-2: shadow is exactly where unmanaged-position drift must not be silent — the
+    # CLI has to hand run_once an alerter or the runner-level check is skipped.
+    import hlcli.cli.commands.exec_ as exec_cmd
+
+    seen = {}
+    real = exec_cmd.run_once
+
+    def spy(*args, **kw):
+        seen.update(kw)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(exec_cmd, "run_once", spy)
+    result = runner.invoke(app, ["exec", "shadow"])
+    assert result.exit_code == 0
+    assert seen.get("alerter") is not None
+
+
+def test_keystore_error_is_a_domain_error():
+    # "key is encrypted — set HL_KEYSTORE_PASSPHRASE" is a routine operator condition:
+    # it must render as a one-line CLI error, never a traceback.
+    from hlcli.accounts.keystore import KeystoreError
+    from hlcli.cli.errors import DOMAIN_ERRORS
+
+    assert KeystoreError in DOMAIN_ERRORS

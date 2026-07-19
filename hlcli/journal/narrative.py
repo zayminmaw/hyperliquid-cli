@@ -57,7 +57,9 @@ def narrate(digest_markdown: str, caps: Caps, *, client=None) -> JournalNarrativ
         system=SYSTEM_PROMPT,
         tools=[JOURNAL_TOOL],
         tool_choice={"type": "tool", "name": "submit_journal"},
-        messages=[{"role": "user", "content": digest_markdown}],
+        # Delimit the digest like every other call site delimits its context, so the
+        # model reads it as the data block it is rather than as loose instructions.
+        messages=[{"role": "user", "content": f"<day_digest>\n{digest_markdown}\n</day_digest>"}],
     )
     payload = _tool_payload(response)
     if payload is None:

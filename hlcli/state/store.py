@@ -59,14 +59,16 @@ CREATE TABLE IF NOT EXISTS trades (
     candidate_id TEXT NOT NULL, coin TEXT NOT NULL, side TEXT NOT NULL,
     entry REAL NOT NULL, sl REAL NOT NULL, tp REAL NOT NULL, size REAL NOT NULL,
     conviction REAL NOT NULL, regime TEXT, opened_at REAL NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',   -- open | won | lost | expired | aborted | closed | scaled
+    status TEXT NOT NULL DEFAULT 'open',   -- open | won | lost | expired | aborted | abort_failed | closed | scaled
     exit_price REAL, realized REAL, r_multiple REAL, closed_at REAL,
     shadow INTEGER NOT NULL DEFAULT 0,     -- 1 = hypothetical (shadow mode); no order behind it
     initial_sl REAL,                       -- the SL at entry; sentry ratchets `sl`, R math stays anchored here
     scaled_out INTEGER NOT NULL DEFAULT 0, -- 1 = the one-shot scale-out already happened
     adopted INTEGER NOT NULL DEFAULT 0,    -- 1 = a Mode A position sentry adopted (PLAN.md §15.5)
     sl_oid TEXT,                           -- exchange oid of this row's native stop trigger (§14 slice-scoped cancel)
-    tp_oid TEXT                            -- exchange oid of this row's native take-profit trigger
+    tp_oid TEXT,                           -- exchange oid of this row's native take-profit trigger
+    mark_at_entry REAL,                    -- mark at fire; `entry` − this = realized entry slippage (audit D)
+    fee_paid REAL NOT NULL DEFAULT 0       -- round-trip taker fee already subtracted from `realized`/`r_multiple` (wave-2 K)
 );
 CREATE TABLE IF NOT EXISTS sentry_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,6 +119,10 @@ class StateStore:
             self._conn.execute("ALTER TABLE trades ADD COLUMN sl_oid TEXT")
         if "tp_oid" not in cols:
             self._conn.execute("ALTER TABLE trades ADD COLUMN tp_oid TEXT")
+        if "mark_at_entry" not in cols:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN mark_at_entry REAL")
+        if "fee_paid" not in cols:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN fee_paid REAL NOT NULL DEFAULT 0")
         # Pre-sentry rows never had their SL moved, so today's `sl` IS the initial one.
         self._conn.execute("UPDATE trades SET initial_sl = sl WHERE initial_sl IS NULL")
 
@@ -220,14 +226,14 @@ class StateStore:
         self, candidate_id: str, coin: str, side: Side, entry: float, sl: float, tp: float,
         size: float, conviction: float, regime: str | None, opened_at: float,
         *, shadow: bool = False, adopted: bool = False,
-        sl_oid: str | None = None, tp_oid: str | None = None,
+        sl_oid: str | None = None, tp_oid: str | None = None, mark_at_entry: float | None = None,
     ) -> int:
         cur = self._conn.execute(
             "INSERT INTO trades(candidate_id, coin, side, entry, sl, tp, size, conviction,"
-            " regime, opened_at, shadow, initial_sl, adopted, sl_oid, tp_oid)"
-            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " regime, opened_at, shadow, initial_sl, adopted, sl_oid, tp_oid, mark_at_entry)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (candidate_id, coin, side.value, entry, sl, tp, size, conviction, regime,
-             opened_at, int(shadow), sl, int(adopted), sl_oid, tp_oid),
+             opened_at, int(shadow), sl, int(adopted), sl_oid, tp_oid, mark_at_entry),
         )
         self._conn.commit()
         return cur.lastrowid
@@ -239,14 +245,26 @@ class StateStore:
             sql += f" AND shadow = {int(shadow)}"
         return [dict(r) for r in self._conn.execute(sql + " ORDER BY id").fetchall()]
 
+    def count_trades_opened_since(self, t0: float, *, shadow: bool) -> int:
+        """Entries opened at/after `t0` (a UTC-day start) in the given book — the daily
+        new-entry cap (audit B). Counts every opened row regardless of how it later
+        resolved: an aborted entry still moved money and still spent the day's budget."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE opened_at >= ? AND shadow = ?",
+            (t0, int(shadow)),
+        ).fetchone()
+        return int(row[0])
+
     def resolve_trade(
         self, trade_id: int, status: str, exit_price: float, realized: float,
-        r_multiple: float, closed_at: float,
+        r_multiple: float, closed_at: float, fee_paid: float = 0.0,
     ) -> None:
+        """`realized`/`r_multiple` are stored as given (already net of `fee_paid` — the
+        caller subtracts it); `fee_paid` is recorded for transparency and reporting."""
         self._conn.execute(
-            "UPDATE trades SET status=?, exit_price=?, realized=?, r_multiple=?, closed_at=?"
-            " WHERE id=?",
-            (status, exit_price, realized, r_multiple, closed_at, trade_id),
+            "UPDATE trades SET status=?, exit_price=?, realized=?, r_multiple=?, closed_at=?,"
+            " fee_paid=? WHERE id=?",
+            (status, exit_price, realized, r_multiple, closed_at, fee_paid, trade_id),
         )
         self._conn.commit()
 
@@ -271,19 +289,21 @@ class StateStore:
 
     def split_trade(
         self, trade_id: int, close_size: float, exit_price: float, realized: float,
-        r_multiple: float, closed_at: float,
+        r_multiple: float, closed_at: float, fee_paid: float = 0.0,
     ) -> int:
         """Book a partial close: the closed fraction becomes a resolved `scaled` child row
         (so its banked profit is a real outcome the tuner sees), the parent keeps the
-        remainder and is flagged so the one-shot scale-out can't repeat."""
+        remainder and is flagged so the one-shot scale-out can't repeat. `realized`/`r_multiple`
+        are net of `fee_paid` (the caller subtracts it), which is recorded on the child."""
         row = self._conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
         cur = self._conn.execute(
             "INSERT INTO trades(candidate_id, coin, side, entry, sl, tp, size, conviction,"
             " regime, opened_at, shadow, initial_sl, scaled_out, status, exit_price, realized,"
-            " r_multiple, closed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'scaled', ?, ?, ?, ?)",
+            " r_multiple, closed_at, fee_paid) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,"
+            " 'scaled', ?, ?, ?, ?, ?)",
             (row["candidate_id"], row["coin"], row["side"], row["entry"], row["sl"], row["tp"],
              close_size, row["conviction"], row["regime"], row["opened_at"], row["shadow"],
-             row["initial_sl"], exit_price, realized, r_multiple, closed_at),
+             row["initial_sl"], exit_price, realized, r_multiple, closed_at, fee_paid),
         )
         self._conn.execute(
             "UPDATE trades SET size = size - ?, scaled_out = 1 WHERE id = ?", (close_size, trade_id)

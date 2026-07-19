@@ -50,6 +50,20 @@ def test_set_default_moves_flag_within_network(tmp_path):
     assert s.get_default(Network.TESTNET).alias == "b"
 
 
+def test_set_address_repoints_and_keeps_alias_default(tmp_path):
+    # Wave-2 P: account edit --address updates the traded address in place.
+    s = _store(tmp_path)
+    s.add(_acct(alias="main", key_ref="main"))  # first → default
+    updated = s.set_address("main", "0xdef")
+    assert updated.address == "0xdef" and updated.alias == "main" and updated.is_default
+    assert s.get("main").address == "0xdef"  # persisted
+
+
+def test_set_address_unknown_alias_raises(tmp_path):
+    with pytest.raises(AccountError):
+        _store(tmp_path).set_address("nope", "0xdef")
+
+
 def test_resolve_prefers_explicit_alias_then_default(tmp_path):
     s = _store(tmp_path)
     s.add(_acct(alias="a"))
@@ -121,3 +135,44 @@ def test_agent_address_derivation(tmp_path):
 
     addr = agent_address(_KEY)
     assert addr.startswith("0x") and len(addr) == 42
+
+
+# --- O-1: encrypt-at-rest (V3 keystore JSON behind HL_KEYSTORE_PASSPHRASE) ---
+
+_ENC_KEY = "0x" + "1" * 64
+
+
+def test_encrypted_save_holds_no_plaintext_and_roundtrips(tmp_path):
+    pytest.importorskip("eth_account")
+    ks = Keystore(tmp_path / "keys")
+    ks.save("live", _ENC_KEY, passphrase="hunter2")
+
+    raw = ks.path_for("live").read_text()
+    assert raw.startswith("{") and "1" * 64 not in raw  # V3 JSON, key never in the clear
+    assert ks.load("live", passphrase="hunter2") == _ENC_KEY
+
+
+def test_encrypted_key_refuses_to_load_without_or_with_wrong_passphrase(tmp_path):
+    pytest.importorskip("eth_account")
+    ks = Keystore(tmp_path / "keys")
+    ks.save("live", _ENC_KEY, passphrase="hunter2")
+
+    with pytest.raises(KeystoreError, match="HL_KEYSTORE_PASSPHRASE"):
+        ks.load("live")  # encrypted + no passphrase → clear instruction, never a guess
+    with pytest.raises(KeystoreError, match="could not decrypt"):
+        ks.load("live", passphrase="wrong")
+
+
+def test_plaintext_keys_still_load_alongside_encrypted_ones(tmp_path):
+    # Pre-audit keys keep working — format is detected per file, no migration needed.
+    ks = Keystore(tmp_path / "keys")
+    ks.save("old", _ENC_KEY)  # no passphrase → plaintext (the original format)
+    assert ks.load("old") == _ENC_KEY
+
+
+def test_env_passphrase_unlocks_on_load(tmp_path, monkeypatch):
+    pytest.importorskip("eth_account")
+    ks = Keystore(tmp_path / "keys")
+    ks.save("live", _ENC_KEY, passphrase="hunter2")
+    monkeypatch.setenv("HL_KEYSTORE_PASSPHRASE", "hunter2")
+    assert ks.load("live") == _ENC_KEY  # context.build_for's load path needs no code change

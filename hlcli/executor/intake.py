@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 
@@ -23,6 +24,37 @@ from hlcli.executor.gate import infer_side
 
 # Accept friendly aliases from hand-written batches.
 _ALIASES = {"pair": "coin", "reason": "reasoning"}
+
+# Imperative-injection heuristics for the human-supplied thesis text (2026-07 audit,
+# L-5/E2/E3). The decision model *evaluates* `reasoning`/`news`, so text that commands
+# it — rather than argues a setup — is the prompt-injection surface. Flagging is
+# advisory: the flagged candidate still flows to the decision + gate (the gate remains
+# the authority); the flags ride into the decision log and a warning alert so a
+# poisoned intake feed is visible, not silent.
+_INJECTION_PATTERNS = (
+    ("ignore-instructions", re.compile(
+        r"\b(ignore|disregard|forget)\b.{0,40}\b(instruction|rule|prompt|guideline|boundar)", re.I | re.S)),
+    # "act as" only in the imperative — honest theses say "should/will/could act as support".
+    ("role-override", re.compile(
+        r"\b(you are now|new persona|system prompt|jailbreak)\b"
+        r"|(?<!should )(?<!would )(?<!will )(?<!may )(?<!might )(?<!could )(?<!can )(?<!to )\bact as\b",
+        re.I)),
+    # Commands aimed at the model ("you must … act"). Bare "always" is deliberately NOT a
+    # trigger — honest theses say things like "buyers always act at this level".
+    ("verdict-coercion", re.compile(
+        r"\b(you must|you are required to|you have to)\b.{0,30}\b(act|buy|sell|approve|execute|answer)\b",
+        re.I | re.S)),
+    # Only a schema field assigned a *schema-shaped* value ("action: act", "conviction: 0.9").
+    # A bare "<field>:" is everyday trading prose ("price action: bullish", "timing: …").
+    ("schema-tamper", re.compile(
+        r"\b(conviction\s*[:=]\s*[01]?\.\d|action\s*[:=]\s*(act|skip)\b|timing\s*[:=]\s*(now|wait)\b)", re.I)),
+)
+
+
+def injection_flags(candidate: Candidate) -> list[str]:
+    """Names of injection heuristics the candidate's thesis text trips (often empty)."""
+    text = f"{candidate.reasoning}\n{candidate.news}"
+    return [name for name, rx in _INJECTION_PATTERNS if rx.search(text)]
 
 
 def make_candidate(

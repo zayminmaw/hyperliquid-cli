@@ -3,11 +3,11 @@
 The LLM's decision is an **input** to the gate, never a bypass. Checks run as a
 short-circuit pipeline, **first-failure wins**, in exactly this order:
 
-    schema-valid decision → kill switch → daily-loss-limit → freshness
+    schema-valid decision → kill switch → daily-loss-limit → daily-entry-count → freshness
       → allowed-coin → regime sanity → level sanity → R:R floor
       → mark sanity (mark present, inside sl/tp, R:R at mark still clears)
       → one-per-coin → max-concurrent → sizing + notional/leverage caps
-      → conviction→size clamp
+      → conviction→size clamp → account-wide gross exposure/leverage
 
 The mark-sanity block is what keeps a stale thesis from becoming a bad MARKET
 fill: the entry is a market order, so the *mark* — not the proposed entry — is
@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import ConvictionSizing, TunableConfig
-from hlcli.core.types import Action, Candidate, Decision, Order, OrderType, Side, Timing
+from hlcli.core.types import Action, Candidate, Decision, Order, OrderType, Position, Side, Timing
 
 
 @dataclass
@@ -44,8 +44,11 @@ class GateContext:
     now: float
     breaker_tripped: bool = False
     daily_loss_hit: bool = False
+    trades_today: int = 0  # new entries already opened this UTC day (grows as this pass fires)
     regime: str | None = None  # current regime signal (Phase 3 enrich); None = unknown, skip check
     mark: float | None = None  # current mark; None = no price → reject (a MARKET entry can't fire blind)
+    gross_notional: float = 0.0  # open-book notional priced at the mark; the account-wide caps add this order to it
+    maintenance_margin: float = 0.0  # cross maintenance margin required now (USDC); the pre-fire margin-health gate (M)
 
 
 class GateOutcome(BaseModel):
@@ -65,6 +68,8 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
         return _reject("breaker tripped")
     if ctx.daily_loss_hit:
         return _reject("daily loss limit hit")
+    if ctx.caps.max_trades_per_day > 0 and ctx.trades_today >= ctx.caps.max_trades_per_day:
+        return _reject(f"daily entry limit reached ({ctx.caps.max_trades_per_day}/day)")
 
     age_minutes = (ctx.now - candidate.created_at) / 60.0
     if age_minutes > ctx.caps.max_signal_age_minutes:
@@ -104,9 +109,34 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
     if ctx.equity <= 0:
         return _reject("equity non-positive")
 
+    # Maintenance-margin buffer (wave-2 M): refuse a new fire when the book is already close
+    # to liquidation. `crossMaintenanceMarginUsed` is the liquidation threshold, so a high
+    # fraction of equity means little cushion left to add risk. A hard cap, live only (paper
+    # reports 0). 0 disables.
+    if ctx.caps.max_maintenance_margin_frac > 0 and \
+            ctx.maintenance_margin > ctx.equity * ctx.caps.max_maintenance_margin_frac:
+        return _reject(
+            f"maintenance margin {ctx.maintenance_margin / ctx.equity:.0%} of equity "
+            f"> cap {ctx.caps.max_maintenance_margin_frac:.0%}")
+
     size, notional = _size(candidate, decision, ctx)
     if size <= 0:
         return _reject("size clamped to zero (conviction below threshold)")
+    # Exchange floor (Hyperliquid: $10/order) — reject with a clear reason here rather
+    # than a late exchange error. Mode B only; Mode A market orders bypass the gate and
+    # get the exchange's own (clearer) reject.
+    if notional < ctx.caps.min_order_notional:
+        return _reject(
+            f"notional {notional:.2f} below exchange minimum ${ctx.caps.min_order_notional:g}"
+        )
+
+    # Account-wide exposure ceiling (audit A). One-per-coin (checked above) means this order
+    # opens a coin we don't already hold, so post-trade gross is current gross + this notional
+    # with no netting. A hard cap: conviction and the LLM can never move it, and unlike the
+    # per-order caps it bounds the *sum* across the whole book.
+    exposure_reason = gross_exposure_reason(ctx.caps, ctx.gross_notional, notional, ctx.equity)
+    if exposure_reason is not None:
+        return _reject(exposure_reason)
 
     # A MARKET entry so an accepted order is a *filled* one — a resting GTC limit
     # would leave the ledger and protective triggers tracking a position that may
@@ -126,9 +156,9 @@ def _size(candidate: Candidate, decision: Decision, ctx: GateContext) -> tuple[f
 
     Priced at the *mark*, not the proposed entry: the entry order is a MARKET order,
     so the mark is what the fill (and therefore the true stop distance and notional)
-    will actually be. Note the leverage ceiling is per-order — with N concurrent
-    positions total exposure can reach N × max_leverage × equity; the aggregate is
-    bounded by max_concurrent_positions × max_notional_per_trade.
+    will actually be. The leverage ceiling here is per-order; the *account-wide* gross
+    exposure/leverage bound (`max_total_exposure_usd` / `max_gross_leverage`) is a
+    separate check in `evaluate`, applied to the sum across the whole book.
     """
     price = ctx.mark if ctx.mark is not None else candidate.entry
     stop_distance = abs(price - candidate.sl)
@@ -148,7 +178,13 @@ def _size(candidate: Candidate, decision: Decision, ctx: GateContext) -> tuple[f
 
 
 def _conviction_fraction(conviction: float, sizing: ConvictionSizing) -> float:
-    """Map conviction → fraction of target size, within [floor, ceil]. Below min → 0."""
+    """Map conviction → fraction of target size, within [floor, ceil]. Below min → 0.
+
+    With scaling disabled (the default — conviction is uncalibrated until this book's
+    outcomes prove otherwise) the fraction is 1.0: pure fixed-fractional sizing, where
+    `risk_per_trade_pct` alone sets the risk and conviction is a logged signal only."""
+    if not sizing.enabled:
+        return 1.0
     if conviction < sizing.min_conviction:
         return 0.0
     span = (conviction - sizing.min_conviction) / max(1e-9, 1.0 - sizing.min_conviction)
@@ -181,6 +217,25 @@ def _reward_risk_at(c: Candidate, mark: float) -> float:
 
 def _reject(reason: str) -> GateOutcome:
     return GateOutcome(approved=False, reason=reason)
+
+
+def book_gross_notional(positions: list[Position], marks: dict[str, float]) -> float:
+    """Total open-book notional, mark-priced with an entry-price fallback (fail-closed — a
+    dropped quote must not undercount the book and loosen the account-wide cap)."""
+    return sum(abs(p.size) * (marks.get(p.coin) or p.entry_price) for p in positions)
+
+
+def gross_exposure_reason(caps: Caps, gross_notional: float, notional: float, equity: float) -> str | None:
+    """First failing account-wide exposure cap for adding `notional` to a book already carrying
+    `gross_notional`, or None if within caps. Shared by the Mode B gate and Mode A `trade` so
+    both honor the same hard ceilings. Each cap is off when 0; leverage is skipped on
+    non-positive equity (the dollar cap still applies)."""
+    post_gross = gross_notional + notional
+    if caps.max_total_exposure_usd > 0 and post_gross > caps.max_total_exposure_usd:
+        return f"gross exposure {post_gross:.0f} > cap {caps.max_total_exposure_usd:g}"
+    if caps.max_gross_leverage > 0 and equity > 0 and post_gross > equity * caps.max_gross_leverage:
+        return f"gross leverage {post_gross / equity:.2f}x > cap {caps.max_gross_leverage:g}x"
+    return None
 
 
 def infer_side(entry: float, tp: float, sl: float) -> Side:

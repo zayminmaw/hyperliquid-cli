@@ -178,7 +178,7 @@ def test_narrate_calls_the_journal_model(tmp_path):
     assert captured["model"] == "claude-opus-4-8"
     assert captured["max_tokens"] == 512
     assert captured["tool_choice"] == {"type": "tool", "name": "submit_journal"}
-    assert captured["messages"][0]["content"] == "# digest"
+    assert captured["messages"][0]["content"] == "<day_digest>\n# digest\n</day_digest>"
 
 
 def test_narrate_without_the_tool_call_is_dropped():

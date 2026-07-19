@@ -4,6 +4,14 @@ Both halt *new* fires; open positions are still managed. The kill switch is a
 persisted manual toggle. The daily-loss-limit trips automatically when equity has
 drawn down past `DAILY_LOSS_LIMIT_PCT` from the day's starting equity (tracked in
 state, reset on date rollover).
+
+The equity fed in is **mark-to-market on both backends** (audit X-4): live equity is
+Hyperliquid's `accountValue` (includes unrealized P&L) and paper equity is
+starting + realized + unrealized at current marks — so an open position's drawdown
+alone can trip the limit; nothing has to be realized first. The check runs on every
+executor *and* sentry pass. Between passes, the native per-position stops are what
+bound loss — this breaker is the portfolio-level, pass-granular bound, not a
+tick-level one.
 """
 
 from __future__ import annotations

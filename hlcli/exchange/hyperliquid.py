@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from hlcli._lazy import require
 from hlcli.core.types import (
+    Fill,
     Network,
     OpenOrder,
     Order,
@@ -29,6 +30,8 @@ class HyperliquidExchange:
         account_address: str,
         agent_key: str | None = None,
         marks: MarksFeed | None = None,
+        # No default: the value is a hard cap and lives on Caps — the factory passes it.
+        max_entry_slippage_pct: float,
     ) -> None:
         self.network = network
         self._account_address = account_address
@@ -36,7 +39,13 @@ class HyperliquidExchange:
         self._base_url = api_url(network)
         self._info = None
         self._exchange = None
+        self._unified: bool | None = None  # unified-account mode, detected once on first equity read
         self._marks = marks or MarksFeed(self._base_url)
+        # Entry slippage cap as a fraction (audit X-1): the SDK turns a market open into
+        # an IOC limit at mid × (1 ± slippage), so this bounds the worst entry fill. The
+        # SDK's own default is 5% — far too wide for a leveraged entry. Closes are left
+        # at the SDK default on purpose: a flatten must fill.
+        self._entry_slippage = max_entry_slippage_pct / 100.0
 
     # --- lazy SDK clients ---
 
@@ -66,9 +75,41 @@ class HyperliquidExchange:
     def get_candles(self, coin: str, *, interval: str = "15m", lookback: int = 48):
         return self._marks.candles(coin, interval=interval, lookback=lookback)
 
+    def _is_unified(self) -> bool:
+        """Whether this account runs in Hyperliquid's unified-account mode, cached.
+
+        Under unified mode spot + perps share one collateral pool, so the perp
+        clearinghouse `accountValue` reflects only margin committed to open positions,
+        not the tradeable balance — that lives in the spot clearinghouse. We branch the
+        equity read on this (HL "Account abstraction modes"). `query_user_abstraction_state`
+        returns the literal "unifiedAccount" for unified accounts and something else for
+        standard ones (the pre-unification default), so an exact match is the safe test."""
+        if self._unified is None:
+            state = self._info_client().query_user_abstraction_state(self._account_address)
+            self._unified = state == "unifiedAccount"
+        return self._unified
+
     def equity(self) -> float:
+        perp = self._info_client().user_state(self._account_address)
+        if not self._is_unified():
+            return float(perp["marginSummary"]["accountValue"])
+        # Unified account: the perp `accountValue` is not the tradeable balance (it counts
+        # only committed position margin). Equity is the unified USDC collateral — read from
+        # the spot clearinghouse — marked to market by open-position unrealized P&L.
+        spot = self._info_client().spot_user_state(self._account_address)
+        usdc = next(
+            (float(b["total"]) for b in spot.get("balances", []) if b["coin"] == "USDC"), 0.0
+        )
+        upnl = sum(
+            float(e["position"].get("unrealizedPnl", 0.0)) for e in perp.get("assetPositions", [])
+        )
+        return usdc + upnl
+
+    def maintenance_margin(self) -> float:
+        # Top-level `crossMaintenanceMarginUsed` (verified live). Present under unified
+        # accounts too — the maintenance read is the perp clearinghouse's, not the balance.
         state = self._info_client().user_state(self._account_address)
-        return float(state["marginSummary"]["accountValue"])
+        return float(state.get("crossMaintenanceMarginUsed", 0.0))
 
     def get_positions(self) -> list[Position]:
         state = self._info_client().user_state(self._account_address)
@@ -78,6 +119,7 @@ class HyperliquidExchange:
             szi = float(p["szi"])
             if szi == 0:
                 continue
+            liq = p.get("liquidationPx")  # null when far from liquidation (verified live)
             positions.append(
                 Position(
                     coin=p["coin"],
@@ -85,6 +127,7 @@ class HyperliquidExchange:
                     size=abs(szi),
                     entry_price=float(p["entryPx"]),
                     unrealized_pnl=float(p.get("unrealizedPnl", 0.0)),
+                    liquidation_px=float(liq) if liq is not None else None,
                 )
             )
         return positions
@@ -108,6 +151,23 @@ class HyperliquidExchange:
             for o in raw
         ]
 
+    def recent_fills(self, since_ms: int) -> list[Fill]:
+        # Keyless read. Field names verified against a live testnet fill (see `Fill`):
+        # `dir` classifies open/close, `closedPnl` is gross (excludes `fee`), `fee` is USDC.
+        raw = self._info_client().user_fills_by_time(self._account_address, since_ms)
+        return [
+            Fill(
+                coin=f["coin"],
+                px=float(f["px"]),
+                size=float(f["sz"]),
+                dir=str(f.get("dir", "")),
+                closed_pnl=float(f.get("closedPnl", 0.0)),
+                fee=float(f.get("fee", 0.0)),
+                time_ms=int(f.get("time", 0)),
+            )
+            for f in raw
+        ]
+
     # --- writes ---
 
     def place_order(self, order: Order) -> OrderResult:
@@ -119,26 +179,66 @@ class HyperliquidExchange:
                 message=f"size rounds to zero at {order.coin}'s size precision",
             )
         is_buy = order.side is Side.LONG
+        cloid = require("hyperliquid.utils.types").Cloid.from_str(order.cloid) if order.cloid else None
 
         if order.order_type is OrderType.MARKET:
+            # Entries are slippage-capped IOC limits (X-1): a non-fill is a clean no-op
+            # the caller retries later, never a fill worse than the cap. Reduce-only
+            # closes keep the SDK's wide default — a flatten must fill.
             resp = (
-                ex.market_close(order.coin, sz=order.size)
+                ex.market_close(order.coin, sz=order.size, cloid=cloid)
                 if order.reduce_only
-                else ex.market_open(order.coin, is_buy, order.size)
+                else ex.market_open(order.coin, is_buy, order.size,
+                                    slippage=self._entry_slippage, cloid=cloid)
             )
         elif order.order_type is OrderType.LIMIT:
             resp = ex.order(
                 order.coin, is_buy, order.size, order.price,
-                {"limit": {"tif": "Gtc"}}, reduce_only=order.reduce_only,
+                {"limit": {"tif": "Gtc"}}, reduce_only=order.reduce_only, cloid=cloid,
             )
         else:  # STOP_LOSS / TAKE_PROFIT — protective market trigger
             tpsl = "sl" if order.order_type is OrderType.STOP_LOSS else "tp"
             resp = ex.order(
                 order.coin, is_buy, order.size, order.trigger_price,
                 {"trigger": {"isMarket": True, "triggerPx": order.trigger_price, "tpsl": tpsl}},
-                reduce_only=order.reduce_only,
+                reduce_only=order.reduce_only, cloid=cloid,
             )
         return _parse_order_response(resp)
+
+    def order_status_by_cloid(self, cloid: str) -> OrderResult | None:
+        """Resolve a transport-unknown submit by its client order id. Returns a fill/resting
+        result when the exchange has the order, or None when it never saw it (safe to skip).
+        Keyless read (Info endpoint). NOTE: the orderStatus response shape is parsed
+        best-effort here and must be confirmed on a testnet drill (see the D-3 plan)."""
+        types = require("hyperliquid.utils.types")
+        raw = self._info_client().query_order_by_cloid(self._account_address, types.Cloid.from_str(cloid))
+        if not isinstance(raw, dict) or raw.get("status") != "order":
+            return None  # unknownOid / unexpected → the exchange never booked this order
+        inner = raw.get("order", {}) or {}
+        o = inner.get("order", {}) or {}
+        status = inner.get("status")
+        oid = str(o["oid"]) if o.get("oid") is not None else None
+        # `origSz` is the original size, `sz` the *remaining* size (0 once filled). The
+        # payload carries no average fill price — `limitPx` (for an entry, the slippage-cap
+        # bound) is the closest available, at most the cap away from the true fill.
+        orig, remaining = _as_float(o.get("origSz")), _as_float(o.get("sz"))
+        if status == "filled":
+            return OrderResult(
+                accepted=True, status="filled", order_id=oid,
+                filled_size=orig if orig is not None else remaining,
+                avg_price=_as_float(o.get("limitPx")),
+            )
+        if status in ("open", "resting"):
+            return OrderResult(accepted=True, status="resting", order_id=oid, filled_size=0.0)
+        # Terminal without a full fill (canceled / rejected / marginCanceled). An IOC can
+        # PARTIALLY fill before the remainder cancels — that partial is a live position and
+        # must be reported as a fill; only a zero-fill terminal was "never on the book".
+        if orig is not None and remaining is not None and orig - remaining > 0:
+            return OrderResult(
+                accepted=True, status="filled", order_id=oid,
+                filled_size=orig - remaining, avg_price=_as_float(o.get("limitPx")),
+            )
+        return None
 
     def _round_for_wire(self, order: Order) -> Order:
         """Round size/prices to the asset's exchange precision (size DOWN — never past

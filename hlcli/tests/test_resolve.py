@@ -128,6 +128,68 @@ def test_vanished_position_with_no_level_touched_books_external_close(tmp_path):
     assert t["status"] == "closed" and t["exit_price"] == 103.0  # manual close at mark
 
 
+def test_vanished_position_books_the_real_closing_fill_not_the_mark(tmp_path):
+    # Item L: a native trigger / manual close filled at 88.5; the mark has since moved to
+    # 103. Without the fill lookup the ledger would book the 103 mark; it must book 88.5.
+    from hlcli.core.types import Fill, Network
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 103.0}, positions=[], fills=[
+        Fill(coin="BTC", px=88.5, size=1.0, dir="Close Long", closed_pnl=-11.5, fee=0.04,
+             time_ms=int(NOW * 1000) + 1),
+    ])
+    _open(state)  # long, entry 100, opened at NOW
+    resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW,
+                        marks={"BTC": 103.0}, native_protected=True)
+    t = state.resolved_trades()[0]
+    assert t["exit_price"] == 88.5      # the real closing fill, not the 103 mark
+    assert t["realized"] == -11.5       # (88.5 - 100) * 1.0
+
+
+def test_vanished_scaled_trade_keeps_the_mark_estimate(tmp_path):
+    # A scaled trade's earlier scale-out fills would blend into the average, so L is
+    # skipped and the mark/level estimate stands.
+    from hlcli.core.types import Fill, Network
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    tid = _open(state)
+    state.split_trade(tid, 0.5, 105.0, 2.5, 0.5, NOW)  # parent now scaled_out=1, remainder 0.5
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 103.0}, positions=[], fills=[
+        Fill(coin="BTC", px=88.5, size=0.5, dir="Close Long", time_ms=int(NOW * 1000) + 1),
+    ])
+    resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW,
+                        marks={"BTC": 103.0}, native_protected=True)
+    t = [r for r in state.resolved_trades() if r["id"] == tid][0]
+    assert t["exit_price"] == 103.0     # mark estimate kept — the fill lookup is skipped
+
+
+def test_realized_and_r_are_net_of_taker_fee(tmp_path):
+    # Wave-2 K: with a taker fee configured, realized P&L and R are booked net of the
+    # round-trip fee (charged on entry + exit notional), so graduation/tuner see the cost.
+    import pytest
+
+    state, ex = _state_ex(tmp_path, {"BTC": 120.0})  # TP at 120
+    _open(state)  # long, entry 100, tp 120, size 1.0 → gross 20, dollar-risk 10 → gross R 2.0
+    resolve_open_trades(ex, state, caps(taker_fee_pct=0.045), clamp(TunableConfig()), NOW,
+                        marks={"BTC": 120.0})
+    t = state.resolved_trades()[0]
+    fee = 0.045 / 100 * 1.0 * (100 + 120)  # 0.099
+    assert t["fee_paid"] == pytest.approx(fee)
+    assert t["realized"] == round(20 - fee, 6)          # 19.901, not the gross 20
+    assert t["r_multiple"] == round((20 - fee) / 10, 4)  # 1.9901, not the gross 2.0
+
+
+def test_zero_fee_reproduces_gross_pnl(tmp_path):
+    # The default test caps pin taker_fee_pct=0, so fee-off must be byte-identical to pre-K.
+    state, ex = _state_ex(tmp_path, {"BTC": 120.0})
+    _open(state)
+    resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW, marks={"BTC": 120.0})
+    t = state.resolved_trades()[0]
+    assert t["realized"] == 20.0 and t["r_multiple"] == 2.0 and t["fee_paid"] == 0.0
+
+
 def test_live_close_cancels_the_surviving_trigger(tmp_path):
     # After the SL side of the pair closes the trade, the orphaned TP trigger must
     # be cancelled or it will close the NEXT position in this coin.

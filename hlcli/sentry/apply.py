@@ -21,7 +21,7 @@ from hlcli.core.types import Candle, Order, OrderType, Side
 from hlcli.exchange.base import Exchange
 from hlcli.executor.protect import cancel_coin_triggers, cancel_placed, cancel_trade_triggers
 from hlcli.executor.regime import DECISION_INTERVAL
-from hlcli.executor.rmath import initial_risk
+from hlcli.executor.rmath import initial_risk, taker_fee
 from hlcli.safety.alerts import Alerter
 from hlcli.sentry.engine import MoveStop, ScaleOut, active, plan
 from hlcli.state.store import StateStore
@@ -49,10 +49,12 @@ def manage_open_trades(
     shadow_only: bool = False,
     dry_run: bool = False,
     alerter: Alerter | None = None,
+    taker_fee_pct: float = 0.0,
 ) -> ManageSummary:
     """Run the 6a rules over every open trade. A shadow pass (`shadow_only`) manages
     only hypothetical rows — it may hold a read-only exchange and must never place
-    an order. Dry-run previews the plan without touching anything."""
+    an order. Dry-run previews the plan without touching anything. `taker_fee_pct` nets
+    the fee into a scale-out's realized/R (wave-2 K), matching the resolver."""
     summary = ManageSummary()
     cfg = tunable.trail
     if not active(cfg):
@@ -74,7 +76,8 @@ def manage_open_trades(
                 continue
             if isinstance(action, ScaleOut):
                 apply_scale_out(exchange, state, trade, action, now,
-                                native_protected=native_protected, summary=summary, alerter=alerter)
+                                native_protected=native_protected, summary=summary, alerter=alerter,
+                                taker_fee_pct=taker_fee_pct)
             else:
                 apply_move_stop(exchange, state, trade, action, now,
                                 native_protected=native_protected, summary=summary, alerter=alerter)
@@ -84,7 +87,7 @@ def manage_open_trades(
 def apply_scale_out(exchange: Exchange, state: StateStore, trade: dict, action: ScaleOut,
                     now: float, *, native_protected: bool, summary: ManageSummary,
                     alerter: Alerter | None, log_action: str = "scale_out",
-                    extra: dict | None = None) -> None:
+                    extra: dict | None = None, taker_fee_pct: float = 0.0) -> None:
     """Bank a fraction. `log_action`/`extra` let the 6c live pass write `managed_*`
     audit rows; the idempotency key and `scaled_out` flag are shared with the rule
     ladder — one partial per trade, whoever banks it."""
@@ -109,8 +112,8 @@ def apply_scale_out(exchange: Exchange, state: StateStore, trade: dict, action: 
         # The resting SL/TP triggers are now oversized, which is safe: reduce-only
         # means they can never close more than the position that remains.
 
-    realized, r_multiple = _partial_pnl(trade, close_size, exit_price)
-    state.split_trade(trade["id"], close_size, exit_price, realized, r_multiple, now)
+    realized, r_multiple, fee = _partial_pnl(trade, close_size, exit_price, taker_fee_pct)
+    state.split_trade(trade["id"], close_size, exit_price, realized, r_multiple, now, fee)
     trade["size"] -= close_size  # the stop move that may follow guards the remainder
     trade["scaled_out"] = 1
     summary.scaled_out += 1
@@ -151,7 +154,7 @@ def apply_move_stop(exchange: Exchange, state: StateStore, trade: dict, action: 
 def apply_close(exchange: Exchange, state: StateStore, trade: dict, level: float,
                 now: float, *, native_protected: bool, summary: ManageSummary,
                 alerter: Alerter | None, log_action: str = "managed_close",
-                extra: dict | None = None) -> None:
+                extra: dict | None = None, taker_fee_pct: float = 0.0) -> None:
     """Flatten the whole position by judgment (6c CLOSE). The outcome is booked by
     the *sign* of the realized P&L — a deliberate exit in profit is a win, in loss a
     loss — because this close resolves the entry decision, unlike an external
@@ -172,9 +175,9 @@ def apply_close(exchange: Exchange, state: StateStore, trade: dict, level: float
         if native_protected and result.avg_price is not None:
             exit_price = result.avg_price
 
-    realized, r_multiple = _partial_pnl(trade, trade["size"], exit_price)
+    realized, r_multiple, fee = _partial_pnl(trade, trade["size"], exit_price, taker_fee_pct)
     status = "won" if realized > 0 else "lost" if realized < 0 else "closed"
-    state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now)
+    state.resolve_trade(trade["id"], status, exit_price, realized, r_multiple, now, fee)
     if native_protected and not trade["shadow"]:
         _cancel_after_close(exchange, state, trade)  # this row's triggers; siblings kept
     summary.closed += 1
@@ -356,15 +359,19 @@ def _partial_close(trade: dict, size: float, level: float, native_protected: boo
                  size=size, price=level, reduce_only=True)
 
 
-def _partial_pnl(trade: dict, size: float, exit_price: float) -> tuple[float, float]:
-    """P&L of the closed fraction; R measured against the *initial* risk so a ratcheted
-    stop can't inflate the R-multiple the tuner learns from."""
+def _partial_pnl(trade: dict, size: float, exit_price: float,
+                 fee_rate: float = 0.0) -> tuple[float, float, float]:
+    """P&L of the closed fraction, **net of the taker fee** (wave-2 K), plus the fee itself.
+    R is measured against the *initial* risk so a ratcheted stop can't inflate the R-multiple
+    the tuner learns from. `fee_rate=0` reproduces the pre-K gross numbers (the test caps)."""
     side = Side(trade["side"])
     per_unit = (exit_price - trade["entry"]) if side is Side.LONG else (trade["entry"] - exit_price)
-    risk = initial_risk(trade)
-    realized = round(per_unit * size, 6)
-    r_multiple = round(per_unit / risk, 4) if risk > 0 else 0.0
-    return realized, r_multiple
+    dollar_risk = initial_risk(trade) * size
+    fee = taker_fee(fee_rate, size, trade["entry"], exit_price)
+    net = per_unit * size - fee
+    realized = round(net, 6)
+    r_multiple = round(net / dollar_risk, 4) if dollar_risk > 0 else 0.0
+    return realized, r_multiple, fee
 
 
 def _bars(exchange: Exchange, coin: str, cache: dict[str, list[Candle]]) -> list[Candle]:

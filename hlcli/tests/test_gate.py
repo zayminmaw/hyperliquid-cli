@@ -5,7 +5,7 @@ import time
 import pytest
 
 from hlcli.core.config import Caps
-from hlcli.core.config_schema import TunableConfig, clamp
+from hlcli.core.config_schema import ConvictionSizing, TunableConfig, clamp
 from hlcli.core.types import Action, Candidate, Decision, Side, Timing
 from hlcli.executor.gate import GateContext, evaluate, infer_side
 
@@ -34,6 +34,11 @@ def _ctx(caps=None, **kw) -> GateContext:
         open_coins=set(), open_count=0, now=NOW, mark=100.0,  # mark at the default entry
     )
     return GateContext(**{**base, **kw})
+
+
+def _scaling_on() -> TunableConfig:
+    """Conviction→size scaling is OFF by default (audit L-1); scaling tests opt in."""
+    return clamp(TunableConfig(sizing=ConvictionSizing(enabled=True)))
 
 
 # --- happy paths ---
@@ -139,7 +144,7 @@ def test_rejects_max_concurrent():
 
 
 def test_rejects_zero_size_below_conviction():
-    out = evaluate(_candidate(), _decision(conviction=0.1), _ctx())
+    out = evaluate(_candidate(), _decision(conviction=0.1), _ctx(tunable=_scaling_on()))
     assert not out.approved and "size clamped to zero" in out.reason
 
 
@@ -185,8 +190,109 @@ def test_leverage_cap_clamps_size():
 
 def test_conviction_scales_within_bounds():
     # at min_conviction (0.3) -> floor_fraction (0.25) of 5 units = 1.25
-    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(conviction=0.3), _ctx())
+    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(conviction=0.3),
+                   _ctx(tunable=_scaling_on()))
     assert out.size == 1.25
+
+
+def test_rejects_notional_below_exchange_minimum():
+    # X-2: Hyperliquid rejects orders under $10 notional — the gate says so up front.
+    # equity 100 → risk 0.5% = 0.5; stop 10 → size 0.05 → notional 5 < $10.
+    out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(), _ctx(equity=100.0))
+    assert not out.approved and "below exchange minimum" in out.reason
+
+
+# --- account-wide exposure caps (audit A) ---
+
+def test_rejects_gross_exposure_over_cap():
+    # This order's own notional ($500) is fine, but it would push the *book* past the cap.
+    caps = _caps(max_total_exposure_usd=600.0)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, gross_notional=200.0))
+    assert not out.approved and "gross exposure" in out.reason  # 200 + 500 = 700 > 600
+
+
+def test_gross_exposure_under_cap_approves():
+    caps = _caps(max_total_exposure_usd=2_000.0)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, gross_notional=200.0))
+    assert out.approved  # 200 + 500 = 700 < 2000
+
+
+def test_rejects_gross_leverage_over_cap():
+    # The existing book already sits near the leverage ceiling; this order tips it over.
+    caps = _caps(max_gross_leverage=1.0)  # gross notional cap = 1x equity (10000)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, gross_notional=9_800.0))
+    assert not out.approved and "gross leverage" in out.reason  # 9800 + 500 > 10000
+
+
+def test_gross_caps_disabled_pass_through():
+    # 0 disables each account-wide cap — a large book still fires; the per-trade caps stand.
+    caps = _caps(max_total_exposure_usd=0.0, max_gross_leverage=0.0)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, gross_notional=1_000_000.0))
+    assert out.approved
+
+
+def test_gross_exposure_reason_shared_helper():
+    # The same check Mode A `trade` runs (audit A / review #1).
+    from hlcli.executor.gate import gross_exposure_reason
+    caps = _caps(max_total_exposure_usd=1_000.0, max_gross_leverage=0.0)
+    assert gross_exposure_reason(caps, 600.0, 500.0, 10_000.0) is not None  # 1100 > 1000
+    assert gross_exposure_reason(caps, 300.0, 500.0, 10_000.0) is None      # 800 < 1000
+
+
+def test_gross_leverage_skipped_on_nonpositive_equity():
+    # Mode A has no upstream equity>0 guard, so the helper must not divide by zero.
+    from hlcli.executor.gate import gross_exposure_reason
+    caps = _caps(max_total_exposure_usd=0.0, max_gross_leverage=2.0)
+    assert gross_exposure_reason(caps, 100.0, 100.0, 0.0) is None
+
+
+def test_maintenance_margin_over_cap_is_rejected():
+    # Wave-2 M: equity 10_000, cap 0.5 → ceiling 5_000; maintenance 6_000 > ceiling → reject.
+    out = evaluate(_candidate(), _decision(), _ctx(maintenance_margin=6_000.0))
+    assert not out.approved and "maintenance margin" in out.reason
+
+
+def test_maintenance_margin_under_cap_passes():
+    out = evaluate(_candidate(), _decision(), _ctx(maintenance_margin=1_000.0))
+    assert out.approved
+
+
+def test_maintenance_margin_zero_frac_disables_the_check():
+    out = evaluate(_candidate(), _decision(),
+                   _ctx(caps=_caps(max_maintenance_margin_frac=0.0), maintenance_margin=9_999.0))
+    assert out.approved  # 0 disables — a paper book (maintenance 0) is unaffected regardless
+
+
+def test_book_gross_notional_marks_with_entry_fallback():
+    from hlcli.core.types import Position
+    from hlcli.executor.gate import book_gross_notional
+    positions = [Position(coin="BTC", side=Side.LONG, size=2.0, entry_price=100.0),
+                 Position(coin="ETH", side=Side.SHORT, size=-1.0, entry_price=50.0)]  # short → abs()
+    marks = {"BTC": 110.0}  # ETH mark missing → falls back to entry_price (fail-closed)
+    assert book_gross_notional(positions, marks) == 2.0 * 110.0 + 1.0 * 50.0
+
+
+# --- daily new-entry cap (audit B) ---
+
+def test_rejects_at_daily_entry_limit():
+    caps = _caps(max_trades_per_day=2)
+    out = evaluate(_candidate(), _decision(), _ctx(caps=caps, trades_today=2))
+    assert not out.approved and "daily entry limit" in out.reason
+
+
+def test_daily_entry_limit_disabled_pass_through():
+    out = evaluate(_candidate(), _decision(), _ctx(caps=_caps(max_trades_per_day=0), trades_today=99))
+    assert out.approved
+
+
+def test_flat_sizing_ignores_conviction_by_default():
+    # Scaling OFF (the default, audit L-1): every conviction sizes at the full
+    # fixed-fractional target — 0.5% of 10000 = 50 risk / stop 10 = 5 units — and a
+    # low-conviction act is no longer zero-sized (conviction is a logged signal only).
+    for conviction in (0.1, 0.3, 0.9, 1.0):
+        out = evaluate(_candidate(entry=100, sl=90, tp=120),
+                       _decision(conviction=conviction), _ctx())
+        assert out.approved and out.size == 5.0, conviction
 
 
 # --- side inference ---

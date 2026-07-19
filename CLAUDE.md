@@ -72,7 +72,7 @@ Every decision is logged with full input context + resulting fill + outcome. Tha
 
 This split is what makes self-tuning safe. Never let a tunable value reach the order path unclamped.
 
-- **`.env` — hard caps, off-limits to the LLM and the tuner.** Network/mainnet gate, paths, `STARTING_EQUITY`, `MAX_NOTIONAL_PER_TRADE`, `MAX_CONCURRENT_POSITIONS`, `DAILY_LOSS_LIMIT_PCT`, `MAX_LEVERAGE`, `RR_FLOOR`, `ALLOWED_COINS`, `MAX_SIGNAL_AGE_MINUTES`, model names + token budgets.
+- **`.env` — hard caps, off-limits to the LLM and the tuner.** Network/mainnet gate, paths, `STARTING_EQUITY`, `MAX_NOTIONAL_PER_TRADE`, `MAX_CONCURRENT_POSITIONS`, `MAX_TOTAL_EXPOSURE_USD` + `MAX_GROSS_LEVERAGE` (account-wide book ceilings, audit A), `MAX_TRADES_PER_DAY` (daily new-entry cap, audit B), `DAILY_LOSS_LIMIT_PCT`, `MAX_LEVERAGE`, `RR_FLOOR`, `ALLOWED_COINS`, `MAX_SIGNAL_AGE_MINUTES`, `AGENT_STALE_AFTER_SECONDS` (liveness, audit F), model names + token budgets.
 - **`config/active_config.json` — the tunable surface.** Regime gate, risk profile, `risk_per_trade_pct`, conviction→size mapping, decision-prompt parameters. **Loaded and clamped in code** so a bad value can't reach the order path. Missing file → safe defaults.
 
 ## The risk gate (deterministic, first-failure wins)
@@ -96,8 +96,8 @@ Both tuners run **outside** the order path and **propose** changes a human appro
 
 ## Models
 
-- **Order-path decision** → `claude-sonnet-4-6` (hot loop; the gate is the real safety authority, so this needn't be the largest model).
-- **Daily tuner** → `claude-opus-4-8` (out-of-path, once a day, deeper reasoning worth the cost).
+- **Order-path decision** → `claude-sonnet-5` (hot loop; the gate is the real safety authority, so this needn't be the largest model — Sonnet 5 beats the original Sonnet 4.6 default at equal-or-lower cost; a smaller model here is unvalidated, see `docs/decisions.md`).
+- **Daily tuner** → `claude-sonnet-5` (out-of-path, once a day; near-Opus quality at a fraction of the cost, and every proposal is human-reviewed before `promote` regardless of model).
 
 Both configurable via `.env`. **`anthropic` and live-exchange deps are lazy-imported** so `paper` mode and the test suite run with no keys or signing libs present — preserve this; don't add top-level imports of `anthropic`, `hyperliquid`, or `eth_account` into hot import paths.
 
@@ -133,11 +133,24 @@ hl exec     propose | once | run | shadow | status | report | breaker           
 hl sentry   once | run | shadow | manage | adopt | status | log                              # in-trade manager (§14)
 hl tune     run | diff | promote | history
 hl config   show | set | edit
-hl agent    run | status        # autonomous supervisor (§15)
+hl agent    run | status | watchdog   # autonomous supervisor (§15); watchdog = cron liveness reaper (audit F)
 hl journal  write | show | ls   # daily journal (§15)
 ```
 
 `exec once` = one full pass (intake → enrich → decision → gate → fire → monitor). `exec run` = continuous loop. `exec shadow` = decide and log but **fire nothing** (pre-mainnet confidence + tuner training data). `exec breaker` = kill switch (halts new fires; open positions still managed). Idempotency + a high-water mark on the intake stream mean a restart never double-fires.
+
+## Evidence gate (2026-07 audit — binding on order-path changes)
+
+Any feature that touches the order path must pass the 7-point checklist in `docs/evidence-gate.md`
+(evidence grade, boxing, failure behavior, idempotency, tests, kill switch, measurement) and the
+paper → shadow → testnet → graduation validation ladder. **Audit-set defaults are deliberate — do
+not "fix" them back:** conviction→size scaling OFF (`sizing.enabled`; re-enable only when
+`exec report`'s calibration proves it), sentry ADD cap 0, `HL_DECISION_SOURCE` selects the llm|rule
+arbiter for A/B, an unconfirmed emergency close books `abort_failed` (never `aborted`), every
+non-reduce-only market order (Mode A included) is a slippage-capped IOC limit. Evidence hygiene:
+graduation and `conviction_calibration` exclude `aborted`/`abort_failed` (mechanical failures) and
+adopted rows (no LLM verdict) — don't let them back in. Full rationale:
+`docs/audits/2026-07-hl-cli-evidence-audit/`.
 
 ## Testing
 

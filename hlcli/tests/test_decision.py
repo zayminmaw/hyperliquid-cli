@@ -112,9 +112,12 @@ def test_decide_wraps_context_in_tags_with_compact_json():
 
 
 def test_decide_uses_order_path_model_and_low_temp():
+    # Overridden to a model that accepts temperature — the default order-path model
+    # (Sonnet 5) doesn't; that no-temperature path is covered separately below.
     client = FakeClient(_good())
-    decide(_ctx(), caps(), tunable(), client=client)
-    assert client.kwargs["model"] == caps().decision_model           # claude-sonnet-4-6
+    c = caps(decision_model="claude-sonnet-4-6")
+    decide(_ctx(), c, tunable(), client=client)
+    assert client.kwargs["model"] == c.decision_model
     assert client.kwargs["temperature"] == tunable().decision_temperature
     assert client.kwargs["tool_choice"]["name"] == "submit_decision"
 

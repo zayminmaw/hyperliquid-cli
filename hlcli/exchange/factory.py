@@ -30,5 +30,6 @@ def build_exchange(
     from hlcli.exchange.hyperliquid import HyperliquidExchange
 
     return HyperliquidExchange(
-        network, account_address=account.address, agent_key=agent_key
+        network, account_address=account.address, agent_key=agent_key,
+        max_entry_slippage_pct=caps.max_entry_slippage_pct,
     )

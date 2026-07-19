@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -49,6 +50,9 @@ class Caps(BaseSettings):
     # into the decision/management context. Hard caps: the inject can't bloat.
     agent_reflect_inject_max: int = 3
     agent_reflect_max_chars: int = 240
+    # Liveness (audit F): age past which the supervisor's heartbeat is read as dead by a
+    # separate reader (`agent status` / `agent watchdog`). 0 ⇒ derive as 3× the intake poll.
+    agent_stale_after_seconds: float = 0.0
 
     @model_validator(mode="after")
     def _anchor_config_path(self) -> "Caps":
@@ -63,9 +67,46 @@ class Caps(BaseSettings):
     max_notional_per_trade: float = 1_000.0
     max_concurrent_positions: int = 3
     daily_loss_limit_pct: float = 5.0
+    # New-entry frequency cap over a UTC calendar day (audit B — Vibe `daily_count.py`). An
+    # overtrading breaker independent of the loss limit: a run of small scratches or a
+    # misbehaving intake feed can fire many times without ever tripping daily-loss. 0 disables.
+    max_trades_per_day: int = 0
     max_leverage: float = 3.0
+    # Account-wide ceilings across the *whole book* (audit A — Vibe `enforcement.check_mandate`
+    # §5-6). The per-trade notional + per-order leverage + concurrent-*count* caps bound each
+    # order and how many run at once, but never their sum: N concurrent max-notional trades
+    # carry N× the intended exposure. These bound the total, priced at the mark.
+    # `max_total_exposure_usd` is an absolute dollar ceiling (0 disables — set one explicitly);
+    # `max_gross_leverage` bounds gross book notional ÷ equity (0 disables). Off-limits to the
+    # LLM and the tuner, like every cap here.
+    max_total_exposure_usd: float = 0.0
+    max_gross_leverage: float = 5.0
     rr_floor: float = 1.5
+    # Distance-to-liquidation floor in percent (wave-2 M). An open position whose mark sits
+    # within this % of its exchange-reported `liquidationPx` raises a critical alert — a stop
+    # that far under water means native protection is missing or set below liquidation. Only
+    # meaningful live (paper reports no liquidationPx); 0 disables. A pre-fire maintenance-
+    # margin gate (`crossMaintenanceMarginUsed`) is the tracked M follow-on.
+    min_liquidation_distance_pct: float = 5.0
+    # Pre-fire maintenance-margin ceiling as a fraction of equity (wave-2 M). The gate refuses
+    # a new entry when `crossMaintenanceMarginUsed / equity` already exceeds this — the book is
+    # too close to its liquidation threshold to add risk. Live only (paper reports 0); 0 disables.
+    max_maintenance_margin_frac: float = 0.5
     max_signal_age_minutes: int = 30
+    # Exchange-enforced floor (Hyperliquid rejects orders under $10 notional) — the gate
+    # rejects early with a clear reason instead of a late exchange error (audit X-2).
+    min_order_notional: float = 10.0
+    # Worst acceptable entry fill vs the mid, in percent (audit X-1). The live entry is
+    # an IOC limit at mid ± this — normally fills like a market order, but refuses a
+    # fill worse than the cap (leverage multiplies slippage into margin). Entries only:
+    # closes must fill and stay wide.
+    max_entry_slippage_pct: float = 0.3
+    # Taker fee rate in percent (Hyperliquid entry tier ≈ 0.045% taker; verify your live
+    # tier via `Info.user_fees`). hl-cli entries and closes are takers, so realized P&L
+    # and R are booked NET of the round-trip taker fee (wave-2 K), keeping graduation and
+    # the tuner cost-honest. Paper *models* this fee so paper→testnet→mainnet expectancy
+    # stays comparable. 0 disables (the test caps pin it to keep gross assertions).
+    taker_fee_pct: float = 0.045
     # How many times the executor re-checks a candidate the LLM said to WAIT on before
     # giving up. 0 disables follow-ups (a `wait` becomes a terminal reject, as before).
     followup_max_attempts: int = 3
@@ -81,17 +122,35 @@ class Caps(BaseSettings):
     sentry_opposing_window_minutes: float = 120.0     # no extend_tp ↔ reduce flip-flops inside this
     # ADD (6d) — the one risk-increasing action; pyramid rules are hard policy:
     sentry_add_min_r: float = 1.0            # adds only to winners at/above this unrealized R
-    sentry_max_adds_per_position: int = 2    # cap per open position (resets when the coin is flat)
+    # Default 0 = ADD disabled (2026-07 audit, L-3): the lone risk-*increasing* lever stays
+    # off until the book has graduated; raising this is a deliberate risk decision.
+    sentry_max_adds_per_position: int = 0    # cap per open position (resets when the coin is flat)
 
     # --- graduation checklist (mainnet readiness; risk policy, off-limits to the tuner) ---
     graduation_min_trades: int = 20
     graduation_min_days: int = 7
     graduation_min_expectancy: float = 0.0  # mean R-multiple must clear this
 
+    # --- reconciliation response (2026-07 audit, O-2) ---
+    # What an executor pass does about an exchange position the ledger doesn't know:
+    # "alert" (default) pages a human; "adopt" additionally books stop-protected
+    # positions into the ledger via the sentry adopt path (never invents a stop —
+    # stopless positions still only alert). Flattening stays a manual decision:
+    # auto-closing could kill a position the human opened on purpose.
+    reconcile_action: Literal["alert", "adopt"] = "alert"
+
+    # --- decision source (2026-07 audit, L-2) ---
+    # Which arbiter judges candidates: "llm" (the decision model) or "rule" (the
+    # deterministic act-on-every-gate-valid-setup baseline — no LLM call, no key).
+    # A hard cap, not a tunable: the A/B control must be off-limits to the tuner.
+    # A/B procedure: run each source in shadow against the same intake under separate
+    # HL_DATA_DIRs, then compare `exec report` expectancy at the graduation sample.
+    decision_source: Literal["llm", "rule"] = "llm"
+
     # --- models + token budgets (configurable, but a hard cap on spend/choice) ---
-    decision_model: str = "claude-sonnet-4-6"
+    decision_model: str = "claude-sonnet-5"
     decision_max_tokens: int = 1024
-    tuner_model: str = "claude-opus-4-8"
+    tuner_model: str = "claude-sonnet-5"
     tuner_max_tokens: int = 4096
     journal_model: str = "claude-opus-4-8"  # daily narrative — out-of-path, one call/day
     journal_max_tokens: int = 2048

@@ -17,11 +17,13 @@ from hlcli.core.config import get_caps
 from hlcli.core.config_schema import load_tunable
 from hlcli.executor.intake import make_candidate, parse_batch
 from hlcli.executor.monitor import position_health
+from hlcli.executor.reconcile import reconcile
 from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.safety.graduation import assess
 from hlcli.state.store import open_state
+from hlcli.tuner.stats import conviction_calibration, management_cohorts, performance
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
 
@@ -74,7 +76,10 @@ def shadow(ctx: typer.Context) -> None:
     """Decide + gate + log a full pass but fire nothing (pre-mainnet confidence + tuner data)."""
     g = state_of(ctx)
     exchange, state, caps, tunable = open_env(g, for_write=False)
-    summary = run_once(exchange, state, caps, tunable, fire_enabled=False, dry_run=g.dry_run)
+    # Alerted like every other pass (O-2): shadow is exactly where the unmanaged-position
+    # reconciliation must not be silent — it's the long-running pre-mainnet mode.
+    summary = run_once(exchange, state, caps, tunable, fire_enabled=False, dry_run=g.dry_run,
+                       alerter=network_alerter(caps, g.network))
     emit(summary.model_dump(), as_json=g.json_out, title="exec shadow")
 
 
@@ -129,6 +134,43 @@ def breaker(
     )
 
 
+@app.command("reconcile")
+def reconcile_cmd(
+    ctx: typer.Context,
+    halt: bool = typer.Option(True, "--halt/--no-halt", help="trip the kill switch if unsafe"),
+) -> None:
+    """Diff the exchange against the ledger (wave-2 G) → safe / requires-halt.
+
+    On an unsafe divergence (an unexpected position, a size mismatch, or a live position with
+    no native protection) it trips the breaker so a restart can't fire into an inconsistent
+    book — run it after any crash, especially on mainnet. `--no-halt` reports only.
+    """
+    g = state_of(ctx)
+    caps = get_caps()
+    exchange, state, _caps, _tunable = open_env(g, for_write=False)
+    try:
+        report = reconcile(exchange, state)
+        tripped = False
+        if report.requires_halt and halt and not g.dry_run:
+            Breaker(state, caps).set(True)
+            tripped = True
+            network_alerter(caps, g.network).alert(
+                "reconcile_halt", level="critical",
+                divergences=[{"kind": d.kind, "coin": d.coin} for d in report.divergences])
+    finally:
+        state.close()
+    emit(
+        {
+            "network": g.network.value,
+            "safe": report.is_safe,
+            "requires_halt": report.requires_halt,
+            "divergences": [{"kind": d.kind, "coin": d.coin, **d.detail} for d in report.divergences],
+            "breaker_tripped": tripped,
+        },
+        as_json=g.json_out, title="exec reconcile",
+    )
+
+
 @app.command("status")
 def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch")) -> None:
     """Live position health for the executor's book."""
@@ -152,6 +194,7 @@ def report(ctx: typer.Context) -> None:
     g = state_of(ctx)
     exchange, state, caps, _tunable = open_env(g, for_write=False)
     positions = exchange.get_positions()
+    resolved = state.resolved_trades()
     emit(
         {
             "network": g.network.value,
@@ -160,7 +203,16 @@ def report(ctx: typer.Context) -> None:
             "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
             "breaker": "tripped" if Breaker(state, caps).tripped() else "clear",
             "deferred": state.deferred_count(),  # WAIT candidates parked for re-check
-            "graduation": assess(state.resolved_trades(), caps),
+            "graduation": assess(resolved, caps),
+            # Risk-adjusted + path-risk view win-rate/expectancy hide (audit C/D): Sharpe,
+            # Sortino, max drawdown, profit factor, and realized entry slippage.
+            "performance": performance(resolved, starting_equity=caps.starting_equity),
+            # The evidence gate for re-enabling conviction→size scaling (audit L-1/L-4):
+            # scaling stays off until higher buckets show higher avg_r on real sample.
+            "conviction_calibration": conviction_calibration(resolved),
+            # Realized R by which management events fired (audit J) — the evidence a sentry
+            # tuner would act on: do trailed/scaled trades out-perform ones left on the initial stop?
+            "management_cohorts": management_cohorts(resolved),
         },
         as_json=g.json_out, title="exec report",
     )

@@ -37,3 +37,22 @@ def test_daily_loss_resets_next_day(tmp_path):
     assert b.daily_loss_hit(9_400.0, today="2026-06-27") is True
     # new day re-baselines at the lower equity -> not hit
     assert b.daily_loss_hit(9_400.0, today="2026-06-28") is False
+
+
+def test_open_position_drawdown_alone_trips_the_limit(tmp_path):
+    # X-4: paper equity is mark-to-market, so an UNREALIZED drawdown trips the daily
+    # loss limit — nothing has to be stopped out first. 100 BTC long from 100, mark 94
+    # ⇒ −600 unrealized on 10 000 day-start = 6% ≥ 5%.
+    from hlcli.core.types import Side
+    from hlcli.exchange.paper import PaperExchange
+    from hlcli.tests._helpers import FakeMarks
+
+    b, state = _breaker(tmp_path)
+    ex = PaperExchange(10_000.0, marks=FakeMarks({"BTC": 100.0}), state=state)
+    assert b.daily_loss_hit(ex.equity(), today="2026-07-14") is False  # day start = 10 000
+
+    state.upsert_paper_position("BTC", Side.LONG, 100.0, 100.0)
+    dropped = PaperExchange(10_000.0, marks=FakeMarks({"BTC": 94.0}), state=state)
+    assert state.paper_realized() == 0.0            # the loss is entirely unrealized
+    assert dropped.equity() == 9_400.0              # mark-to-market
+    assert b.daily_loss_hit(dropped.equity(), today="2026-07-14") is True

@@ -31,12 +31,13 @@ from pydantic import BaseModel
 
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
-from hlcli.core.types import Action, Candidate, Network, OrderResult, Position, Side, Timing
+from hlcli.core.types import DAY_SECONDS, Action, Candidate, Network, OrderResult, Position, Side, Timing
 from hlcli.exchange.base import Exchange
-from hlcli.executor.decision import DecisionResult, decide
+from hlcli.executor.decision import DecisionResult, decider_for
 from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
-from hlcli.executor.gate import GateContext, evaluate
+from hlcli.executor.intake import injection_flags
+from hlcli.executor.gate import GateContext, book_gross_notional, evaluate
 from hlcli.executor.protect import (
     cancel_placed,
     emergency_close,
@@ -45,9 +46,11 @@ from hlcli.executor.protect import (
 )
 from hlcli.executor.regime import DECISION_INTERVAL, classify, summarize
 from hlcli.executor.resolve import resolve_open_trades
+from hlcli.executor.rmath import taker_fee
 from hlcli.journal.lessons import recent_lessons
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
+from hlcli.sentry.adopt import adopt_unmanaged
 from hlcli.sentry.apply import manage_open_trades
 from hlcli.sentry.engine import active as trail_active
 from hlcli.state.store import DeferredCandidate, StateStore
@@ -82,7 +85,7 @@ def run_once(
     *,
     dry_run: bool = False,
     fire_enabled: bool = True,
-    decide_fn: DecideFn = decide,
+    decide_fn: DecideFn | None = None,
     alerter: Alerter | None = None,
     now: float | None = None,
     include_intake: bool = True,
@@ -93,6 +96,9 @@ def run_once(
     deferred table and idempotency keys, so running them side by side can't
     double-spend a follow-up attempt or double-fire an entry."""
     now = now if now is not None else time.time()
+    # Arbiter selection is a hard cap (HL_DECISION_SOURCE): resolving it here wires every
+    # caller — exec/sentry/agent — through one switch; tests still inject their own.
+    decide_fn = decide_fn if decide_fn is not None else decider_for(caps)
     breaker = Breaker(state, caps)
     protected = requires_native_protection(exchange.network)
 
@@ -105,7 +111,7 @@ def run_once(
     if not dry_run and trail_active(tunable.trail):
         m = manage_open_trades(exchange, state, tunable, now, marks=marks,
                                native_protected=protected, shadow_only=not fire_enabled,
-                               alerter=alerter)
+                               alerter=alerter, taker_fee_pct=caps.taker_fee_pct)
         managed = m.stops_moved + m.scaled_out
 
     # Monitor step: close any open trade whose SL/TP/expiry has triggered, recording
@@ -121,17 +127,34 @@ def run_once(
     equity = exchange.equity()
     positions = exchange.get_positions()
     open_coins = {p.coin for p in positions}
+    maintenance_margin = exchange.maintenance_margin()  # pre-fire margin-health gate (wave-2 M)
+    # Account-wide exposure at pass start (audit A), mark-priced (entry-price fallback is fail-closed).
+    gross_notional = book_gross_notional(positions, marks)
     if not fire_enabled:
         # Shadow's book is hypothetical — feed its open trades into one-per-coin /
-        # max-concurrent so shadow discipline matches what live would have done.
-        open_coins |= {t["coin"] for t in state.open_trades(shadow=True)}
+        # max-concurrent (and gross exposure) so shadow discipline matches what live would do.
+        shadow_open = state.open_trades(shadow=True)
+        open_coins |= {t["coin"] for t in shadow_open}
+        gross_notional += sum(abs(t["size"]) * (marks.get(t["coin"]) or t["entry"]) for t in shadow_open)
+    # New entries opened this UTC day (audit B); grows as this pass fires so a burst can't blow
+    # the budget. `now` is unix (UTC-epoch) so `now % DAY_SECONDS` is the offset into the day.
+    trades_today = state.count_trades_opened_since(now - (now % DAY_SECONDS), shadow=not fire_enabled)
     realized = state.paper_realized() if exchange.network is Network.PAPER else None
     recent = state.recent_decisions(limit=10)
     outcomes = state.resolved_trades(limit=10)  # newest first — the model's track record
     breaker_tripped = breaker.tripped()
     daily_loss = breaker.daily_loss_hit(equity, persist=not dry_run)
-    if alerter is not None and not dry_run and fire_enabled:
-        _alert_unmanaged(state, alerter, positions)
+    # Reconciliation (O-2): the unmanaged-position check runs on EVERY non-dry pass —
+    # shadow included — so drift between the exchange and the ledger is never silent.
+    # The auto-response (adopt) needs a live-authorized pass: it writes real ledger
+    # rows, which is never a shadow pass's job. Adoption first, so positions it books
+    # drop out of the unmanaged alert; stopless ones remain and keep paging.
+    if not dry_run:
+        if caps.reconcile_action == "adopt" and fire_enabled:
+            adopt_unmanaged(exchange, state, positions=positions, alerter=alerter, now=now)
+        if alerter is not None:
+            _alert_unmanaged(state, alerter, positions)
+            _alert_liquidation_near(state, alerter, positions, marks, caps.min_liquidation_distance_pct)
 
     # WAIT re-checks (skip in a dry-run preview, and while the kill switch is tripped — a
     # re-check can't fire anyway, so don't spend an LLM call or a follow-up attempt on it;
@@ -146,7 +169,9 @@ def run_once(
         caps=caps, tunable=tunable, decide_fn=decide_fn, marks=marks,
         market=_market_context(exchange, coins), equity=equity, positions=positions,
         realized=realized, recent=recent, outcomes=outcomes,
-        lessons=recent_lessons(state, caps, tunable), open_coins=open_coins, now=now,
+        lessons=recent_lessons(state, caps, tunable), open_coins=open_coins,
+        gross_notional=gross_notional, maintenance_margin=maintenance_margin,
+        trades_today=trades_today, now=now,
         breaker_tripped=breaker_tripped, daily_loss=daily_loss, protected=protected,
         fire_enabled=fire_enabled, dry_run=dry_run, alerter=alerter,
     )
@@ -186,8 +211,9 @@ class _Tally:
 
 @dataclass
 class _PassContext:
-    """Everything one pass shares across candidates. `open_coins` and `tally` are mutated
-    as candidates are processed; the rest is read-only per-pass state."""
+    """Everything one pass shares across candidates. `open_coins`, `gross_notional`,
+    `trades_today` and `tally` are mutated as candidates are processed; the rest is
+    read-only per-pass state."""
 
     caps: Caps
     tunable: TunableConfig
@@ -201,6 +227,9 @@ class _PassContext:
     outcomes: list[dict]  # recently resolved trades — the model's track record
     lessons: list[dict]  # distilled daily lessons (§15.4); [] when the inject is off
     open_coins: set[str]
+    gross_notional: float  # open-book notional (mark-priced); grows as this pass fires
+    maintenance_margin: float  # cross maintenance margin required now (USDC); the pre-fire margin gate (M)
+    trades_today: int  # new entries opened this UTC day; grows as this pass fires
     now: float
     breaker_tripped: bool
     daily_loss: bool
@@ -257,6 +286,14 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
             _emit(common.alerter, "reject", level="warning", coin=candidate.coin, reason="no mark for coin")
         return _Step("rejected")
 
+    # Advisory injection screen on the human-supplied thesis (L-5): flagged candidates
+    # still flow to the decision + gate, but the flags are alerted and logged so a
+    # poisoned intake feed is visible in the audit trail, never silent.
+    flags = injection_flags(candidate)
+    if flags and not common.dry_run:
+        _emit(common.alerter, "thesis_flagged", level="warning", coin=candidate.coin,
+              candidate=candidate.id, flags=flags)
+
     ctx = enrich(
         candidate, marks=common.marks, equity=common.equity, positions=common.positions,
         realized=common.realized, recent=common.recent, outcomes=common.outcomes,
@@ -284,7 +321,8 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         caps=common.caps, tunable=common.tunable, equity=common.equity,
         open_coins=set(common.open_coins), open_count=len(common.open_coins),
         now=common.now, breaker_tripped=common.breaker_tripped, daily_loss_hit=common.daily_loss,
-        regime=regime, mark=common.marks.get(candidate.coin),
+        regime=regime, mark=common.marks.get(candidate.coin), gross_notional=common.gross_notional,
+        maintenance_margin=common.maintenance_margin, trades_today=common.trades_today,
     )
     outcome = evaluate(candidate, decision, gate_ctx)
 
@@ -306,14 +344,15 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         common.tally.approved += 1
         status, fill = _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, common)
 
-    state.log_decision(
-        candidate.id, common.now, decision=decision, gate=outcome, fill=fill,
-        context={"coin": candidate.coin, "outcome": status, "equity": common.equity,
-                 "open_coins": sorted(common.open_coins), "regime": regime,
-                 # which reflection rows were in the model's context — makes the
-                 # inject's value measurable (§15.4), like 6b measured the manager
-                 "lessons": [le["date"] for le in common.lessons]},
-    )
+    context = {"coin": candidate.coin, "outcome": status, "equity": common.equity,
+               "open_coins": sorted(common.open_coins), "regime": regime,
+               # which reflection rows were in the model's context — makes the
+               # inject's value measurable (§15.4), like 6b measured the manager
+               "lessons": [le["date"] for le in common.lessons]}
+    if flags:
+        context["thesis_flags"] = flags  # the injection screen's audit-trail record
+    state.log_decision(candidate.id, common.now, decision=decision, gate=outcome, fill=fill,
+                       context=context)
     return _Step(status)
 
 
@@ -338,20 +377,35 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
     trade_id = state.open_trade(
         candidate.id, candidate.coin, candidate.side, entry_price,
         candidate.sl, candidate.tp, filled, decision.conviction, regime, common.now,
+        mark_at_entry=common.marks.get(candidate.coin),  # entry_price − mark = realized slip (audit D)
     )
+    # A row now exists in the ledger, so it counts toward today's entries even if protection
+    # later aborts it — this keeps the running count in step with count_trades_opened_since,
+    # which counts every opened row (audit B). Exposure (gross_notional) is added only once the
+    # position is confirmed protected below, since an aborted entry is flattened.
+    common.trades_today += 1
     if common.protected:
-        close, sl_oid, tp_oid = _secure(exchange, candidate, filled, common.alerter)
-        if close is not None:  # protection failed — position flattened, trade aborted
+        secured = _secure(exchange, candidate, filled, common.alerter)
+        if not secured.protected:
             common.tally.failed += 1
-            exit_price = close.avg_price if close.avg_price is not None else entry_price
-            realized, r_multiple = _abort_pnl(candidate.side, entry_price, candidate.sl, exit_price, filled)
-            state.resolve_trade(trade_id, "aborted", exit_price, realized, r_multiple, common.now)
-            return "aborted", fill
+            if secured.close_confirmed:  # flattened cleanly — book the ~spread cost as an abort
+                close = secured.close
+                exit_price = close.avg_price if close.avg_price is not None else entry_price
+                realized, r_multiple, fee = _abort_pnl(
+                    candidate.side, entry_price, candidate.sl, exit_price, filled, common.caps.taker_fee_pct)
+                state.resolve_trade(trade_id, "aborted", exit_price, realized, r_multiple, common.now, fee)
+                return "aborted", fill
+            # Flatten unconfirmed: the position may still be live and unprotected. Record it
+            # honestly (no fabricated P&L) under a distinct terminal status; the critical
+            # alert already fired, and next pass's _alert_unmanaged re-flags the live position.
+            state.resolve_trade(trade_id, "abort_failed", entry_price, 0.0, 0.0, common.now)
+            return "abort_failed", fill
         # Record the triggers so sentry (and the resolver) later cancel this position's
         # protection by oid, never a sibling slice's.
-        state.update_trade_triggers(trade_id, sl_oid=sl_oid, tp_oid=tp_oid)
+        state.update_trade_triggers(trade_id, sl_oid=secured.sl_oid, tp_oid=secured.tp_oid)
     common.tally.fired += 1
     common.open_coins.add(candidate.coin)
+    common.gross_notional += filled * entry_price  # so later candidates this pass see the new exposure
     _emit(common.alerter, "fire", level="info", coin=candidate.coin, side=candidate.side.value,
           size=filled, conviction=decision.conviction, order_id=fill.order_id)
     return "fired", fill
@@ -369,13 +423,20 @@ def _open_shadow_trade(state: StateStore, candidate: Candidate, decision, outcom
         shadow=True,
     )
     common.open_coins.add(candidate.coin)  # the hypothetical book honors one-per-coin too
+    common.gross_notional += outcome.notional  # …and the account-wide exposure cap
+    common.trades_today += 1                    # …and the daily new-entry budget
 
 
-def _abort_pnl(side: Side, entry: float, sl: float, exit_price: float, size: float) -> tuple[float, float]:
-    """Realized P&L / R-multiple of an emergency-closed entry (usually ≈ the spread)."""
+def _abort_pnl(side: Side, entry: float, sl: float, exit_price: float, size: float,
+               fee_rate: float = 0.0) -> tuple[float, float, float]:
+    """Realized P&L / R-multiple of an emergency-closed entry (usually ≈ the spread), **net
+    of the round-trip taker fee** (wave-2 K), plus the fee. Aborts are excluded from
+    graduation/calibration, but the ledger stays cost-honest and consistent with the resolver."""
     per_unit = (exit_price - entry) if side is Side.LONG else (entry - exit_price)
-    risk = abs(entry - sl)
-    return round(per_unit * size, 6), round(per_unit / risk, 4) if risk > 0 else 0.0
+    dollar_risk = abs(entry - sl) * size
+    fee = taker_fee(fee_rate, size, entry, exit_price)
+    net = per_unit * size - fee
+    return round(net, 6), round(net / dollar_risk, 4) if dollar_risk > 0 else 0.0, fee
 
 
 def _wait(state: StateStore, candidate: Candidate, decision, regime, common: _PassContext, attempts_left: int) -> _Step:
@@ -441,21 +502,56 @@ def _fetch_candles(exchange: Exchange, coin: str):
         return []
 
 
-def _secure(exchange: Exchange, candidate, size: float,
-            alerter: Alerter | None) -> tuple[OrderResult | None, str | None, str | None]:
+@dataclass
+class _SecureOutcome:
+    """What `_secure` did with a filled entry. `protected` True ⇒ native triggers rest
+    (oids set). Otherwise the entry was flattened; `close_confirmed` says whether that
+    flatten actually filled — an *unconfirmed* flatten may have left the position live
+    and unprotected, which the caller must not record as a clean abort."""
+
+    protected: bool
+    sl_oid: str | None = None
+    tp_oid: str | None = None
+    close: OrderResult | None = None       # emergency-close result when not protected
+    close_confirmed: bool = False          # True only when the flatten actually filled
+
+
+def _secure(exchange: Exchange, candidate, size: float, alerter: Alerter | None) -> _SecureOutcome:
     """Place native protective triggers; if that fails, flatten the position rather than
-    leave it naked — and cancel whichever trigger DID place, so no stray reduce-only
-    order survives to ambush the next position. Returns (None, sl_oid, tp_oid) when
-    protected, else (emergency-close result, None, None) for the abort ledger entry."""
+    leave it naked — and cancel whichever trigger DID place, so no stray reduce-only order
+    survives to ambush the next position.
+
+    The flatten must be *confirmed*: an emergency close that errors or doesn't fill leaves
+    a live, unprotected position, so the caller must not book it as a clean abort. A raised
+    backend error is caught (never propagated) so a naked position is always recorded and
+    alerted, not turned into a crash that skips the ledger update entirely."""
     protection = place_protection(exchange, candidate, size)
     if protection.ok:
         sl, tp = protection.placed  # place_protection orders SL then TP
-        return None, sl.order_id, tp.order_id
-    closed = emergency_close(exchange, candidate, size)
+        return _SecureOutcome(protected=True, sl_oid=sl.order_id, tp_oid=tp.order_id)
+
+    closed = _emergency_close_confirmed(exchange, candidate, size)
+    confirmed = closed.accepted and (closed.filled_size or 0) > 0
     canceled = cancel_placed(exchange, candidate.coin, protection.placed)
     _emit(alerter, "protection_failed", level="critical", coin=candidate.coin,
-          reason=protection.failed, emergency_closed=closed.accepted, triggers_canceled=canceled)
-    return closed, None, None
+          reason=protection.failed, emergency_closed=confirmed, triggers_canceled=canceled)
+    if not confirmed:
+        # The position may still be open and unprotected — page loudly and distinctly so a
+        # human intervenes now, ahead of next pass's _alert_unmanaged backstop.
+        _emit(alerter, "emergency_close_failed", level="critical", coin=candidate.coin,
+              size=size, reason=closed.message or closed.status)
+    return _SecureOutcome(protected=False, close=closed, close_confirmed=confirmed)
+
+
+def _emergency_close_confirmed(exchange: Exchange, candidate, size: float) -> OrderResult:
+    """`emergency_close`, but a raised backend error becomes a definitive non-fill result
+    instead of propagating — a naked position must be *recorded*, never crash the pass. The
+    broad catch is deliberate: the sole caller immediately alerts critical on a non-fill, so
+    nothing is masked silently, and any error here means the flatten is unconfirmed."""
+    try:
+        return emergency_close(exchange, candidate, size)
+    except Exception as exc:  # noqa: BLE001 — money-safety net (see docstring)
+        return OrderResult(accepted=False, status="error", message=f"emergency close raised: {exc}")
 
 
 def _emit(alerter: Alerter | None, event: str, **fields) -> None:
@@ -486,14 +582,46 @@ _UNMANAGED_ALERT_KEY = "alert_unmanaged_last"
 def _alert_unmanaged(state: StateStore, alerter: Alerter, positions: list[Position]) -> None:
     """Alert (on change) when the exchange holds a position the ledger doesn't know —
     e.g. a crash between fill and ledger write, or a manual trade on the executor's
-    account. The resolver won't manage it, so a human has to."""
-    ledger_coins = {t["coin"] for t in state.open_trades()}
+    account. The resolver won't manage it, so a human has to.
+
+    Only *real* ledger rows count as managed: a shadow (hypothetical) trade on the
+    same coin claims nothing on the exchange and must not mask a live orphan."""
+    ledger_coins = {t["coin"] for t in state.open_trades(shadow=False)}
     unmanaged = sorted(p.coin for p in positions if p.coin not in ledger_coins)
     fingerprint = ",".join(unmanaged)
     if fingerprint != (state.meta_get(_UNMANAGED_ALERT_KEY) or ""):
         if unmanaged:
             alerter.alert("unmanaged_position", level="critical", coins=unmanaged)
         state.meta_set(_UNMANAGED_ALERT_KEY, fingerprint)
+
+
+_LIQ_ALERT_KEY = "alert_liquidation_near_last"
+
+
+def _alert_liquidation_near(state: StateStore, alerter: Alerter, positions: list[Position],
+                            marks: dict[str, float], min_distance_pct: float) -> None:
+    """Alert (on change) when an open position's mark sits within `min_distance_pct` of its
+    exchange-reported liquidation price (wave-2 M). A position that close to liquidation means
+    its native stop is missing or set below liquidation — a human must act. Positions with no
+    `liquidation_px` (paper always; a well-collateralised cross position) carry no risk here
+    and are skipped. Edge-triggered like the unmanaged alert, so a lingering danger pages once
+    rather than every pass."""
+    if min_distance_pct <= 0:
+        return
+    near: list[str] = []
+    for p in positions:
+        mark = marks.get(p.coin)
+        if p.liquidation_px is None or not mark or mark <= 0:
+            continue
+        if abs(mark - p.liquidation_px) / mark * 100.0 < min_distance_pct:
+            near.append(p.coin)
+    near.sort()
+    fingerprint = ",".join(near)
+    if fingerprint != (state.meta_get(_LIQ_ALERT_KEY) or ""):
+        if near:
+            alerter.alert("liquidation_near", level="critical", coins=near,
+                          min_distance_pct=min_distance_pct)
+        state.meta_set(_LIQ_ALERT_KEY, fingerprint)
 
 
 def _note(*, dry_run: bool, fire_enabled: bool) -> str:

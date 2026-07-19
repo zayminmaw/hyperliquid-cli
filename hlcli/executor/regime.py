@@ -37,7 +37,9 @@ def classify(candles: list[Candle]) -> str | None:
 
 
 def summarize(candles: list[Candle]) -> list[dict] | None:
-    """The most recent bars as compact OHLC rows for the prompt + log, or None if empty."""
+    """The most recent bars as compact OHLCV rows for the prompt + log, or None if empty.
+    Volume is included: it lets the model read participation behind a move (is the swing
+    that justifies the entry backed by flow, or thin?), which OHLC alone can't show."""
     if not candles:
         return None
-    return [{"o": c.o, "h": c.h, "l": c.l, "c": c.c} for c in candles[-_SUMMARY_TAIL:]]
+    return [{"o": c.o, "h": c.h, "l": c.l, "c": c.c, "v": c.v} for c in candles[-_SUMMARY_TAIL:]]

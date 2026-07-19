@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import typing
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -34,8 +35,16 @@ class RegimeGate(BaseModel):
 
 
 class ConvictionSizing(BaseModel):
-    """Maps the LLM's conviction (0–1) to a fraction of the max allowed size."""
+    """Maps the LLM's conviction (0–1) to a fraction of the max allowed size.
 
+    **Disabled by default** (2026-07 audit, E1/E6): LLM conviction is an uncalibrated
+    scalar until this book's own outcomes prove it predicts realized R — see the
+    conviction-calibration table in `exec report`. Disabled ⇒ every gate-approved
+    trade sizes at the full fixed-fractional target (fraction 1.0) and conviction is
+    still logged, accumulating the calibration evidence that could re-enable this.
+    """
+
+    enabled: bool = False
     # Below this conviction the gate sizes to zero (treated as a skip).
     min_conviction: float = 0.3
     # Size scales between these fractions of the gate-permitted max as conviction
@@ -175,3 +184,98 @@ def load_tunable(path: Path | None = None) -> TunableConfig:
         raise ConfigError(f"{path} is not valid JSON: {exc}") from exc
 
     return clamp(TunableConfig.model_validate(raw))
+
+
+def save_tunable(cfg: TunableConfig, path: Path | None = None) -> Path:
+    """Persist the tunable surface, clamped, as pretty JSON. The write mirrors the
+    tuner's `promote` (same clamp-then-dump), so a manual `hl config set/edit` and a
+    promotion produce byte-identical files."""
+    path = path or get_caps().config_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(clamp(cfg).model_dump_json(indent=2))
+    return path
+
+
+# --- manual field addressing (hl config set / edit) ---------------------------
+#
+# The tuner is the *primary* way the tunable surface changes, but an operator also
+# needs direct control (turn a trail rule on, adjust risk before any cohort exists).
+# Both write the same clamped file, so a manual edit is exactly as safe as a
+# promotion. `set_field` only accepts paths that exist in the tunable model — a hard
+# cap (which lives in .env) or a typo raises KeyError rather than silently no-op'ing.
+
+
+def tunable_keys(cls: type[BaseModel] = TunableConfig, prefix: str = "") -> list[str]:
+    """Every settable dotted leaf path, e.g. `risk_per_trade_pct`, `sizing.enabled`."""
+    out: list[str] = []
+    for name, field in cls.model_fields.items():
+        ann = field.annotation
+        dotted = f"{prefix}{name}"
+        if isinstance(ann, type) and issubclass(ann, BaseModel):
+            out.extend(tunable_keys(ann, dotted + "."))
+        else:
+            out.append(dotted)
+    return out
+
+
+def _resolve_field_type(parts: list[str]) -> type:
+    """The declared type of a dotted tunable path, or KeyError if it isn't one
+    (a hard cap, a typo, or an attempt to descend into a scalar / assign a submodel)."""
+    cls: type[BaseModel] = TunableConfig
+    for i, part in enumerate(parts):
+        fields = getattr(cls, "model_fields", {})
+        if part not in fields:
+            raise KeyError(".".join(parts))
+        ann = fields[part].annotation
+        if i == len(parts) - 1:
+            if isinstance(ann, type) and issubclass(ann, BaseModel):
+                raise KeyError(".".join(parts))  # a whole submodel isn't a leaf
+            return ann
+        if not (isinstance(ann, type) and issubclass(ann, BaseModel)):
+            raise KeyError(".".join(parts))  # can't descend past a scalar
+        cls = ann
+    raise KeyError(".".join(parts))
+
+
+def _coerce(raw: str, field_type: type) -> object:
+    """Turn a CLI string into the field's declared type. Bool is checked by identity
+    (it is not `int` here); comma lists fill tuple/list fields like allowed_regimes."""
+    origin = typing.get_origin(field_type)
+    if origin in (tuple, list):
+        return tuple(s.strip() for s in raw.split(",") if s.strip())
+    if field_type is bool:
+        low = raw.strip().lower()
+        if low in ("true", "1", "on", "yes", "y"):
+            return True
+        if low in ("false", "0", "off", "no", "n"):
+            return False
+        raise ValueError(f"expected a boolean (true/false), got {raw!r}")
+    if field_type is int:
+        return int(raw)
+    if field_type is float:
+        return float(raw)
+    if field_type is str:
+        return raw
+    raise ValueError(f"cannot set a field of type {field_type!r}")
+
+
+def set_field(cfg: TunableConfig, dotted_key: str, raw_value: str) -> TunableConfig:
+    """A copy of `cfg` with one tunable leaf set from a CLI string, type-coerced.
+    Not clamped here — `save_tunable` clamps on write and `load_tunable` on read."""
+    parts = dotted_key.split(".")
+    field_type = _resolve_field_type(parts)  # raises KeyError for non-tunable paths
+    value = _coerce(raw_value, field_type)
+    data = cfg.model_dump()
+    node = data
+    for part in parts[:-1]:
+        node = node[part]
+    node[parts[-1]] = value
+    return TunableConfig.model_validate(data)
+
+
+def get_field(cfg: TunableConfig, dotted_key: str) -> object:
+    """Read a dotted tunable leaf's value (for echoing the effective, clamped result)."""
+    node: object = cfg.model_dump()
+    for part in dotted_key.split("."):
+        node = node[part]  # type: ignore[index]
+    return node

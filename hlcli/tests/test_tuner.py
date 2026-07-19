@@ -5,7 +5,7 @@ tuner LLM is never hit — fake clients return canned payloads."""
 import json
 from types import SimpleNamespace
 
-from hlcli.core.config_schema import TunableConfig, clamp, load_tunable
+from hlcli.core.config_schema import AgentConfig, TunableConfig, clamp, load_tunable
 from hlcli.core.types import Side
 from hlcli.state.store import StateStore
 from hlcli.tuner.config_tuner import propose_config
@@ -123,6 +123,48 @@ def test_config_tuner_drops_invalid_output(tmp_path):
     assert res.note == "invalid_output" and res.proposed is None
 
 
+def test_config_tuner_proposes_and_clamps_trail(tmp_path):
+    # audit J: the tuner now proposes sentry management params too; still clamped on the way out.
+    state = StateStore(tmp_path / "s.db")
+    _seed(state, 6)
+    cfg = {**_VALID_CFG, "trail": {
+        "style": "percent", "atr_multiple": 2.0, "trail_percent": 999.0,  # out of bounds
+        "trail_start_r": 1.0, "breakeven_trigger_r": 0.0, "breakeven_buffer_r": 0.05,
+        "scale_out_r": 1.5, "scale_out_fraction": 0.5, "min_move_r": 0.1}}
+    res = propose_config(state, _caps(tmp_path), clamp(TunableConfig()), client=FakeTool("submit_config", cfg))
+    assert res.proposed.trail.style == "percent" and res.proposed.trail.scale_out_r == 1.5
+    assert res.proposed.trail.trail_percent == 20.0  # clamped to the ceiling
+
+
+def test_config_tuner_preserves_untuned_agent(tmp_path):
+    # The tool schema doesn't expose `agent`, so a proposal must PRESERVE the current cadence,
+    # never silently reset it to defaults on promote (the merge-onto-current fix).
+    state = StateStore(tmp_path / "s.db")
+    _seed(state, 6)
+    current = clamp(TunableConfig(agent=AgentConfig(sentry_interval_seconds=120.0)))
+    res = propose_config(state, _caps(tmp_path), current, client=FakeTool("submit_config", _VALID_CFG))
+    assert res.proposed.agent.sentry_interval_seconds == 120.0
+
+
+def test_config_tuner_promote_preserves_trail_and_agent(tmp_path):
+    # End-to-end (review coverage gap): a tuned trail survives promote, and the untuned agent
+    # cadence is not reset — the reset-bug regression guard.
+    from hlcli.core.config_schema import load_tunable
+    from hlcli.tuner.promote import paths, promote, write_proposed_config
+
+    state = StateStore(tmp_path / "s.db")
+    _seed(state, 6)
+    caps = _caps(tmp_path)
+    current = clamp(TunableConfig(agent=AgentConfig(sentry_interval_seconds=120.0)))
+    cfg = {**_VALID_CFG, "trail": {**current.trail.model_dump(), "style": "percent", "scale_out_r": 1.5}}
+    res = propose_config(state, caps, current, client=FakeTool("submit_config", cfg))
+    write_proposed_config(caps, res.proposed)
+    promote(caps)
+    active = load_tunable(paths(caps).active_config)
+    assert active.trail.style == "percent" and active.trail.scale_out_r == 1.5
+    assert active.agent.sentry_interval_seconds == 120.0
+
+
 # --- prompt tuner ---
 
 def test_prompt_tuner_gated_without_data(tmp_path):
@@ -222,3 +264,145 @@ def test_promotion_audit_records_what_went_live(tmp_path):
     entries = {e["kind"]: e for e in history(c)}
     assert entries["config"]["config"]["risk_per_trade_pct"] == 1.2
     assert entries["prompt"]["chars"] == len("prompt v2") and "sha256" in entries["prompt"]
+
+
+# --- L-4: the conviction-calibration table (the gate for re-enabling conviction sizing) ---
+
+def test_conviction_calibration_buckets_and_exclusions():
+    from hlcli.tuner.stats import conviction_calibration
+
+    def t(conv, status, r):
+        return {"conviction": conv, "status": status, "r_multiple": r, "realized": r * 10}
+
+    rows = [
+        t(0.9, "won", 2.0), t(0.8, "lost", -1.0),   # high bucket: n=2, win_rate .5, avg_r .5
+        t(0.5, "lost", -1.0),                       # mid bucket
+        t(0.2, "expired", 0.3),                     # low bucket (expired counts — a real outcome)
+        # Excluded: scaled duplicates the parent's conviction; aborts are mechanical failures.
+        t(0.9, "scaled", 1.0), t(0.9, "aborted", -0.02), t(0.9, "abort_failed", 0.0),
+    ]
+    cal = conviction_calibration(rows)
+    assert [c["bucket"] for c in cal] == ["low", "mid", "high"]
+    high = cal[-1]
+    assert high["n"] == 2 and high["win_rate"] == 0.5 and high["avg_r"] == 0.5
+
+
+def test_conviction_calibration_empty_book_is_empty():
+    from hlcli.tuner.stats import conviction_calibration
+
+    assert conviction_calibration([]) == []
+
+
+def test_conviction_calibration_skips_adopted_and_missing_r():
+    from hlcli.tuner.stats import conviction_calibration
+
+    def t(conv, status, r, **kw):
+        return {"conviction": conv, "status": status, "r_multiple": r,
+                "realized": (r or 0.0) * 10, **kw}
+
+    rows = [
+        t(0.9, "won", 2.0),
+        t(0.8, "closed", None),         # counted in n/win_rate, but never as a 0R in avg_r
+        t(0.0, "won", 3.0, adopted=1),  # adopted: no LLM verdict behind it — excluded entirely
+    ]
+    cal = conviction_calibration(rows)
+    assert [c["bucket"] for c in cal] == ["high"]  # the adopted row opened no low bucket
+    assert cal[0]["n"] == 2 and cal[0]["avg_r"] == 2.0  # missing R didn't drag avg_r down
+
+    only_missing = conviction_calibration([t(0.9, "closed", None)])
+    assert only_missing[0]["avg_r"] is None  # no R evidence reads as none, not as flat
+
+
+# --- execution-quality metrics (audit C/D) ---
+
+def test_performance_empty_book():
+    from hlcli.tuner.stats import performance
+
+    perf = performance([], starting_equity=1_000.0)
+    assert perf["n"] == 0 and perf["sharpe"] is None and perf["max_drawdown_pct"] == 0.0
+
+
+def test_performance_over_equity_curve():
+    from hlcli.tuner.stats import performance
+
+    def t(realized, closed_at):
+        return {"realized": realized, "closed_at": closed_at, "status": "won", "shadow": 0}
+
+    # +20, -10, +20, -10 on a 1000 base → equity 1020,1010,1030,1020; PF = 40/20 = 2.0;
+    # deepest dip is 1030→1020 vs the earlier 1020→1010: 10/1020 = 0.98% is the worst.
+    rows = [t(20, 1), t(-10, 2), t(20, 3), t(-10, 4)]
+    perf = performance(rows, starting_equity=1_000.0)
+    assert perf["profit_factor"] == 2.0
+    assert perf["max_drawdown_pct"] == 0.98
+    assert perf["sharpe"] is not None and perf["sortino"] is not None
+
+
+def test_performance_ratios_none_when_untrustworthy():
+    from hlcli.tuner.stats import performance
+
+    one = performance([{"realized": 5.0, "closed_at": 1, "status": "won"}], starting_equity=1_000.0)
+    assert one["sharpe"] is None  # a single trade has no dispersion to divide by
+
+    winners = [{"realized": r, "closed_at": i, "status": "won"} for i, r in enumerate([5.0, 7.0, 3.0])]
+    perf = performance(winners, starting_equity=1_000.0)
+    assert perf["profit_factor"] is None and perf["sortino"] is None  # no losers = no downside
+
+
+def test_performance_avg_entry_slip_signed_and_excludes_shadow():
+    from hlcli.tuner.stats import performance
+
+    def t(side, entry, mark, shadow=0):
+        return {"realized": 5.0, "closed_at": 1, "status": "won",
+                "side": side, "entry": entry, "mark_at_entry": mark, "shadow": shadow}
+
+    rows = [
+        t("long", 101.0, 100.0),           # paid 1% above the mark
+        t("short", 99.0, 100.0),           # sold 1% below the mark — also adverse
+        t("long", 200.0, 100.0, shadow=1),  # shadow enters at the mark: excluded
+    ]
+    assert performance(rows, starting_equity=1_000.0)["avg_slip_pct"] == 1.0
+
+
+# --- sentry self-tuning evidence (audit J) ---
+
+def test_sentry_exit_attribution_scores_divergent_exits():
+    from hlcli.tuner.stats import sentry_exit_attribution
+
+    proposals = [
+        # LLM wanted out at +1.5R where the rules held; the trade then stopped at -1R.
+        {"trade_id": 1, "agrees": False, "r_now": 1.5, "proposal": {"action": "close"}},
+        {"trade_id": 2, "agrees": True, "r_now": 0.5, "proposal": {"action": "close"}},   # agreed: skip
+        {"trade_id": 3, "agrees": False, "r_now": 0.8, "proposal": {"action": "tighten_stop"}},  # not exit
+        {"trade_id": 4, "agrees": False, "r_now": 1.0, "proposal": {"action": "close"}},  # still open: skip
+    ]
+    final_r = {1: -1.0, 2: 2.0, 3: 1.0}  # trade 4 unresolved
+    attr = sentry_exit_attribution(proposals, final_r)
+    assert attr["exit_divergences"] == 1
+    assert attr["avg_delta_r"] == 2.5  # 1.5 − (−1.0): the early close would have added 2.5R
+
+
+def test_sentry_exit_attribution_none_without_divergent_exits():
+    from hlcli.tuner.stats import sentry_exit_attribution
+
+    props = [{"trade_id": 1, "agrees": True, "r_now": 1.0, "proposal": {"action": "close"}}]
+    assert sentry_exit_attribution(props, {1: 0.5}) == {
+        "exit_divergences": 0, "avg_delta_r": None, "total_delta_r": 0.0}
+
+
+def test_management_cohorts_group_by_events():
+    from hlcli.tuner.stats import management_cohorts
+
+    def t(status, r, sl, initial_sl, scaled_out=0):
+        return {"status": status, "r_multiple": r, "realized": (r or 0) * 10,
+                "sl": sl, "initial_sl": initial_sl, "scaled_out": scaled_out}
+
+    rows = [
+        t("won", 2.0, 95.0, 90.0),           # stop ratcheted, full exit
+        t("lost", -1.0, 90.0, 90.0),         # stop never moved, full exit
+        t("scaled", 1.0, 95.0, 90.0, 1),     # stop moved + partial banked
+        t("aborted", -0.02, 90.0, 90.0),     # mechanical failure — excluded
+        t("won", None, 95.0, 90.0),          # no R — excluded
+    ]
+    by = {c["cohort"]: c for c in management_cohorts(rows)}
+    assert set(by) == {"stop_moved/full", "stop_initial/full", "stop_moved/scaled"}
+    assert by["stop_moved/full"]["n"] == 1 and by["stop_moved/full"]["avg_r"] == 2.0

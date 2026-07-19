@@ -71,6 +71,12 @@ List accounts. `--all` lists every network (default: just the current `--network
 ### `account set-default <alias>`
 Make `<alias>` the default for its network.
 
+### `account edit <alias>`
+Edit an existing account **in place** — `--address <0x…>` re-points it at a different
+main account, `--rekey` replaces the agent key (hidden prompt, same as `add`; refused on a
+read-only account). The alias and its default flag are kept. Renaming an alias isn't
+supported — `remove` + `add` for that.
+
 ### `account remove <alias>`
 Remove the account and delete its stored key (if any).
 
@@ -127,12 +133,16 @@ hl asset book ETH --depth 10
 ## `hl trade` — manual orders (Mode A)
 
 Human-in-control. **No LLM, no risk gate** — only the hard caps (allowed-coin,
-notional, leverage) plus the exchange's own validation. Writes, so the mainnet gate
-applies. `--dry-run` prints the resolved order without placing it. A rejected order
-exits `1`.
+notional, leverage, and the account-wide gross-exposure ceiling) plus the exchange's
+own validation. Writes, so the mainnet gate applies. `--dry-run` prints the resolved
+order without placing it. A rejected order exits `1`.
 
 > Notional is checked against `price` (limit), `trigger` (stop/TP), or the current
-> mark (market) × size, vs `MAX_NOTIONAL_PER_TRADE`.
+> mark (market) × size, vs `MAX_NOTIONAL_PER_TRADE`. A non-reduce-only entry also
+> honors the account-wide `MAX_TOTAL_EXPOSURE_USD` / `MAX_GROSS_LEVERAGE` ceilings
+> (audit A) — the same check the Mode B gate runs; a reduce-only close is never
+> blocked. The daily new-entry cap (`MAX_TRADES_PER_DAY`) is executor-only — it's
+> derived from the executor ledger, which manual orders don't write.
 
 ### `trade order limit <coin> <side> <size> <price>`
 Resting limit order.
@@ -228,6 +238,14 @@ hl exec breaker --on       # trip
 hl exec breaker --off      # clear
 ```
 
+### `exec reconcile`
+Diff the exchange (positions + resting orders) against the ledger and return a
+**safe / requires-halt** verdict (wave-2 G). Flags an unexpected position (on the exchange,
+not in the ledger), a size mismatch, or a live position with no native protection. On an
+unsafe divergence it **trips the breaker** (and emits a critical `reconcile_halt` alert) so a
+restart can't fire into an inconsistent book — run it after any crash, especially on mainnet.
+`--no-halt` reports only; `--dry-run` never trips.
+
 ### `exec status`
 Live position-health view for the executor's book, with a note of how many WAIT
 candidates are parked for re-check. `-w`/`--watch` for live refresh.
@@ -235,7 +253,11 @@ candidates are parked for re-check. `-w`/`--watch` for live refresh.
 ### `exec report`
 Account summary: equity, open positions, unrealized P&L, breaker state, the count of
 `deferred` (WAIT) candidates awaiting re-check, and the **graduation**
-(mainnet-readiness) verdict from resolved trades.
+(mainnet-readiness) verdict from resolved trades. Also carries the execution-quality
+`performance` block — profit factor, max drawdown, trade-based Sharpe/Sortino, and
+realized entry slippage (audit C/D) — `conviction_calibration`, and `management_cohorts`
+(realized R by which sentry management events fired — the sentry-tuning evidence, audit J).
+These span the whole resolved set (real + shadow), same as graduation.
 
 ---
 
@@ -246,9 +268,24 @@ Print the resolved hard caps **and** the clamped tunable surface (network, mainn
 flag, the ceilings, allowed coins, model names, `risk_per_trade_pct`, regime
 on/off, min conviction).
 
-### `config set` · `config edit`
-**Not built** — editing the tunable surface is the tuner's job. These print a
-"not built yet (Phase 4)" notice and exit `1`. Use the `hl tune` flow instead.
+### `config set <key> <value>`
+Set one field of the **tunable surface** (`config/active_config.json`), then re-clamp
+on write. Keys are dotted paths into the tunable model — e.g. `risk_per_trade_pct`,
+`sizing.enabled`, `trail.style`, `regime.allowed_regimes` (comma-list). **Hard caps are
+refused** (`max_notional_per_trade`, `max_leverage`, …) — those live in `.env`. The value
+written is the *clamped* one, so a manual set can never widen the box; an unknown key
+lists the settable ones and exits `1`. The tuner (`hl tune`) is the data-driven path to
+the same surface; `set`/`edit` are direct operator control over it.
+
+### `config edit`
+Open `config/active_config.json` in `$EDITOR` (seeded with the current clamped surface if
+absent). On save it is re-validated and clamped: an out-of-range edit is silently pulled
+back into range, malformed JSON fails loudly — nothing bad reaches the order path.
+
+### `config reset`
+Remove `config/active_config.json`, reverting the tunable surface to the built-in safe
+defaults. Hard caps (`.env`), the decision prompt, and any pending tuner proposals are left
+untouched.
 
 ---
 
@@ -311,14 +348,26 @@ unparseable ones to `failed/` plus an alert.
 
 ### `agent status`
 
-Cross-process pulse from the state store: `running` (a tick within 3 poll
-intervals), pass ages, last daily date, breaker, equity/book, realized-today,
-deferred count, pending tuner proposals, and the intake dir.
+Cross-process pulse from the state store: `liveness` (`never`/`alive`/`stale`, the
+verdict from the heartbeat's age vs the staleness threshold), `running` (kept for
+back-compat — true when `alive`), `stale_after_s`, pass ages, last daily date,
+breaker, equity/book, realized-today, deferred count, pending tuner proposals, and
+the intake dir.
+
+### `agent watchdog`
+
+A cron/systemd-friendly liveness reaper (audit F). A hard-killed supervisor
+(SIGKILL, host crash) can't alert for itself, so run this separately: it emits a
+**critical** `agent_stale` alert when the last tick is older than the staleness
+threshold **and** positions are open, and exits non-zero so a monitor can escalate.
+Quiet (exit `0`) when the loop is alive, never started, or stale with nothing at
+risk. The threshold is `HL_AGENT_STALE_AFTER_SECONDS` (0 → 3× the intake poll).
 
 ```bash
 hl agent run                       # paper by default, like everything else
 hl --network testnet -y agent run --manage
 hl --json agent status
+hl --network mainnet agent watchdog   # e.g. from cron every minute
 ```
 
 ---

@@ -83,10 +83,13 @@ def enrich(
         recent_decisions=_summarize_recent(recent, now),
         recent_outcomes=_summarize_outcomes(outcomes or []),
         # Only the *tunable* surface is exposed — never the hard caps or keys.
+        # `conviction_sizing` keeps the context truthful: when False (the default),
+        # conviction is recorded for calibration but does not move size.
         tunable={
             "risk_per_trade_pct": tunable.risk_per_trade_pct,
             "allowed_regimes": list(tunable.regime.allowed_regimes),
             "min_conviction": tunable.sizing.min_conviction,
+            "conviction_sizing": tunable.sizing.enabled,
         },
     )
 
