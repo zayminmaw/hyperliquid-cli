@@ -69,6 +69,9 @@ class PaperExchange:
     def recent_fills(self, since_ms: int) -> list[Fill]:
         return []  # paper realizes at the resolver's level — no separate fill feed
 
+    def maintenance_margin(self) -> float:
+        return 0.0  # paper has no margin engine / liquidations
+
     def place_order(self, order: Order) -> OrderResult:
         oid = f"paper-{next(self._order_ids)}"
         if self._state is None:

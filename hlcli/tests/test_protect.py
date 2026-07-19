@@ -48,6 +48,9 @@ class FakeLiveExchange:
     def recent_fills(self, since_ms):
         return [f for f in self.fills if f.time_ms >= since_ms]
 
+    def maintenance_margin(self):
+        return getattr(self, "maint_margin", 0.0)
+
     def equity(self):
         return 10_000.0
 

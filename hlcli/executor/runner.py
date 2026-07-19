@@ -127,6 +127,7 @@ def run_once(
     equity = exchange.equity()
     positions = exchange.get_positions()
     open_coins = {p.coin for p in positions}
+    maintenance_margin = exchange.maintenance_margin()  # pre-fire margin-health gate (wave-2 M)
     # Account-wide exposure at pass start (audit A), mark-priced (entry-price fallback is fail-closed).
     gross_notional = book_gross_notional(positions, marks)
     if not fire_enabled:
@@ -169,7 +170,8 @@ def run_once(
         market=_market_context(exchange, coins), equity=equity, positions=positions,
         realized=realized, recent=recent, outcomes=outcomes,
         lessons=recent_lessons(state, caps, tunable), open_coins=open_coins,
-        gross_notional=gross_notional, trades_today=trades_today, now=now,
+        gross_notional=gross_notional, maintenance_margin=maintenance_margin,
+        trades_today=trades_today, now=now,
         breaker_tripped=breaker_tripped, daily_loss=daily_loss, protected=protected,
         fire_enabled=fire_enabled, dry_run=dry_run, alerter=alerter,
     )
@@ -226,6 +228,7 @@ class _PassContext:
     lessons: list[dict]  # distilled daily lessons (§15.4); [] when the inject is off
     open_coins: set[str]
     gross_notional: float  # open-book notional (mark-priced); grows as this pass fires
+    maintenance_margin: float  # cross maintenance margin required now (USDC); the pre-fire margin gate (M)
     trades_today: int  # new entries opened this UTC day; grows as this pass fires
     now: float
     breaker_tripped: bool
@@ -319,7 +322,7 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
         open_coins=set(common.open_coins), open_count=len(common.open_coins),
         now=common.now, breaker_tripped=common.breaker_tripped, daily_loss_hit=common.daily_loss,
         regime=regime, mark=common.marks.get(candidate.coin), gross_notional=common.gross_notional,
-        trades_today=common.trades_today,
+        maintenance_margin=common.maintenance_margin, trades_today=common.trades_today,
     )
     outcome = evaluate(candidate, decision, gate_ctx)
 

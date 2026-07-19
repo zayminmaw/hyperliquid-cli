@@ -88,6 +88,10 @@ class Caps(BaseSettings):
     # meaningful live (paper reports no liquidationPx); 0 disables. A pre-fire maintenance-
     # margin gate (`crossMaintenanceMarginUsed`) is the tracked M follow-on.
     min_liquidation_distance_pct: float = 5.0
+    # Pre-fire maintenance-margin ceiling as a fraction of equity (wave-2 M). The gate refuses
+    # a new entry when `crossMaintenanceMarginUsed / equity` already exceeds this — the book is
+    # too close to its liquidation threshold to add risk. Live only (paper reports 0); 0 disables.
+    max_maintenance_margin_frac: float = 0.5
     max_signal_age_minutes: int = 30
     # Exchange-enforced floor (Hyperliquid rejects orders under $10 notional) — the gate
     # rejects early with a clear reason instead of a late exchange error (audit X-2).

@@ -48,6 +48,7 @@ class GateContext:
     regime: str | None = None  # current regime signal (Phase 3 enrich); None = unknown, skip check
     mark: float | None = None  # current mark; None = no price → reject (a MARKET entry can't fire blind)
     gross_notional: float = 0.0  # open-book notional priced at the mark; the account-wide caps add this order to it
+    maintenance_margin: float = 0.0  # cross maintenance margin required now (USDC); the pre-fire margin-health gate (M)
 
 
 class GateOutcome(BaseModel):
@@ -107,6 +108,16 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
 
     if ctx.equity <= 0:
         return _reject("equity non-positive")
+
+    # Maintenance-margin buffer (wave-2 M): refuse a new fire when the book is already close
+    # to liquidation. `crossMaintenanceMarginUsed` is the liquidation threshold, so a high
+    # fraction of equity means little cushion left to add risk. A hard cap, live only (paper
+    # reports 0). 0 disables.
+    if ctx.caps.max_maintenance_margin_frac > 0 and \
+            ctx.maintenance_margin > ctx.equity * ctx.caps.max_maintenance_margin_frac:
+        return _reject(
+            f"maintenance margin {ctx.maintenance_margin / ctx.equity:.0%} of equity "
+            f"> cap {ctx.caps.max_maintenance_margin_frac:.0%}")
 
     size, notional = _size(candidate, decision, ctx)
     if size <= 0:

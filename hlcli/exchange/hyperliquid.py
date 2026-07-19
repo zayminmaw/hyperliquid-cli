@@ -105,6 +105,12 @@ class HyperliquidExchange:
         )
         return usdc + upnl
 
+    def maintenance_margin(self) -> float:
+        # Top-level `crossMaintenanceMarginUsed` (verified live). Present under unified
+        # accounts too — the maintenance read is the perp clearinghouse's, not the balance.
+        state = self._info_client().user_state(self._account_address)
+        return float(state.get("crossMaintenanceMarginUsed", 0.0))
+
     def get_positions(self) -> list[Position]:
         state = self._info_client().user_state(self._account_address)
         positions = []

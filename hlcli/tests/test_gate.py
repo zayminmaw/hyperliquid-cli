@@ -246,6 +246,23 @@ def test_gross_leverage_skipped_on_nonpositive_equity():
     assert gross_exposure_reason(caps, 100.0, 100.0, 0.0) is None
 
 
+def test_maintenance_margin_over_cap_is_rejected():
+    # Wave-2 M: equity 10_000, cap 0.5 → ceiling 5_000; maintenance 6_000 > ceiling → reject.
+    out = evaluate(_candidate(), _decision(), _ctx(maintenance_margin=6_000.0))
+    assert not out.approved and "maintenance margin" in out.reason
+
+
+def test_maintenance_margin_under_cap_passes():
+    out = evaluate(_candidate(), _decision(), _ctx(maintenance_margin=1_000.0))
+    assert out.approved
+
+
+def test_maintenance_margin_zero_frac_disables_the_check():
+    out = evaluate(_candidate(), _decision(),
+                   _ctx(caps=_caps(max_maintenance_margin_frac=0.0), maintenance_margin=9_999.0))
+    assert out.approved  # 0 disables — a paper book (maintenance 0) is unaffected regardless
+
+
 def test_book_gross_notional_marks_with_entry_fallback():
     from hlcli.core.types import Position
     from hlcli.executor.gate import book_gross_notional

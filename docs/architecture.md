@@ -117,7 +117,7 @@ skips them. `PassSummary` reports `rechecked` and `deferred`; `exec report` and
 schema-valid decision → kill switch → daily-loss-limit → freshness
   → allowed-coin → regime sanity → level sanity (entry/sl/tp coherent)
   → R:R floor → mark sanity (mark present, inside sl/tp, R:R at mark ≥ floor)
-  → one-per-coin → max-concurrent → equity>0
+  → one-per-coin → max-concurrent → equity>0 → maintenance-margin buffer (M)
   → sizing + notional cap + leverage cap → conviction→size clamp
 ```
 
