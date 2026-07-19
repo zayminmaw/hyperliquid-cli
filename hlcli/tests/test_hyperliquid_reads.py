@@ -27,6 +27,23 @@ class FakeInfo:
              "orderType": "Stop Market", "isTrigger": True, "reduceOnly": True},
         ]
 
+    def query_user_abstraction_state(self, user):
+        return "standard"  # non-unified default; the unified subclass overrides
+
+
+class UnifiedFakeInfo(FakeInfo):
+    """Unified-account mode: perp accountValue is only committed margin; the tradeable
+    balance is the unified USDC in the spot clearinghouse (HL account abstraction)."""
+
+    def query_user_abstraction_state(self, user):
+        return "unifiedAccount"
+
+    def spot_user_state(self, address):
+        return {"balances": [
+            {"coin": "USDC", "total": "1000.0", "hold": "0.0"},
+            {"coin": "TZERO", "total": "5.0", "hold": "0.0"},  # ignored — not the collateral
+        ]}
+
 
 class FakeExchangeClient:
     """Records writes; accepts everything."""
@@ -73,7 +90,29 @@ def _exchange(with_writes: bool = False) -> HyperliquidExchange:
 
 
 def test_equity():
-    assert _exchange().equity() == 1234.5
+    assert _exchange().equity() == 1234.5  # standard account: perp accountValue
+
+
+def test_equity_unified_reads_spot_usdc_plus_upnl():
+    # Unified: perp accountValue is meaningless; equity = spot USDC (1000) marked to
+    # market by open-position uPnL (12.3 + -5 + 0 = 7.3) → 1007.3, NOT accountValue 1234.5.
+    ex = _exchange()
+    ex._info = UnifiedFakeInfo()
+    assert ex.equity() == 1007.3
+
+
+def test_unified_mode_is_detected_once_and_cached():
+    ex = _exchange()
+    calls = {"n": 0}
+    real = ex._info.query_user_abstraction_state
+
+    def counting(user):
+        calls["n"] += 1
+        return real(user)
+
+    ex._info.query_user_abstraction_state = counting
+    ex.equity(); ex.equity()
+    assert calls["n"] == 1  # abstraction state probed once, then cached
 
 
 def test_positions_skip_zero_and_map_side():

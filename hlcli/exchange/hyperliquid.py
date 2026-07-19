@@ -38,6 +38,7 @@ class HyperliquidExchange:
         self._base_url = api_url(network)
         self._info = None
         self._exchange = None
+        self._unified: bool | None = None  # unified-account mode, detected once on first equity read
         self._marks = marks or MarksFeed(self._base_url)
         # Entry slippage cap as a fraction (audit X-1): the SDK turns a market open into
         # an IOC limit at mid × (1 ± slippage), so this bounds the worst entry fill. The
@@ -73,9 +74,35 @@ class HyperliquidExchange:
     def get_candles(self, coin: str, *, interval: str = "15m", lookback: int = 48):
         return self._marks.candles(coin, interval=interval, lookback=lookback)
 
+    def _is_unified(self) -> bool:
+        """Whether this account runs in Hyperliquid's unified-account mode, cached.
+
+        Under unified mode spot + perps share one collateral pool, so the perp
+        clearinghouse `accountValue` reflects only margin committed to open positions,
+        not the tradeable balance — that lives in the spot clearinghouse. We branch the
+        equity read on this (HL "Account abstraction modes"). `query_user_abstraction_state`
+        returns the literal "unifiedAccount" for unified accounts and something else for
+        standard ones (the pre-unification default), so an exact match is the safe test."""
+        if self._unified is None:
+            state = self._info_client().query_user_abstraction_state(self._account_address)
+            self._unified = state == "unifiedAccount"
+        return self._unified
+
     def equity(self) -> float:
-        state = self._info_client().user_state(self._account_address)
-        return float(state["marginSummary"]["accountValue"])
+        perp = self._info_client().user_state(self._account_address)
+        if not self._is_unified():
+            return float(perp["marginSummary"]["accountValue"])
+        # Unified account: the perp `accountValue` is not the tradeable balance (it counts
+        # only committed position margin). Equity is the unified USDC collateral — read from
+        # the spot clearinghouse — marked to market by open-position unrealized P&L.
+        spot = self._info_client().spot_user_state(self._account_address)
+        usdc = next(
+            (float(b["total"]) for b in spot.get("balances", []) if b["coin"] == "USDC"), 0.0
+        )
+        upnl = sum(
+            float(e["position"].get("unrealizedPnl", 0.0)) for e in perp.get("assetPositions", [])
+        )
+        return usdc + upnl
 
     def get_positions(self) -> list[Position]:
         state = self._info_client().user_state(self._account_address)
