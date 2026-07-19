@@ -46,6 +46,7 @@ from hlcli.executor.protect import (
 )
 from hlcli.executor.regime import DECISION_INTERVAL, classify, summarize
 from hlcli.executor.resolve import resolve_open_trades
+from hlcli.executor.rmath import taker_fee
 from hlcli.journal.lessons import recent_lessons
 from hlcli.safety.alerts import Alerter
 from hlcli.safety.breaker import Breaker
@@ -110,7 +111,7 @@ def run_once(
     if not dry_run and trail_active(tunable.trail):
         m = manage_open_trades(exchange, state, tunable, now, marks=marks,
                                native_protected=protected, shadow_only=not fire_enabled,
-                               alerter=alerter)
+                               alerter=alerter, taker_fee_pct=caps.taker_fee_pct)
         managed = m.stops_moved + m.scaled_out
 
     # Monitor step: close any open trade whose SL/TP/expiry has triggered, recording
@@ -387,8 +388,9 @@ def _fire_and_reconcile(exchange, state, candidate, decision, outcome, regime, c
             if secured.close_confirmed:  # flattened cleanly — book the ~spread cost as an abort
                 close = secured.close
                 exit_price = close.avg_price if close.avg_price is not None else entry_price
-                realized, r_multiple = _abort_pnl(candidate.side, entry_price, candidate.sl, exit_price, filled)
-                state.resolve_trade(trade_id, "aborted", exit_price, realized, r_multiple, common.now)
+                realized, r_multiple, fee = _abort_pnl(
+                    candidate.side, entry_price, candidate.sl, exit_price, filled, common.caps.taker_fee_pct)
+                state.resolve_trade(trade_id, "aborted", exit_price, realized, r_multiple, common.now, fee)
                 return "aborted", fill
             # Flatten unconfirmed: the position may still be live and unprotected. Record it
             # honestly (no fabricated P&L) under a distinct terminal status; the critical
@@ -422,11 +424,16 @@ def _open_shadow_trade(state: StateStore, candidate: Candidate, decision, outcom
     common.trades_today += 1                    # …and the daily new-entry budget
 
 
-def _abort_pnl(side: Side, entry: float, sl: float, exit_price: float, size: float) -> tuple[float, float]:
-    """Realized P&L / R-multiple of an emergency-closed entry (usually ≈ the spread)."""
+def _abort_pnl(side: Side, entry: float, sl: float, exit_price: float, size: float,
+               fee_rate: float = 0.0) -> tuple[float, float, float]:
+    """Realized P&L / R-multiple of an emergency-closed entry (usually ≈ the spread), **net
+    of the round-trip taker fee** (wave-2 K), plus the fee. Aborts are excluded from
+    graduation/calibration, but the ledger stays cost-honest and consistent with the resolver."""
     per_unit = (exit_price - entry) if side is Side.LONG else (entry - exit_price)
-    risk = abs(entry - sl)
-    return round(per_unit * size, 6), round(per_unit / risk, 4) if risk > 0 else 0.0
+    dollar_risk = abs(entry - sl) * size
+    fee = taker_fee(fee_rate, size, entry, exit_price)
+    net = per_unit * size - fee
+    return round(net, 6), round(net / dollar_risk, 4) if dollar_risk > 0 else 0.0, fee
 
 
 def _wait(state: StateStore, candidate: Candidate, decision, regime, common: _PassContext, attempts_left: int) -> _Step:

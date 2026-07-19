@@ -208,6 +208,29 @@ def test_split_trade_books_child_and_shrinks_parent(tmp_path):
     assert row["initial_sl"] == 90.0
 
 
+def test_partial_pnl_nets_the_taker_fee():
+    # Wave-2 K follow-on: sentry scale-out/close book realized + R net of the taker fee,
+    # exactly like the resolver, so cohorts stay consistent when sentry is enabled.
+    import pytest
+
+    from hlcli.sentry.apply import _partial_pnl
+
+    trade = {"side": "long", "entry": 100.0, "initial_sl": 90.0, "sl": 90.0}
+    assert _partial_pnl(trade, 1.0, 120.0, 0.0) == (20.0, 2.0, 0.0)  # fee off ⇒ gross
+    net, r, fee = _partial_pnl(trade, 1.0, 120.0, 0.045)  # close 1.0 @ 120, dollar-risk 10
+    expect_fee = 0.045 / 100 * 1.0 * (100 + 120)
+    assert fee == pytest.approx(expect_fee)
+    assert net == round(20 - expect_fee, 6) and r == round((20 - expect_fee) / 10, 4)
+
+
+def test_split_trade_records_fee_paid_on_the_child(tmp_path):
+    state = StateStore(tmp_path / "s.db")
+    tid = state.open_trade("c1", "BTC", Side.LONG, 100.0, 90.0, 130.0, 2.0, 0.8, None, NOW)
+    child = state.split_trade(tid, 1.0, 110.0, 9.9, 0.99, NOW + 60, 0.1)  # net realized + fee
+    row = [t for t in state.resolved_trades() if t["id"] == child][0]
+    assert row["realized"] == 9.9 and row["fee_paid"] == 0.1
+
+
 def test_sentry_log_roundtrip(tmp_path):
     state = StateStore(tmp_path / "s.db")
     state.log_sentry(NOW, 1, "BTC", "move_stop", {"from": 90.0, "to": 100.5})

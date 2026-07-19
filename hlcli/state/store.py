@@ -289,19 +289,21 @@ class StateStore:
 
     def split_trade(
         self, trade_id: int, close_size: float, exit_price: float, realized: float,
-        r_multiple: float, closed_at: float,
+        r_multiple: float, closed_at: float, fee_paid: float = 0.0,
     ) -> int:
         """Book a partial close: the closed fraction becomes a resolved `scaled` child row
         (so its banked profit is a real outcome the tuner sees), the parent keeps the
-        remainder and is flagged so the one-shot scale-out can't repeat."""
+        remainder and is flagged so the one-shot scale-out can't repeat. `realized`/`r_multiple`
+        are net of `fee_paid` (the caller subtracts it), which is recorded on the child."""
         row = self._conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
         cur = self._conn.execute(
             "INSERT INTO trades(candidate_id, coin, side, entry, sl, tp, size, conviction,"
             " regime, opened_at, shadow, initial_sl, scaled_out, status, exit_price, realized,"
-            " r_multiple, closed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'scaled', ?, ?, ?, ?)",
+            " r_multiple, closed_at, fee_paid) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,"
+            " 'scaled', ?, ?, ?, ?, ?)",
             (row["candidate_id"], row["coin"], row["side"], row["entry"], row["sl"], row["tp"],
              close_size, row["conviction"], row["regime"], row["opened_at"], row["shadow"],
-             row["initial_sl"], exit_price, realized, r_multiple, closed_at),
+             row["initial_sl"], exit_price, realized, r_multiple, closed_at, fee_paid),
         )
         self._conn.execute(
             "UPDATE trades SET size = size - ?, scaled_out = 1 WHERE id = ?", (close_size, trade_id)
