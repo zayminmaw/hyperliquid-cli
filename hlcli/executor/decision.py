@@ -181,7 +181,7 @@ def decide(
     return DecisionResult(decision, payload, "ok", stop_reason=stop_reason)
 
 
-def decide_rule(ctx: EnrichedContext, caps: Caps, tunable: TunableConfig, *, client=None) -> DecisionResult:
+def decide_rule(ctx: EnrichedContext, _caps: Caps, _tunable: TunableConfig, *, client=None) -> DecisionResult:
     """The rule-based baseline arbiter (`HL_DECISION_SOURCE=rule`): act, now, on every
     candidate — the deterministic gate is the filter (freshness, regime, levels, R:R at
     the mark, caps). No LLM call, no key, fully reproducible.

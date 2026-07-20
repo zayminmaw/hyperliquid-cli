@@ -36,8 +36,8 @@ from hlcli.exchange.base import Exchange
 from hlcli.executor.decision import DecisionResult, decider_for
 from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
-from hlcli.executor.intake import injection_flags
 from hlcli.executor.gate import GateContext, book_gross_notional, evaluate
+from hlcli.executor.intake import injection_flags
 from hlcli.executor.protect import (
     cancel_placed,
     emergency_close,

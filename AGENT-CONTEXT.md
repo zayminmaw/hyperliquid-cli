@@ -1,21 +1,25 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-19 | Session: full feature test (paper + FIRST real testnet drill) → found+fixed F2 unified-account equity bug; 514 pass
+> Last updated: 2026-07-20 | Session: fresh-eyes review of 074e58b..HEAD (2 phases) → fixed all 6 findings; 553 pass
 
 ---
 
 ## 🎯 CURRENT TASK
 
-- Task: Vibe-Trading executor-feature shortlist (`hl-cli-feature-audit.md` §4) + J follow-on + fresh-eyes review fixes — branch `feat/executor-audit-shortlist`
-- Goal: A→B→C(+D)→F→J + sentry config proposer + all 7 review findings — **ALL DONE**; 512 tests pass; docs synced
-- Status: complete, committed per-item (branch, NOT pushed). Review found no regressions; 7 findings fixed (Mode A gross wiring, abort-count consistency, liveness DRY, sortino dbl-call, perf-scope doc, DAY_SECONDS, .env placement)
-- Next action: push / open PR when the user asks; then OPERATIONAL (testnet drill — see below)
+- Task: Fresh-eyes review of wave-2 (074e58b..HEAD) — phase 1 static + phase 2 flow — then fix all findings
+- Goal: 6 findings fixed + tests + docs — **ALL DONE**; 553 pass (+2); working tree UNCOMMITTED
+- Status: complete. #1 resolve `_real_exit_price` caught only httpx but live fills ride the SDK's `requests` session → broadened to degrade on any error (+regression test); #2 `manage_open_trades` taker_fee_pct now REQUIRED (silent-gross footgun, +sig guard); #3 shared retry knobs → `core/backoff` (RETRY_ATTEMPTS/RETRY_BASE_DELAY); #4 runner import order; #5 `reconcile_cmd` caps-from-open_env + emit-in-try; #6 `decide_rule` unused params → `_caps/_tunable`
+- Next action: commit when the user asks; push / open PR on request
 - Blocked by: none
 
 ---
 
 ## 📍 LAST ACTION
 
+- Did: **Fresh-eyes review of 074e58b..HEAD (static + flow) → fixed all 6 findings.** Files: executor/{resolve,runner,protect,decision}.py, sentry/apply.py, cli/commands/{exec_,sentry}.py, exchange/marks.py, core/backoff.py, tests/{test_resolve,test_sentry}.py. Only #1 was a live-path correctness bug (wrong exception library defeated a degrade path); the rest hardening/cleanup. Behavior preserved.
+- Result: **553 pass** (+2: resolve degrades-on-fills-error, manage requires-fee sig guard). `exec reconcile` paper-smoked green. Working tree UNCOMMITTED.
+
+### (prior) full feature test + wave-2
 - Did: **Full feature test across all hl command groups (paper + first real TESTNET drill).** Every group driven live: markets/asset/account reads, config, Mode A (leverage, market open/close, native SL/TP, limit, cancel, cancel-all, per-trade cap reject), Mode B (paper LLM skip + rule fire; **testnet live fire + native protection + oid-tracked ledger + vanished-position resolve**), sentry (paper shadow LLM + testnet adopt on a real book), tuner (sample-gate no-op + full seeded propose→diff→promote→history), agent (status/watchdog never+stale/run loop+daily), journal (digest/show/ls; reflection defers on open day by design), repl. **Found + fixed F2 (HIGH):** live `equity()` read only perp `accountValue`, ~0 under HL **unified accounts** (now testnet default) → testnet equity 0 → Mode B sizing/gate broken. Fix: detect `userAbstraction=="unifiedAccount"` → read spot USDC + Σ uPnL. Verified live (0→997.98). **Also fixed F1 (low):** implemented real `config set`/`config edit` (were stale "Phase 4" stubs) — set refuses hard caps + coerces + clamps on write, edit re-clamps on save; removed now-dead `stubs.py`. Synced docs (cli/modules/decisions.md) + ran round-2 regression. **523 pass** (+11). Working tree NOT committed.
 - Result: Both fixes drive-verified + regression-smoked. Testnet `tn` (0x8D67…) FLAT + clean, ~998 unified USDC. Findings: scratchpad/test-findings.md.
 
@@ -121,7 +125,8 @@
 
 - §13 open questions have default choices — confirm with user before a task relies on one.
 - Keep no top-level imports of anthropic / hyperliquid / eth_account in hot paths. Verified 2026-07-02 in a fresh core-only venv (scratchpad `hlcore`; old `/tmp/hlcore` is PEP-668-locked, rebuild if needed).
-- Marks/book/candles/meta go through **httpx** `/info`, NOT SDK `Info` — don't "simplify" onto the SDK or paper stops being keyless.
+- Marks/book/candles/meta go through **httpx** `/info`, NOT SDK `Info` — don't "simplify" onto the SDK or paper stops being keyless. **Corollary (bit finding #1):** the SDK `Info` reads (`equity`/`get_positions`/`recent_fills`/`order_status_by_cloid`/...) ride the SDK's **`requests`** session, so their transient errors are `requests.exceptions.*`, NOT `httpx.*`. Only catch `httpx.HTTPError` around a *marks-feed* call (`get_candles` etc.); around an SDK-backed call (`recent_fills`) catch broad `Exception` or the `requests` types — an httpx-only except there is dead and lets a live error crash the pass.
+- `sentry/apply.manage_open_trades` takes `taker_fee_pct` **required** (no default): thread `caps.taker_fee_pct`. The leaf `_partial_pnl`/`apply_scale_out`/`apply_close`/`_pnl` keep `=0.0` as the test-caps gross-parity switch — don't add a default back to the top entry (it would silently book gross P&L).
 - PassSummary counters are disjoint: `rejected` = gate said no; `failed` = gate-approved but died at the exchange (reject/unfilled/aborted). Don't fold them back together.
 - Executor entry is a MARKET order; ledger + protection size from `OrderResult.filled_size`/`avg_price`. Don't revert to GTC limit entry (review finding H1).
 - test helpers' `caps()` pins `config_path=/nonexistent/...` so prompt/config reads never touch a dev's real `~/.hyperliquid-cli`; tuner tests still pass their own tmp `config_path`.

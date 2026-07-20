@@ -19,7 +19,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from hlcli.core.backoff import backoff_delay
+from hlcli.core.backoff import RETRY_ATTEMPTS, RETRY_BASE_DELAY, backoff_delay
 from hlcli.core.types import Candidate, Network, Order, OrderResult, OrderType, Side
 from hlcli.exchange.base import Exchange
 
@@ -27,9 +27,9 @@ from hlcli.exchange.base import Exchange
 # a live position is unprotected while we retry, so a couple of quick attempts covers a
 # transient blip / rate-limit without stalling the flatten. `_sleep` is a module attribute
 # so tests can neutralize the backoff wait.
-_RETRY_ATTEMPTS = 3
-_RETRY_BASE = 0.5
-_RETRY_MAX = 3.0
+_RETRY_ATTEMPTS = RETRY_ATTEMPTS
+_RETRY_BASE = RETRY_BASE_DELAY
+_RETRY_MAX = 3.0  # deliberately tighter than the read path's cap — see core/backoff
 _sleep = time.sleep
 
 

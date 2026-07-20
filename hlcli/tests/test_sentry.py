@@ -249,7 +249,17 @@ def _paper(tmp_path, marks):
 
 def _manage(ex, state, trail: TrailConfig, *, now=NOW, **kw):
     cfg = tunable().model_copy(update={"trail": trail})
+    kw.setdefault("taker_fee_pct", 0.0)  # gross-parity: these tests assert pre-fee numbers
     return manage_open_trades(ex, state, cfg, now, **kw)
+
+
+def test_manage_open_trades_requires_taker_fee_pct():
+    # Wave-2 K cost-honesty: the top-level entry has NO default fee — a caller that forgets
+    # to thread caps.taker_fee_pct fails loudly instead of silently booking gross P&L.
+    import inspect
+
+    default = inspect.signature(manage_open_trades).parameters["taker_fee_pct"].default
+    assert default is inspect.Parameter.empty
 
 
 def test_paper_breakeven_updates_ledger(tmp_path):

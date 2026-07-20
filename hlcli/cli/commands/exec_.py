@@ -146,8 +146,7 @@ def reconcile_cmd(
     book — run it after any crash, especially on mainnet. `--no-halt` reports only.
     """
     g = state_of(ctx)
-    caps = get_caps()
-    exchange, state, _caps, _tunable = open_env(g, for_write=False)
+    exchange, state, caps, _tunable = open_env(g, for_write=False)
     try:
         report = reconcile(exchange, state)
         tripped = False
@@ -157,18 +156,18 @@ def reconcile_cmd(
             network_alerter(caps, g.network).alert(
                 "reconcile_halt", level="critical",
                 divergences=[{"kind": d.kind, "coin": d.coin} for d in report.divergences])
+        emit(
+            {
+                "network": g.network.value,
+                "safe": report.is_safe,
+                "requires_halt": report.requires_halt,
+                "divergences": [{"kind": d.kind, "coin": d.coin, **d.detail} for d in report.divergences],
+                "breaker_tripped": tripped,
+            },
+            as_json=g.json_out, title="exec reconcile",
+        )
     finally:
         state.close()
-    emit(
-        {
-            "network": g.network.value,
-            "safe": report.is_safe,
-            "requires_halt": report.requires_halt,
-            "divergences": [{"kind": d.kind, "coin": d.coin, **d.detail} for d in report.divergences],
-            "breaker_tripped": tripped,
-        },
-        as_json=g.json_out, title="exec reconcile",
-    )
 
 
 @app.command("status")

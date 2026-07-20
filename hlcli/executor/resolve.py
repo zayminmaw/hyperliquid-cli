@@ -210,8 +210,8 @@ def _real_exit_price(exchange: Exchange, trade: dict) -> float | None:
     want = "Close Long" if Side(trade["side"]) is Side.LONG else "Close Short"
     try:
         fills = exchange.recent_fills(int(trade["opened_at"] * 1000))
-    except (httpx.HTTPError, KeyError, ValueError, TypeError):
-        return None
+    except Exception:  # noqa: BLE001 — best-effort refinement: the live fills feed rides the SDK's
+        return None    # `requests` session (not httpx), so degrade to the mark estimate on ANY error
     closing = [f for f in fills if f.coin == trade["coin"] and f.dir == want]
     total = sum(f.size for f in closing)
     if total <= 0:

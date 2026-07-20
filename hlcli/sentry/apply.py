@@ -49,12 +49,16 @@ def manage_open_trades(
     shadow_only: bool = False,
     dry_run: bool = False,
     alerter: Alerter | None = None,
-    taker_fee_pct: float = 0.0,
+    taker_fee_pct: float,
 ) -> ManageSummary:
     """Run the 6a rules over every open trade. A shadow pass (`shadow_only`) manages
     only hypothetical rows — it may hold a read-only exchange and must never place
-    an order. Dry-run previews the plan without touching anything. `taker_fee_pct` nets
-    the fee into a scale-out's realized/R (wave-2 K), matching the resolver."""
+    an order. Dry-run previews the plan without touching anything.
+
+    `taker_fee_pct` is **required** (no default): it nets the fee into a scale-out's
+    realized/R (wave-2 K), matching the resolver. Requiring it means a caller that forgets
+    to thread `caps.taker_fee_pct` fails loudly rather than silently booking gross P&L —
+    pass `0.0` explicitly only for the test-caps gross-parity switch."""
     summary = ManageSummary()
     cfg = tunable.trail
     if not active(cfg):

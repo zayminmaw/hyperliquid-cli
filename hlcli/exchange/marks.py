@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 import httpx
 
-from hlcli.core.backoff import backoff_delay
+from hlcli.core.backoff import RETRY_ATTEMPTS, RETRY_BASE_DELAY, backoff_delay
 from hlcli.core.types import Candle, Network
 
 # HL rate-limits the shared /info endpoint by IP (aggregate weight 1200/min; allMids
@@ -49,9 +49,9 @@ class MarksFeed:
         *,
         ttl_seconds: float = 2.0,
         timeout: float = 10.0,
-        max_retries: int = 3,
-        retry_base: float = 0.5,
-        retry_max_delay: float = 4.0,
+        max_retries: int = RETRY_ATTEMPTS,
+        retry_base: float = RETRY_BASE_DELAY,
+        retry_max_delay: float = 4.0,  # a touch wider than the reduce-only write cap — see core/backoff
         sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
         self._ttl = ttl_seconds
