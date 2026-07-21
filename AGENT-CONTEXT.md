@@ -8,9 +8,9 @@
 
 - Task: Decision-layer improvements (meta-labeling framing) — research-backed, measurement-first. Threads: enabler (carry ThirdEye direction+confidence through intake), #1 calibration verdict, #5 value A/B, #2 cost-aware R:R, #3 de-anchor, #4 consensus. Spec: scratchpad/improvement-spec.md
 - Goal: earn hl-cli's independence from ThirdEye's skepticism via shadow-proven calibration, not a looser prompt
-- Status: **#1 + enabler + #5 DONE** (all out-of-path, verified, 562 pass). #1 `stats.calibration_verdict`. Enabler `Candidate.source_direction/source_confidence` through intake→context→decision_log. #5 `decide_follow_source` + `HL_DECISION_SOURCE=follow_source` + `exec report --compare`. #2/#3(+#4) remain, all order-path
-- Next action: **#2** cost-aware R:R (fee-adjusted effective R:R at the gate + funding hold-cost in context) — needs evidence-gate + sign-off. Then **#3** de-anchor (present source verdict as labeled input; prompt forms its own read) — shadow-gated
-- Blocked by: none — but #2/#3 need per-item evidence-gate + user sign-off before live
+- Status: **ALL THREADS DONE + committed on `feat/decision-improvements`** (main..HEAD: 01202ad #1+enabler+#5, 9728714 #2a, 46ee157 #3). 566 pass. Round-2 operational test PASSED live on testnet: same BTC/ETH ThirdEye WAIT signals (re-stamped now, content faithful) → executor declined both via **independent** reasoning (de-anchored prompt: LLM interrogated whether the producer's WAIT was "well-supported… not just cautious defaulting"), producer verdict (WAIT 0.45) logged alongside, both cleared the fee-adjusted floor. Sentry re-drilled (adopt→shadow 6b→manage 6c, all hold) + ledger booked + testnet flat (~997.41)
+- Next action: open a PR for `feat/decision-improvements` when the user asks; #2b funding + #4 consensus still parked
+- Blocked by: none. NOTE: one transient Anthropic 400 "Grammar compilation timed out" on a strict-tool decision call (retry succeeded) — API-side, not hl-cli; watch if it recurs
 
 ---
 
