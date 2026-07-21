@@ -107,6 +107,12 @@ class Caps(BaseSettings):
     # the tuner cost-honest. Paper *models* this fee so paper→testnet→mainnet expectancy
     # stays comparable. 0 disables (the test caps pin it to keep gross assertions).
     taker_fee_pct: float = 0.045
+    # Net the round-trip taker fee into the R:R-at-mark the gate checks (#2a). A win nets
+    # reward − fees, a stop costs risk + fees, so the honest bar is
+    # (|tp−mark| − 2·fee·mark) / (|mark−sl| + 2·fee·mark) ≥ rr_floor. Only ever tightens
+    # (rejects setups that don't clear fees) and bites hardest on tight-stop scalps; the
+    # fee is an exact hard cap so over-rejection risk is near-zero. Set 0/false to disable.
+    fee_adjusted_rr: bool = True
     # How many times the executor re-checks a candidate the LLM said to WAIT on before
     # giving up. 0 disables follow-ups (a `wait` becomes a terminal reject, as before).
     followup_max_attempts: int = 3

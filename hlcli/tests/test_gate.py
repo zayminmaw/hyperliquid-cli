@@ -127,6 +127,28 @@ def test_mark_retraced_toward_stop_still_approves():
     assert out.approved
 
 
+# --- #2a: fee-adjusted R:R at the mark ---
+
+def test_reward_risk_at_nets_the_round_trip_fee():
+    from hlcli.executor.gate import _reward_risk_at
+    c = _candidate(entry=100.0, tp=102.0, sl=99.0)  # at mark 100: reward 2, risk 1
+    assert _reward_risk_at(c, 100.0) == 2.0                     # gross (fee_frac 0)
+    assert _reward_risk_at(c, 100.0, fee_frac=0.005) == 0.5     # (2-1)/(1+1), fee=2*.005*100=1
+
+
+def test_fee_adjusted_rr_rejects_a_setup_that_only_clears_gross():
+    # gross R:R at mark is 2.0, but a fat round-trip fee nets it below the 1.5 floor.
+    cand = _candidate(entry=100.0, tp=102.0, sl=99.0)
+    out = evaluate(cand, _decision(), _ctx(caps=_caps(taker_fee_pct=0.5, fee_adjusted_rr=True), mark=100.0))
+    assert not out.approved and "net of fees" in out.reason
+
+
+def test_fee_adjusted_rr_flag_off_stays_gross():
+    cand = _candidate(entry=100.0, tp=102.0, sl=99.0)
+    out = evaluate(cand, _decision(), _ctx(caps=_caps(taker_fee_pct=0.5, fee_adjusted_rr=False), mark=100.0))
+    assert out.approved  # identical to pre-#2a behavior
+
+
 def test_sizing_prices_risk_at_the_mark():
     # mark 95: stop distance 5 (not 10) → 50 risk / 5 = 10 units, notional at 95
     out = evaluate(_candidate(entry=100, sl=90, tp=120), _decision(conviction=1.0), _ctx(mark=95.0))

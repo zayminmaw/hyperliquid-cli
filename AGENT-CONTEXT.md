@@ -16,6 +16,10 @@
 
 ## 📍 LAST ACTION
 
+- Did: **#2a cost-aware R:R (ORDER-PATH; user-approved default-on).** The gate's R:R-at-mark check now nets the round-trip taker fee: `(|tp−mark| − 2·fee·mark)/(|mark−sl| + 2·fee·mark) ≥ rr_floor` via `gate._reward_risk_at(c, mark, fee_frac)`. Caps `fee_adjusted_rr` (HL_FEE_ADJUSTED_RR=1, default true); `fee_frac=0` ⇒ exact gross (safe identity). Only ever tightens, hardest on tight-stop scalps; reject reason says "net of fees". Files: core/config.py, executor/gate.py, .env.example, tests/test_gate.py. **565 pass** (+3). Evidence-gate: exact-fee evidence, boxed, reason logged, paper-smoked (flag on→"R:R 0.80 net of fees" reject; off→fires). Committed on `feat/decision-improvements`. **2b (funding) DEFERRED** — needs the funding SIGN verified via a testnet position held across a funding hour (do not guess).
+- Result: #1+enabler+#5 (01202ad) + #2a done. Only **#3** (de-anchor — prompt/intake, shadow-gated) remains. Working tree: #2a to commit.
+
+### (prior) #5 value A/B
 - Did: **#5 value A/B (out-of-path).** `decide_follow_source` arbiter (obey the producer: act when `source_direction` matches the geometry side, skip on WAIT/mismatch/missing; conviction carries `source_confidence`); `HL_DECISION_SOURCE` gains `follow_source` (Literal + `decider_for` + .env.example); `exec report --compare <data_dir>` diffs two decision-source books (graded like graduation) → a/b/`delta_b_minus_a` on n/win_rate/avg_r/PF/total_realized + calibration_ready. Files: core/config.py, executor/decision.py, cli/commands/exec_.py, .env.example, tests/test_executor.py. **562 pass** (+2). Live-smoked on paper: follow_source obeyed producer WAIT (skip) while rule fired the same ETH — the A/B distinction visible; --compare renders (n=0 until shadow books accrue resolved trades).
 - Result: #1 + enabler + #5 DONE, all out-of-path + verified. Working tree UNCOMMITTED (all three threads). Next: **#2** (cost-aware R:R — gate) and **#3** (de-anchor — prompt/intake) need per-item evidence-gate + user sign-off before live.
 
