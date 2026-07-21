@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from hlcli.core.config import Caps
 from hlcli.core.config_schema import TunableConfig
 from hlcli.core.llm import make_client, supports_temperature
-from hlcli.core.types import Action, Decision, Timing
+from hlcli.core.types import Action, Decision, Side, Timing
 from hlcli.executor.enrich import EnrichedContext
 
 # Field order is deliberate: `rationale` first so the model states its read of the
@@ -200,9 +200,33 @@ def decide_rule(ctx: EnrichedContext, _caps: Caps, _tunable: TunableConfig, *, c
     )
 
 
+def decide_follow_source(ctx: EnrichedContext, _caps: Caps, _tunable: TunableConfig, *, client=None) -> DecisionResult:
+    """The follow-the-producer baseline arbiter (`HL_DECISION_SOURCE=follow_source`): obey
+    the producer's own verdict — act now when `source_direction` matches the setup's
+    geometry side, skip on WAIT, a mismatch, or a missing verdict. No LLM call, no key.
+
+    This is the "just do what the signal service says" control arm of the value A/B (#5):
+    the LLM arbiter earns the order path only by beating BOTH this and `rule` on shadow
+    expectancy. Conviction carries the producer's own confidence when supplied (so its
+    calibration is on record too), else 1.0 on an act / 0.0 on a skip.
+    """
+    wants = {"LONG": Side.LONG, "SHORT": Side.SHORT}.get((ctx.candidate.source_direction or "").upper())
+    act = wants is not None and wants is ctx.candidate.side
+    supplied = ctx.candidate.source_confidence
+    conviction = supplied if supplied is not None else (1.0 if act else 0.0)
+    return DecisionResult(
+        Decision(candidate_id=ctx.candidate.id, action=Action.ACT if act else Action.SKIP,
+                 timing=Timing.NOW, conviction=max(0.0, min(1.0, conviction)),
+                 rationale=f"follow_source: producer said {ctx.candidate.source_direction or 'nothing'} "
+                           f"→ {'act' if act else 'skip'}"),
+        raw={"source": "follow_source", "producer_direction": ctx.candidate.source_direction},
+        note="ok",
+    )
+
+
 def decider_for(caps: Caps):
-    """The arbiter the hard caps select — `decide` (LLM) unless HL_DECISION_SOURCE=rule."""
-    return decide_rule if caps.decision_source == "rule" else decide
+    """The arbiter the hard caps select — `decide` (LLM) unless HL_DECISION_SOURCE names a baseline."""
+    return {"rule": decide_rule, "follow_source": decide_follow_source}.get(caps.decision_source, decide)
 
 
 def _user_message(ctx: EnrichedContext) -> str:

@@ -131,6 +131,13 @@ class Caps(BaseSettings):
     graduation_min_days: int = 7
     graduation_min_expectancy: float = 0.0  # mean R-multiple must clear this
 
+    # --- conviction-calibration acceptance (precondition to re-enable sizing.enabled; risk policy) ---
+    # Before conviction is allowed to scale position size, higher-conviction buckets must
+    # actually realize higher avg_R across the conviction range, on an adequate sample
+    # (2026-07 audit, L-1). Read by `stats.calibration_verdict`, surfaced in `exec report`.
+    calibration_min_bucket_n: int = 10     # min resolved trades in each populated conviction bucket
+    calibration_min_spread_r: float = 0.2  # required avg_R gap between the high and low buckets
+
     # --- reconciliation response (2026-07 audit, O-2) ---
     # What an executor pass does about an exchange position the ledger doesn't know:
     # "alert" (default) pages a human; "adopt" additionally books stop-protected
@@ -140,12 +147,14 @@ class Caps(BaseSettings):
     reconcile_action: Literal["alert", "adopt"] = "alert"
 
     # --- decision source (2026-07 audit, L-2) ---
-    # Which arbiter judges candidates: "llm" (the decision model) or "rule" (the
-    # deterministic act-on-every-gate-valid-setup baseline — no LLM call, no key).
-    # A hard cap, not a tunable: the A/B control must be off-limits to the tuner.
-    # A/B procedure: run each source in shadow against the same intake under separate
-    # HL_DATA_DIRs, then compare `exec report` expectancy at the graduation sample.
-    decision_source: Literal["llm", "rule"] = "llm"
+    # Which arbiter judges candidates: "llm" (the decision model), "rule" (the
+    # deterministic act-on-every-gate-valid-setup baseline), or "follow_source" (obey the
+    # producer's own verdict — act when source_direction matches the setup's side, else
+    # skip). The two baselines take no LLM call and no key. A hard cap, not a tunable:
+    # the A/B control must be off-limits to the tuner. A/B procedure: run each source in
+    # shadow against the same intake under separate HL_DATA_DIRs, then diff expectancy
+    # with `exec report --compare <other_data_dir>` at the graduation sample.
+    decision_source: Literal["llm", "rule", "follow_source"] = "llm"
 
     # --- models + token budgets (configurable, but a hard cap on spend/choice) ---
     decision_model: str = "claude-sonnet-5"

@@ -38,4 +38,5 @@ def test_decision_log_context_stays_within_a_keyless_allowlist(tmp_path):
     for row in rows:
         context = json.loads(row["context"])
         assert set(context) <= {"coin", "outcome", "equity", "open_coins", "regime", "lessons",
-                                "thesis_flags"}  # L-5's injection-screen record — keyless
+                                "thesis_flags",  # L-5's injection-screen record — keyless
+                                "source_direction", "source_confidence"}  # producer's verdict — keyless

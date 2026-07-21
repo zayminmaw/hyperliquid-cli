@@ -22,8 +22,14 @@ from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
 from hlcli.safety.graduation import assess
-from hlcli.state.store import open_state
-from hlcli.tuner.stats import conviction_calibration, management_cohorts, performance
+from hlcli.state.store import StateStore, open_state
+from hlcli.tuner.stats import (
+    calibration_verdict,
+    conviction_calibration,
+    management_cohorts,
+    performance,
+    summary,
+)
 
 app = typer.Typer(no_args_is_help=True, help="LLM executor (Mode B).")
 
@@ -37,6 +43,10 @@ def propose(
     sl: Optional[float] = typer.Option(None, "--sl"),
     reason: str = typer.Option("", "--reason"),
     news: str = typer.Option("", "--news"),
+    direction: Optional[str] = typer.Option(
+        None, "--direction", help="producer's own verdict, e.g. LONG|SHORT|WAIT (advisory)"),
+    confidence: Optional[float] = typer.Option(
+        None, "--confidence", help="producer's own confidence 0..1 (advisory)"),
     file: Optional[Path] = typer.Option(None, "--file", help="JSON list/object batch"),
 ) -> None:
     """Queue candidate setup(s) into the intake stream for the current network."""
@@ -50,7 +60,8 @@ def propose(
         elif None in (coin, entry, tp, sl):
             raise typer.BadParameter("provide --coin --entry --tp --sl, or --file <batch.json>")
         else:
-            candidates = [make_candidate(coin, entry, tp, sl, reasoning=reason, news=news)]
+            candidates = [make_candidate(coin, entry, tp, sl, reasoning=reason, news=news,
+                                         source_direction=direction, source_confidence=confidence)]
     except ValueError as exc:  # incoherent levels
         raise typer.BadParameter(str(exc))
 
@@ -187,13 +198,65 @@ def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch"
         note(f"deferred (awaiting re-check): {state.deferred_count()}")
 
 
+def _arm_stats(trades: list[dict], caps) -> dict:
+    """One decision-source book's headline expectancy — the A/B row for `--compare`.
+    Graded like graduation (partials + mechanical aborts + adopted rows excluded) so a
+    scale-out ladder or a run of protection failures can't flatter one arm over another."""
+    graded = [t for t in trades
+              if t.get("status") not in ("scaled", "aborted", "abort_failed") and not t.get("adopted")]
+    s = summary(graded)
+    perf = performance(graded, starting_equity=caps.starting_equity)
+    cal = calibration_verdict(trades, min_bucket_n=caps.calibration_min_bucket_n,
+                              min_spread_r=caps.calibration_min_spread_r)
+    return {"n": s["n"], "win_rate": s["win_rate"], "avg_r": s["avg_r"],
+            "total_realized": s["total_realized"], "profit_factor": perf["profit_factor"],
+            "calibration_ready": cal["ready"]}
+
+
+def _delta(b: dict, a: dict) -> dict:
+    """b − a on the comparable scalars; a None on either side leaves that metric None."""
+    out = {}
+    for k in ("n", "win_rate", "avg_r", "total_realized", "profit_factor"):
+        x, y = b.get(k), a.get(k)
+        out[k] = round(x - y, 4) if isinstance(x, (int, float)) and isinstance(y, (int, float)) else None
+    return out
+
+
 @app.command("report")
-def report(ctx: typer.Context) -> None:
-    """Account summary: equity, open positions, unrealized P&L, breaker + graduation readiness."""
+def report(
+    ctx: typer.Context,
+    compare: Optional[Path] = typer.Option(
+        None, "--compare",
+        help="another HL_DATA_DIR; diff its book vs this one (the decision-source A/B, #5)"),
+) -> None:
+    """Account summary: equity, open positions, unrealized P&L, breaker + graduation readiness.
+
+    `--compare <data_dir>` instead diffs two decision-source books head-to-head (expectancy,
+    profit factor, calibration) — the readout for the llm-vs-rule-vs-follow_source A/B."""
     g = state_of(ctx)
     exchange, state, caps, _tunable = open_env(g, for_write=False)
-    positions = exchange.get_positions()
     resolved = state.resolved_trades()
+
+    if compare is not None:
+        other_db = compare / f"state-{g.network.value}.db"
+        if not other_db.exists():
+            raise typer.BadParameter(f"no {g.network.value} book under {compare} (expected {other_db.name})")
+        other = StateStore(other_db)
+        try:
+            b_trades = other.resolved_trades()
+        finally:
+            other.close()
+        a, b = _arm_stats(resolved, caps), _arm_stats(b_trades, caps)
+        emit(
+            {"network": g.network.value,
+             "a": {"data_dir": str(caps.data_dir), **a},
+             "b": {"data_dir": str(compare), **b},
+             "delta_b_minus_a": _delta(b, a)},
+            as_json=g.json_out, title="exec report --compare",
+        )
+        return
+
+    positions = exchange.get_positions()
     emit(
         {
             "network": g.network.value,
@@ -209,6 +272,13 @@ def report(ctx: typer.Context) -> None:
             # The evidence gate for re-enabling conviction→size scaling (audit L-1/L-4):
             # scaling stays off until higher buckets show higher avg_r on real sample.
             "conviction_calibration": conviction_calibration(resolved),
+            # Formal pass/fail on that gate: monotonic bucket avg_R + spread + sample floor.
+            # `ready: false` is the precondition guarding any flip of `sizing.enabled`.
+            "calibration_verdict": calibration_verdict(
+                resolved,
+                min_bucket_n=caps.calibration_min_bucket_n,
+                min_spread_r=caps.calibration_min_spread_r,
+            ),
             # Realized R by which management events fired (audit J) — the evidence a sentry
             # tuner would act on: do trailed/scaled trades out-perform ones left on the initial stop?
             "management_cohorts": management_cohorts(resolved),

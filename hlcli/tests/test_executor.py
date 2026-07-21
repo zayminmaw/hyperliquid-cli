@@ -90,9 +90,39 @@ def test_rule_source_fires_without_an_llm(tmp_path):
 
 
 def test_decider_selection_follows_the_hard_cap():
-    from hlcli.executor.decision import decide, decide_rule, decider_for
+    from hlcli.executor.decision import decide, decide_follow_source, decide_rule, decider_for
     assert decider_for(caps()) is decide  # default: the LLM arbiter
     assert decider_for(caps(decision_source="rule")) is decide_rule
+    assert decider_for(caps(decision_source="follow_source")) is decide_follow_source
+
+
+def test_follow_source_decider_maps_verdict_to_action():
+    from hlcli.core.types import Action
+    from hlcli.executor.decision import decide_follow_source
+    from hlcli.executor.enrich import enrich
+
+    def _ctx(direction, conf=None, side=Side.LONG):
+        c = Candidate(id="x", coin="BTC", side=side, entry=100, tp=120, sl=90,
+                      source_direction=direction, source_confidence=conf, created_at=NOW)
+        return enrich(c, marks={"BTC": 100.0}, equity=10_000.0, positions=[],
+                      realized=0.0, recent=[], tunable=tunable())
+
+    act = decide_follow_source(_ctx("long", 0.6), caps(), tunable()).decision
+    assert act.action is Action.ACT and act.conviction == 0.6  # match; producer confidence carried
+    assert decide_follow_source(_ctx("WAIT"), caps(), tunable()).decision.action is Action.SKIP
+    assert decide_follow_source(_ctx("SHORT"), caps(), tunable()).decision.action is Action.SKIP  # mismatch
+    assert decide_follow_source(_ctx(None), caps(), tunable()).decision.action is Action.SKIP    # no verdict
+
+
+def test_follow_source_end_to_end_obeys_producer(tmp_path):
+    ex, state = _setup(tmp_path, marks={"BTC": 100.0, "ETH": 100.0})
+    state.enqueue(Candidate(id="go", coin="BTC", side=Side.LONG, entry=100, tp=120, sl=90,
+                            source_direction="LONG", source_confidence=0.6, created_at=NOW))
+    state.enqueue(Candidate(id="hold", coin="ETH", side=Side.LONG, entry=100, tp=120, sl=90,
+                            source_direction="WAIT", created_at=NOW))
+    s = run_once(ex, state, caps(decision_source="follow_source"), tunable(), now=NOW)
+    assert (s.fired, s.rejected) == (1, 1)          # LONG acted, WAIT skipped
+    assert {p.coin for p in ex.get_positions()} == {"BTC"}
 
 
 # --- L-5: injection screen on the human-supplied thesis (advisory, never a reject) ---

@@ -6,16 +6,32 @@
 
 ## 🎯 CURRENT TASK
 
-- Task: Fresh-eyes review of wave-2 (074e58b..HEAD) — phase 1 static + phase 2 flow — then fix all findings
-- Goal: 6 findings fixed + tests + docs — **ALL DONE**; 553 pass (+2); working tree UNCOMMITTED
-- Status: complete. #1 resolve `_real_exit_price` caught only httpx but live fills ride the SDK's `requests` session → broadened to degrade on any error (+regression test); #2 `manage_open_trades` taker_fee_pct now REQUIRED (silent-gross footgun, +sig guard); #3 shared retry knobs → `core/backoff` (RETRY_ATTEMPTS/RETRY_BASE_DELAY); #4 runner import order; #5 `reconcile_cmd` caps-from-open_env + emit-in-try; #6 `decide_rule` unused params → `_caps/_tunable`
-- Next action: commit when the user asks; push / open PR on request
-- Blocked by: none
+- Task: Decision-layer improvements (meta-labeling framing) — research-backed, measurement-first. Threads: enabler (carry ThirdEye direction+confidence through intake), #1 calibration verdict, #5 value A/B, #2 cost-aware R:R, #3 de-anchor, #4 consensus. Spec: scratchpad/improvement-spec.md
+- Goal: earn hl-cli's independence from ThirdEye's skepticism via shadow-proven calibration, not a looser prompt
+- Status: **#1 + enabler + #5 DONE** (all out-of-path, verified, 562 pass). #1 `stats.calibration_verdict`. Enabler `Candidate.source_direction/source_confidence` through intake→context→decision_log. #5 `decide_follow_source` + `HL_DECISION_SOURCE=follow_source` + `exec report --compare`. #2/#3(+#4) remain, all order-path
+- Next action: **#2** cost-aware R:R (fee-adjusted effective R:R at the gate + funding hold-cost in context) — needs evidence-gate + sign-off. Then **#3** de-anchor (present source verdict as labeled input; prompt forms its own read) — shadow-gated
+- Blocked by: none — but #2/#3 need per-item evidence-gate + user sign-off before live
 
 ---
 
 ## 📍 LAST ACTION
 
+- Did: **#5 value A/B (out-of-path).** `decide_follow_source` arbiter (obey the producer: act when `source_direction` matches the geometry side, skip on WAIT/mismatch/missing; conviction carries `source_confidence`); `HL_DECISION_SOURCE` gains `follow_source` (Literal + `decider_for` + .env.example); `exec report --compare <data_dir>` diffs two decision-source books (graded like graduation) → a/b/`delta_b_minus_a` on n/win_rate/avg_r/PF/total_realized + calibration_ready. Files: core/config.py, executor/decision.py, cli/commands/exec_.py, .env.example, tests/test_executor.py. **562 pass** (+2). Live-smoked on paper: follow_source obeyed producer WAIT (skip) while rule fired the same ETH — the A/B distinction visible; --compare renders (n=0 until shadow books accrue resolved trades).
+- Result: #1 + enabler + #5 DONE, all out-of-path + verified. Working tree UNCOMMITTED (all three threads). Next: **#2** (cost-aware R:R — gate) and **#3** (de-anchor — prompt/intake) need per-item evidence-gate + user sign-off before live.
+
+### (prior) enabler
+- Did: **Enabler — carry the producer's verdict through intake (out-of-path, producer-agnostic).** `Candidate.source_direction`/`source_confidence` (advisory; gate never reads them) flow batch/`exec propose --direction/--confidence` → intake table (+additive migration) → full EnrichedContext (so the LLM sees them) → decision-log context via `runner._verdict_fields` (skip/reject/shadow/fire AND `_wait` defer). Normalized: direction upper-cased, confidence clamped [0,1], malformed→None; `_content_id` includes them only when present (no dedupe regression). Files: core/types.py, executor/intake.py, state/store.py, executor/runner.py, cli/commands/exec_.py, tests/{test_intake,test_state,test_keys}.py. **560 pass** (+5). Live-smoked on paper: CLI verdict → intake row → decision_log context. This unblocks #5 (compare hl-cli vs producer) + #3 (de-anchor uses the labeled verdict).
+- Result: Enabler DONE + verified. Working tree UNCOMMITTED (this + #1). Next: **#5** — `decide_follow_source` arm + `exec report --compare` A/B (llm vs rule vs follow-producer shadow books).
+
+### (prior) #1 calibration verdict
+- Did: **#1 calibration acceptance verdict (out-of-path).** After online research (meta-labeling = the ThirdEye→hl-cli seam; miscalibration is the #1 LLM-trader failure; perps negative-sum after fees+funding ⇒ selectivity is the edge; LLMs anchor 22–61%), added `stats.calibration_verdict(trades, *, min_bucket_n, min_spread_r)` — the formal pass/fail (range_coverage + adequate_samples + monotonic avg_R + spread; Brier informational) that must go `ready:true` before `sizing.enabled` may flip. New Caps `calibration_min_bucket_n`/`calibration_min_spread_r` (+.env.example); wired into `exec report`. Files: tuner/stats.py, core/config.py, cli/commands/exec_.py, .env.example, tests/test_tuner.py.
+- Result: **555 pass** (+2). `exec report` live-smoked on testnet (ready:false, adopted trade correctly excluded). Working tree UNCOMMITTED (these changes only; wave-2 review already committed as 39d18e0).
+
+### (prior) live operational test
+- Did: **Live operational test — real ThirdEye signals → testnet exec + full sentry drill (no code change).** Pulled today's (2026-07-21) BTC+ETH `suggestion_runs`/`suggestions` from ThirdEye core PG (connect via `sslmode=require`; `sslrootcert=system` unsupported by Postgres.app libpq). All 6 suggestions were `direction=WAIT`. Faithful `exec once` on testnet (acct `tn`): both **correctly declined — `decision: skip`** (LLM Sonnet-5 independently reached WAIT, citing mark run past entry; conviction 0.1/0.2, full audit logged). Then manual sentry: opened ETH long 0.02@1934 + stop@1905, `sentry adopt` (trade_id 1, R-anchored), exercised status/`once`(6a)/`shadow`(6b LLM=hold)/`manage`(6c live gate=hold)/`log`; armed a `percent` trail (start_r 0) → **live 6a ratchet moved the stop 1905→1917.9** on the real book (place-new-then-cancel-old). Closed reduce-only @1938.4; `sentry once` resolved the ledger.
+- Result: Full pipeline verified working. Ledger row confirms wave-2 L (real exit fill 1938.4) + K (fee 0.0349, realized net 0.0531) + trail persistence (initial_sl 1905→sl 1917.927) + adopted=1. Testnet `tn` FLAT + clean, equity ~997.47 (+0.05). Trail config restored to off. No code touched; working tree still per prior entry.
+
+### (prior) fresh-eyes review of wave-2
 - Did: **Fresh-eyes review of 074e58b..HEAD (static + flow) → fixed all 6 findings.** Files: executor/{resolve,runner,protect,decision}.py, sentry/apply.py, cli/commands/{exec_,sentry}.py, exchange/marks.py, core/backoff.py, tests/{test_resolve,test_sentry}.py. Only #1 was a live-path correctness bug (wrong exception library defeated a degrade path); the rest hardening/cleanup. Behavior preserved.
 - Result: **553 pass** (+2: resolve degrades-on-fills-error, manage requires-fee sig guard). `exec reconcile` paper-smoked green. Working tree UNCOMMITTED.
 

@@ -54,6 +54,13 @@ class Candidate(BaseModel):
     sl: float
     reasoning: str = ""
     news: str = ""
+    # The producer's OWN directional verdict + confidence — advisory context the LLM
+    # weighs as one input, never a bypass of the gate (which never reads them). hl-cli
+    # stays producer-agnostic: these arrive through intake (batch / `exec propose`),
+    # never from a producer's DB. `side` above is code-inferred from geometry and is
+    # always a real side; `source_direction` is the producer's call and may be "WAIT".
+    source_direction: str | None = None     # e.g. "LONG" | "SHORT" | "WAIT"
+    source_confidence: float | None = None   # producer's own confidence, 0..1
     created_at: float  # unix seconds; used for freshness checks
 
 

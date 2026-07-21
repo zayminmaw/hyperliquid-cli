@@ -9,6 +9,7 @@ no LLM, no I/O.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from statistics import mean, stdev
@@ -93,6 +94,62 @@ def conviction_calibration(trades: list[dict]) -> list[dict]:
             "avg_r": round(mean(rs), 4) if rs else None,
         })
     return out
+
+
+def calibration_verdict(trades: list[dict], *, min_bucket_n: int, min_spread_r: float) -> dict:
+    """Is conviction calibrated enough to let it scale position size (`sizing.enabled`)?
+
+    The precondition the 2026-07 audit demands before re-enabling conviction→size
+    scaling: higher-conviction buckets must actually realize higher avg_R, proven on
+    an adequate sample *across* the conviction range. Pure arithmetic over the same
+    population as `conviction_calibration` — a readiness verdict (mirrors
+    `graduation.assess`), not a tuner input; thresholds are passed in, not read here.
+
+    Checks (all must hold for `ready`):
+      - range_coverage: both the low and high buckets are populated — an all-`mid`
+        record proves nothing about whether conviction discriminates;
+      - adequate_samples: every populated bucket has n ≥ `min_bucket_n`;
+      - monotonic: avg_R is non-decreasing across low→mid→high (≥2 buckets carry an R);
+      - spread: high.avg_R − low.avg_R ≥ `min_spread_r`.
+
+    `brier` is informational, never a gate: it scores conviction as a win-probability
+    forecast (mean((conviction − won?1:0)²), lower better). Conviction is defined as
+    'genuine edge', not strictly P(win), so it informs the picture but does not gate.
+    """
+    buckets = conviction_calibration(trades)
+    by = {b["bucket"]: b for b in buckets}
+    low, high = by.get("low"), by.get("high")
+    avg_rs = [b["avg_r"] for b in buckets if b["avg_r"] is not None]  # buckets are already low→mid→high
+    have_ends = low is not None and high is not None and low["avg_r"] is not None and high["avg_r"] is not None
+    spread_r = round(high["avg_r"] - low["avg_r"], 4) if have_ends else None
+
+    checks = {
+        "range_coverage": low is not None and high is not None,
+        "adequate_samples": bool(buckets) and all(b["n"] >= min_bucket_n for b in buckets),
+        "monotonic": len(avg_rs) >= 2 and all(a <= b for a, b in zip(avg_rs, avg_rs[1:])),
+        "spread": spread_r is not None and spread_r >= min_spread_r,
+    }
+    return {
+        "ready": all(checks.values()),
+        "buckets": buckets,
+        "spread_r": spread_r,
+        "brier": _brier(trades),
+        "checks": checks,
+        "thresholds": {"min_bucket_n": min_bucket_n, "min_spread_r": min_spread_r},
+    }
+
+
+def _brier(trades: list[dict]) -> float | None:
+    """Brier score of conviction-as-win-probability over the calibration population."""
+    scored = [
+        (t["conviction"], 1.0 if _is_win(t) else 0.0)
+        for t in trades
+        if t["status"] in _CALIBRATION_STATUSES and not t.get("adopted")
+        and isinstance(t.get("conviction"), (int, float)) and math.isfinite(t["conviction"])
+    ]
+    if not scored:
+        return None
+    return round(mean((c - o) ** 2 for c, o in scored), 4)
 
 
 def summary(trades: list[dict]) -> dict:

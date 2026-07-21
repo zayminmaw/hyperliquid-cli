@@ -313,6 +313,51 @@ def test_conviction_calibration_skips_adopted_and_missing_r():
     assert only_missing[0]["avg_r"] is None  # no R evidence reads as none, not as flat
 
 
+def test_calibration_verdict_ready_when_monotonic_with_spread():
+    from hlcli.tuner.stats import calibration_verdict
+
+    def t(conv, status, r):
+        return {"conviction": conv, "status": status, "r_multiple": r, "realized": r * 10}
+
+    rows = [
+        t(0.2, "closed", -0.1), t(0.2, "closed", 0.1),   # low  avg_r 0.0
+        t(0.5, "closed", 0.4),  t(0.5, "closed", 0.6),   # mid  avg_r 0.5
+        t(0.9, "won", 0.9),     t(0.9, "won", 1.1),      # high avg_r 1.0
+    ]
+    v = calibration_verdict(rows, min_bucket_n=2, min_spread_r=0.2)
+    assert v["ready"] is True
+    assert all(v["checks"].values())
+    assert v["spread_r"] == 1.0
+    assert v["brier"] is not None  # informational, computed but never a gate
+
+
+def test_calibration_verdict_not_ready_paths():
+    from hlcli.tuner.stats import calibration_verdict
+
+    def t(conv, status, r):
+        return {"conviction": conv, "status": status, "r_multiple": r, "realized": r * 10}
+
+    # only the mid bucket populated → conviction never spans its range
+    v = calibration_verdict([t(0.5, "closed", 0.5), t(0.5, "closed", 0.5)],
+                            min_bucket_n=2, min_spread_r=0.2)
+    assert v["ready"] is False and v["checks"]["range_coverage"] is False
+
+    # inverted: the high bucket underperforms the low one
+    inverted = [t(0.2, "won", 1.0), t(0.2, "won", 1.0),
+                t(0.9, "lost", -0.5), t(0.9, "lost", -0.5)]
+    v = calibration_verdict(inverted, min_bucket_n=2, min_spread_r=0.2)
+    assert v["ready"] is False
+    assert v["checks"]["monotonic"] is False and v["checks"]["spread"] is False
+
+    # a populated bucket below the sample floor
+    thin = [t(0.2, "closed", 0.0), t(0.2, "closed", 0.0), t(0.9, "won", 1.0)]
+    v = calibration_verdict(thin, min_bucket_n=2, min_spread_r=0.2)
+    assert v["ready"] is False and v["checks"]["adequate_samples"] is False
+
+    # empty book is never ready (and never raises)
+    assert calibration_verdict([], min_bucket_n=2, min_spread_r=0.2)["ready"] is False
+
+
 # --- execution-quality metrics (audit C/D) ---
 
 def test_performance_empty_book():
