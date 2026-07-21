@@ -16,6 +16,10 @@
 
 ## 📍 LAST ACTION
 
+- Did: **#3 de-anchor the decision prompt (ORDER-PATH; user-approved wording).** Inserted a paragraph into `SYSTEM_PROMPT` "## Your role": the producer's `source_direction`/`source_confidence` + its `reasoning` conclusion are a "second opinion to weigh, not a verdict to ratify"; form your own read first, then reconcile; names BOTH failure modes (defer-to-WAIT anchoring AND overtrading) so it doesn't push toward overconfidence. Test locks the guidance into the prompt (`test_prompt_deanchors_the_producer_verdict`). Files: executor/decision.py, tests/test_decision.py. **566 pass** (+1). Validation = shadow A/B via #5 (de-anchored active_prompt.md vs default) — earns independence, not a looser prompt. **ALL PLAN THREADS DONE** (#1, enabler, #5, #2a, #3); #2b funding + #4 consensus parked.
+- Result: Full improvement set complete + committed on `feat/decision-improvements`. Next per user: second-round operational test with the BTC/ETH ThirdEye signals (now carrying direction/confidence, through the de-anchored prompt + fee-adjusted gate) + sentry re-test.
+
+### (prior) #2a cost-aware R:R
 - Did: **#2a cost-aware R:R (ORDER-PATH; user-approved default-on).** The gate's R:R-at-mark check now nets the round-trip taker fee: `(|tp−mark| − 2·fee·mark)/(|mark−sl| + 2·fee·mark) ≥ rr_floor` via `gate._reward_risk_at(c, mark, fee_frac)`. Caps `fee_adjusted_rr` (HL_FEE_ADJUSTED_RR=1, default true); `fee_frac=0` ⇒ exact gross (safe identity). Only ever tightens, hardest on tight-stop scalps; reject reason says "net of fees". Files: core/config.py, executor/gate.py, .env.example, tests/test_gate.py. **565 pass** (+3). Evidence-gate: exact-fee evidence, boxed, reason logged, paper-smoked (flag on→"R:R 0.80 net of fees" reject; off→fires). Committed on `feat/decision-improvements`. **2b (funding) DEFERRED** — needs the funding SIGN verified via a testnet position held across a funding hour (do not guess).
 - Result: #1+enabler+#5 (01202ad) + #2a done. Only **#3** (de-anchor — prompt/intake, shadow-gated) remains. Working tree: #2a to commit.
 

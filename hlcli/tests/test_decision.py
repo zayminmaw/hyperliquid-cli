@@ -24,6 +24,14 @@ def _good(**over):
     return {"action": "act", "timing": "now", "conviction": 0.7, "rationale": "ok", **over}
 
 
+def test_prompt_deanchors_the_producer_verdict():
+    # #3: the decision prompt must frame the producer's call as a second opinion, not a
+    # verdict to ratify — the anchoring guard the value layer exists to enforce.
+    from hlcli.executor.decision import SYSTEM_PROMPT
+    assert "second opinion" in SYSTEM_PROMPT and "source_direction" in SYSTEM_PROMPT
+    assert "anchoring trap" in SYSTEM_PROMPT  # and it names the failure mode both ways
+
+
 def test_valid_payload_parses():
     d = validate_decision(_good(), "c1")
     assert (d.action, d.timing, d.conviction, d.candidate_id) == (Action.ACT, Timing.NOW, 0.7, "c1")
