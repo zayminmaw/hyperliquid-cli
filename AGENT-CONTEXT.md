@@ -1,6 +1,6 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-22 | Session: fresh-eyes review of ba623d0..HEAD (2 phases) → fixed all findings + synced docs; 572 pass
+> Last updated: 2026-07-22 | Session: live testnet operational drill — research-picked SOL long → Mode B fire + full sentry trail → closed net-GREEN (+$0.72)
 
 ---
 
@@ -16,6 +16,10 @@
 
 ## 📍 LAST ACTION
 
+- Did: **Live testnet operational drill (no code change) — "does it make money + does sentry adjust" test.** Web-researched BTC/ETH/SOL (only allowed coins); picked **SOL long** (bullish channel, above 20/50-EMA ~76.8, breakout 79→83.5; testnet SOL 77.6 closest to real). Mode B: `exec propose`(LONG/0.6)→`exec once`→ LLM **acted, de-anchored** to conviction 0.45 (below the 0.6 producer verdict); gate sized 3.24 SOL @ mark; market fill 77.638; native SL 76.10 + TP 80.30; full decision-log audit. Sentry: armed percent trail (2%, start_r 0, be 0.5R, scale 1.5R) → **two live ratchets on the real book** as SOL rose to 78.15 (SL 76.10→76.318→76.524, place-new-then-cancel-old, `move_stop reason=trail` logged); 6a + 6b LLM shadow agreed hold while at-entry. SOL then ranged ~77.4-78.1 (never hit +0.5R breakeven); after ~70min a bounce to 77.93 → closed reduce-only **net-GREEN**.
+- Result: **realized +$0.716 net of $0.227 round-trip fee, r=+0.14R; equity 997.407→998.151.** Ledger row 3: entry 77.638 / exit_price 77.929 / initial_sl 76.1→sl 76.524 (trail persisted) / status closed. Resolver booked the real exit fill + swept orphaned triggers (flat, no orders, breaker clear). Trail restored to off; risk_per_trade untouched (0.5%). KEY: a flat trade loses to fees (breakeven mark 77.71) — validates the fee-adjusted R:R gate; single-trade profit ≠ edge (graduation still n=0: 20 trades/7d/+expectancy). Minor: `trade order market` is positional `COIN long|short SIZE`, not --coin flags. Everything functioned as intended.
+
+### (prior) Fresh-eyes review of ba623d0..HEAD
 - Did: **Fresh-eyes review of `ba623d0..HEAD` (static + flow) → fixed all findings + synced docs.** (1) Centralized the graded-trades filter as `graduation.graded_trades` — `assess` + `exec report --compare`'s `_arm_stats` now share it (was a duplicated inline tuple that could drift). (2) `exec report --compare` now opens the other book `StateStore(path, read_only=True)` — no schema-create/migration/write on a book you only compare; also wrapped `report` in `try/finally: state.close()` (was leaking the primary store, matters in the REPL loop). (3) `_content_id` docstring clarifies it keys on RAW item values by design. Added 6 tests: read-only compare CLI (+ mtime-unchanged live smoke), `_arm_stats`/`_delta` units, read-only store refuses writes, `_user_message` carries the producer verdict (prompt-vs-payload contract). Docs: cli.md (`--compare` + read-only), modules.md (graded_trades + read-only ctor), decisions.md entry. Files: safety/graduation.py, cli/commands/exec_.py, state/store.py, executor/intake.py, tests/{test_cli,test_executor,test_state,test_decision}.py, docs/*.
 - Result: **572 pass** (+6). All findings were maintainability/drift-risk — no live-path correctness bug in the wave. Behavior preserved (read-only compare eliminated a write side-effect; grading output identical). Working tree UNCOMMITTED.
 
