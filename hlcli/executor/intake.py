@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 import uuid
@@ -65,6 +66,8 @@ def make_candidate(
     *,
     reasoning: str = "",
     news: str = "",
+    source_direction: object = None,
+    source_confidence: object = None,
     id: str | None = None,
     created_at: float | None = None,
 ) -> Candidate:
@@ -78,6 +81,8 @@ def make_candidate(
         sl=sl,
         reasoning=reasoning,
         news=news,
+        source_direction=_norm_direction(source_direction),
+        source_confidence=_norm_confidence(source_confidence),
         created_at=created_at if created_at is not None else time.time(),
     )
 
@@ -91,19 +96,47 @@ def candidate_from_dict(item: dict) -> Candidate:
         sl=float(normalized["sl"]),
         reasoning=normalized.get("reasoning", ""),
         news=normalized.get("news", ""),
+        source_direction=normalized.get("direction"),
+        source_confidence=normalized.get("confidence"),
         id=normalized.get("id") or _content_id(normalized),
         created_at=normalized.get("created_at"),
     )
 
 
+def _norm_direction(value: object) -> str | None:
+    """The producer's verdict, upper-cased; blank/absent → None. Free-form (not an
+    enum) so hl-cli stays producer-agnostic — it's advisory, not a control field."""
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    return text or None
+
+
+def _norm_confidence(value: object) -> float | None:
+    """The producer's confidence clamped to [0,1]; a malformed value nulls the field
+    rather than rejecting the setup — it's advisory context, not a level."""
+    if value is None:
+        return None
+    try:
+        c = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, c)) if math.isfinite(c) else None
+
+
 def _content_id(normalized: dict) -> str:
     """A stable id from the item's content (created_at excluded when auto-assigned),
-    so re-importing the same batch file dedupes instead of double-queueing."""
-    material = json.dumps(
-        {k: normalized.get(k) for k in ("coin", "entry", "tp", "sl", "reasoning", "news", "created_at")},
-        sort_keys=True, default=str,
-    )
-    return hashlib.sha256(material.encode()).hexdigest()[:32]
+    so re-importing the same batch file dedupes instead of double-queueing. The
+    producer's verdict fields join the hash only when present, so batches without
+    them keep their existing ids (no dedupe regression on upgrade). The id keys on the
+    *raw* item values (not the normalized candidate), so re-importing the identical file
+    is always stable; adding a verdict to a previously-bare item is treated as a new
+    thesis (new id), which is intended."""
+    material = {k: normalized.get(k) for k in ("coin", "entry", "tp", "sl", "reasoning", "news", "created_at")}
+    for k in ("direction", "confidence"):
+        if normalized.get(k) is not None:
+            material[k] = normalized[k]
+    return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
 def parse_batch(items: list[dict]) -> list[Candidate]:

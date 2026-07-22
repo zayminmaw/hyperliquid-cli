@@ -36,8 +36,8 @@ from hlcli.exchange.base import Exchange
 from hlcli.executor.decision import DecisionResult, decider_for
 from hlcli.executor.enrich import enrich
 from hlcli.executor.execute import fire
-from hlcli.executor.intake import injection_flags
 from hlcli.executor.gate import GateContext, book_gross_notional, evaluate
+from hlcli.executor.intake import injection_flags
 from hlcli.executor.protect import (
     cancel_placed,
     emergency_close,
@@ -351,6 +351,7 @@ def _evaluate(exchange: Exchange, state: StateStore, candidate: Candidate, commo
                "lessons": [le["date"] for le in common.lessons]}
     if flags:
         context["thesis_flags"] = flags  # the injection screen's audit-trail record
+    context.update(_verdict_fields(candidate))
     state.log_decision(candidate.id, common.now, decision=decision, gate=outcome, fill=fill,
                        context=context)
     return _Step(status)
@@ -439,6 +440,18 @@ def _abort_pnl(side: Side, entry: float, sl: float, exit_price: float, size: flo
     return round(net, 6), round(net / dollar_risk, 4) if dollar_risk > 0 else 0.0, fee
 
 
+def _verdict_fields(candidate: Candidate) -> dict:
+    """The producer's own verdict for the decision log — the raw material for the value
+    A/B (does hl-cli's judgment beat just following the producer?). Empty when none was
+    supplied, so verdict-less intake logs exactly as before. Keyless — see test_keys."""
+    out = {}
+    if candidate.source_direction is not None:
+        out["source_direction"] = candidate.source_direction
+    if candidate.source_confidence is not None:
+        out["source_confidence"] = candidate.source_confidence
+    return out
+
+
 def _wait(state: StateStore, candidate: Candidate, decision, regime, common: _PassContext, attempts_left: int) -> _Step:
     """Defer an act+wait verdict for a later re-check — as long as an attempt remains and
     there's freshness room left; otherwise it's a terminal reject (like the gate's WAIT path)."""
@@ -449,14 +462,15 @@ def _wait(state: StateStore, candidate: Candidate, decision, regime, common: _Pa
         if not common.dry_run:
             state.log_decision(candidate.id, common.now, decision=decision,
                                context={"coin": candidate.coin, "outcome": "rejected",
-                                        "wait": reason, "regime": regime})
+                                        "wait": reason, "regime": regime, **_verdict_fields(candidate)})
         return _Step("rejected")
     common.tally.deferred += 1
     if not common.dry_run:
         state.log_decision(
             candidate.id, common.now, decision=decision,
             context={"coin": candidate.coin, "outcome": "deferred", "wait": "deferred",
-                     "next_check_at": next_at, "attempts_remaining": attempts_left, "regime": regime},
+                     "next_check_at": next_at, "attempts_remaining": attempts_left, "regime": regime,
+                     **_verdict_fields(candidate)},
         )
     return _Step("deferred", next_check_at=next_at, attempts_remaining=attempts_left)
 

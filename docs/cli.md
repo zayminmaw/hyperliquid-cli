@@ -257,7 +257,17 @@ Account summary: equity, open positions, unrealized P&L, breaker state, the coun
 `performance` block — profit factor, max drawdown, trade-based Sharpe/Sortino, and
 realized entry slippage (audit C/D) — `conviction_calibration`, and `management_cohorts`
 (realized R by which sentry management events fired — the sentry-tuning evidence, audit J).
-These span the whole resolved set (real + shadow), same as graduation.
+These span the whole resolved set (real + shadow), same as graduation. Also carries the
+formal `calibration_verdict` (the pass/fail precondition guarding any flip of
+`sizing.enabled`).
+
+**`--compare <data_dir>`** instead diffs two decision-source books head-to-head — the
+llm-vs-rule-vs-`follow_source` A/B (`HL_DECISION_SOURCE`, run under separate `HL_DATA_DIR`s).
+Each arm reports n, win rate, avg R, total realized, profit factor, and calibration
+readiness, plus `delta_b_minus_a`; both arms are graded by the shared `graded_trades` rule
+(partials/aborts/adopted excluded) so a scale-out ladder or protection failures can't
+flatter one side. The other book is opened **read-only** — comparing never migrates or
+mutates it.
 
 ---
 

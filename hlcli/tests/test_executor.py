@@ -90,9 +90,62 @@ def test_rule_source_fires_without_an_llm(tmp_path):
 
 
 def test_decider_selection_follows_the_hard_cap():
-    from hlcli.executor.decision import decide, decide_rule, decider_for
+    from hlcli.executor.decision import decide, decide_follow_source, decide_rule, decider_for
     assert decider_for(caps()) is decide  # default: the LLM arbiter
     assert decider_for(caps(decision_source="rule")) is decide_rule
+    assert decider_for(caps(decision_source="follow_source")) is decide_follow_source
+
+
+def test_follow_source_decider_maps_verdict_to_action():
+    from hlcli.core.types import Action
+    from hlcli.executor.decision import decide_follow_source
+    from hlcli.executor.enrich import enrich
+
+    def _ctx(direction, conf=None, side=Side.LONG):
+        c = Candidate(id="x", coin="BTC", side=side, entry=100, tp=120, sl=90,
+                      source_direction=direction, source_confidence=conf, created_at=NOW)
+        return enrich(c, marks={"BTC": 100.0}, equity=10_000.0, positions=[],
+                      realized=0.0, recent=[], tunable=tunable())
+
+    act = decide_follow_source(_ctx("long", 0.6), caps(), tunable()).decision
+    assert act.action is Action.ACT and act.conviction == 0.6  # match; producer confidence carried
+    assert decide_follow_source(_ctx("WAIT"), caps(), tunable()).decision.action is Action.SKIP
+    assert decide_follow_source(_ctx("SHORT"), caps(), tunable()).decision.action is Action.SKIP  # mismatch
+    assert decide_follow_source(_ctx(None), caps(), tunable()).decision.action is Action.SKIP    # no verdict
+
+
+def test_follow_source_end_to_end_obeys_producer(tmp_path):
+    ex, state = _setup(tmp_path, marks={"BTC": 100.0, "ETH": 100.0})
+    state.enqueue(Candidate(id="go", coin="BTC", side=Side.LONG, entry=100, tp=120, sl=90,
+                            source_direction="LONG", source_confidence=0.6, created_at=NOW))
+    state.enqueue(Candidate(id="hold", coin="ETH", side=Side.LONG, entry=100, tp=120, sl=90,
+                            source_direction="WAIT", created_at=NOW))
+    s = run_once(ex, state, caps(decision_source="follow_source"), tunable(), now=NOW)
+    assert (s.fired, s.rejected) == (1, 1)          # LONG acted, WAIT skipped
+    assert {p.coin for p in ex.get_positions()} == {"BTC"}
+
+
+def test_arm_stats_grades_like_graduation():
+    # The A/B row must exclude the same non-verdict rows graduation drops (partials,
+    # mechanical aborts, adopted) — via the shared graded_trades, so they can't diverge.
+    from hlcli.cli.commands.exec_ import _arm_stats
+
+    def t(status, r, adopted=0):
+        return {"status": status, "r_multiple": r, "realized": r * 10, "conviction": 0.5, "adopted": adopted}
+
+    book = [t("won", 1.0), t("lost", -1.0), t("scaled", 5.0), t("aborted", 9.0), t("closed", 0.5, adopted=1)]
+    a = _arm_stats(book, caps())
+    assert a["n"] == 2 and a["total_realized"] == 0.0  # only won + lost graded; 10 + (−10)
+    assert "calibration_ready" in a
+
+
+def test_delta_diffs_scalars_and_nulls_on_missing():
+    from hlcli.cli.commands.exec_ import _delta
+    b = {"n": 5, "win_rate": 0.6, "avg_r": 0.2, "total_realized": 3.0, "profit_factor": 1.5}
+    a = {"n": 2, "win_rate": 0.5, "avg_r": 0.1, "total_realized": 1.0, "profit_factor": None}
+    d = _delta(b, a)
+    assert d["n"] == 3 and d["avg_r"] == 0.1
+    assert d["profit_factor"] is None  # a None on either side leaves the metric None
 
 
 # --- L-5: injection screen on the human-supplied thesis (advisory, never a reject) ---

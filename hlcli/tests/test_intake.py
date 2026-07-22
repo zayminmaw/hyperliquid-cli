@@ -45,6 +45,32 @@ def test_incoherent_levels_rejected_at_intake():
         make_candidate("BTC", 100.0, 95.0, 90.0)  # tp below entry on a long geometry
 
 
+def test_producer_verdict_carried_and_normalized():
+    [c] = parse_batch([_item(direction="wait", confidence=0.42)])
+    assert c.source_direction == "WAIT" and c.source_confidence == 0.42  # upper-cased, kept
+
+
+def test_producer_confidence_clamped_and_malformed_nulled():
+    assert candidate_from_dict(_item(confidence=1.7)).source_confidence == 1.0   # clamped into [0,1]
+    assert candidate_from_dict(_item(confidence="n/a")).source_confidence is None  # advisory: null, not reject
+    c = candidate_from_dict(_item())  # absent → None, not a default
+    assert c.source_direction is None and c.source_confidence is None
+
+
+def test_verdict_absent_keeps_legacy_content_id():
+    # A batch without a verdict must hash exactly as before, so upgrading doesn't
+    # re-key already-imported candidates (no dedupe regression).
+    import hashlib, json
+    material = json.dumps({k: _item().get(k) for k in
+                           ("coin", "entry", "tp", "sl", "reasoning", "news", "created_at")},
+                          sort_keys=True, default=str)
+    assert candidate_from_dict(_item()).id == hashlib.sha256(material.encode()).hexdigest()[:32]
+
+
+def test_verdict_changes_content_id():
+    assert candidate_from_dict(_item()).id != candidate_from_dict(_item(direction="LONG")).id
+
+
 def test_relative_config_path_anchors_to_data_dir(tmp_path):
     from hlcli.core.config import Caps
 

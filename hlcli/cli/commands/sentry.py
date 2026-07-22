@@ -56,7 +56,8 @@ def once(ctx: typer.Context) -> None:
         # A dry-run pass through the runner is fully side-effect-free and therefore
         # silent about the trail rules; previewing the engine's plan is more useful.
         s = manage_open_trades(exchange, state, tunable, time.time(),
-                               native_protected=requires_native_protection(g.network), dry_run=True)
+                               native_protected=requires_native_protection(g.network), dry_run=True,
+                               taker_fee_pct=caps.taker_fee_pct)
         emit({"network": g.network.value, "would_apply": s.actions,
               "note": "dry-run (no state changes)"}, as_json=g.json_out, title="sentry once")
         return

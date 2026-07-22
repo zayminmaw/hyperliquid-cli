@@ -17,6 +17,14 @@ from hlcli.tuner.stats import summary
 _UNGRADED_STATUSES = ("scaled", "aborted", "abort_failed")
 
 
+def graded_trades(trades: list[dict]) -> list[dict]:
+    """The rows that carry a genuine strategy verdict — partials (`scaled`), mechanical
+    aborts (`aborted`/`abort_failed`), and adopted (no-LLM) rows excluded. Graduation, the
+    decision-source A/B (`exec report --compare`), and any expectancy readout share this one
+    definition so the grading rule can't silently drift apart between them."""
+    return [t for t in trades if t.get("status") not in _UNGRADED_STATUSES and not t.get("adopted")]
+
+
 def assess(trades: list[dict], caps: Caps) -> dict:
     """Pass/fail readiness verdict plus the numbers behind each check.
 
@@ -27,8 +35,7 @@ def assess(trades: list[dict], caps: Caps) -> dict:
     strategy — and `adopted` rows carry no LLM verdict at all; none of them may pad
     `n` or dilute expectancy. Aborts are still counted and surfaced: a rig that
     keeps failing to protect entries is its own reason not to go to mainnet."""
-    graded = [t for t in trades
-              if t.get("status") not in _UNGRADED_STATUSES and not t.get("adopted")]
+    graded = graded_trades(trades)
     stats = summary(graded)
     span_days = _span_days(graded)
     checks = {

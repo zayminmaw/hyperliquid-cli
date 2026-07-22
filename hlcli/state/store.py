@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS intake (
     sl         REAL NOT NULL,
     reasoning  TEXT NOT NULL DEFAULT '',
     news       TEXT NOT NULL DEFAULT '',
+    source_direction  TEXT,   -- producer's own verdict (advisory); NULL when not supplied
+    source_confidence REAL,   -- producer's own confidence 0..1 (advisory); NULL when not supplied
     created_at REAL NOT NULL,
     status     TEXT NOT NULL DEFAULT 'pending'
 );
@@ -96,7 +98,16 @@ _REALIZED_KEY = "paper_realized"
 
 
 class StateStore:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, read_only: bool = False) -> None:
+        # Read-only inspects an existing book (e.g. `exec report --compare`) without
+        # touching it: no schema create, no additive migration, no write. Safe because
+        # every read is `SELECT *` + `dict.get(...)`, so an older schema missing newer
+        # columns still round-trips. Opening a book you only mean to compare must not
+        # mutate it, and must not contend with a live loop writing the same file.
+        if read_only:
+            self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            self._conn.row_factory = sqlite3.Row
+            return
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
@@ -125,6 +136,11 @@ class StateStore:
             self._conn.execute("ALTER TABLE trades ADD COLUMN fee_paid REAL NOT NULL DEFAULT 0")
         # Pre-sentry rows never had their SL moved, so today's `sl` IS the initial one.
         self._conn.execute("UPDATE trades SET initial_sl = sl WHERE initial_sl IS NULL")
+        intake_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(intake)")}
+        if "source_direction" not in intake_cols:
+            self._conn.execute("ALTER TABLE intake ADD COLUMN source_direction TEXT")
+        if "source_confidence" not in intake_cols:
+            self._conn.execute("ALTER TABLE intake ADD COLUMN source_confidence REAL")
 
     def close(self) -> None:
         self._conn.close()
@@ -134,10 +150,12 @@ class StateStore:
     def enqueue(self, candidate: Candidate) -> bool:
         """Add a candidate. Returns False if its id is already queued (dedupe)."""
         cur = self._conn.execute(
-            "INSERT OR IGNORE INTO intake(id, coin, side, entry, tp, sl, reasoning, news, created_at)"
-            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO intake"
+            "(id, coin, side, entry, tp, sl, reasoning, news, source_direction, source_confidence, created_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (candidate.id, candidate.coin, candidate.side.value, candidate.entry, candidate.tp,
-             candidate.sl, candidate.reasoning, candidate.news, candidate.created_at),
+             candidate.sl, candidate.reasoning, candidate.news,
+             candidate.source_direction, candidate.source_confidence, candidate.created_at),
         )
         self._conn.commit()
         return cur.rowcount > 0
@@ -503,9 +521,12 @@ class StateStore:
 
 
 def _to_candidate(row: sqlite3.Row) -> Candidate:
+    keys = row.keys()  # source_* absent on a row read before the additive migration
     return Candidate(
         id=row["id"], coin=row["coin"], side=Side(row["side"]), entry=row["entry"],
         tp=row["tp"], sl=row["sl"], reasoning=row["reasoning"], news=row["news"],
+        source_direction=row["source_direction"] if "source_direction" in keys else None,
+        source_confidence=row["source_confidence"] if "source_confidence" in keys else None,
         created_at=row["created_at"],
     )
 

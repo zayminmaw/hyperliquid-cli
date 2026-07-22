@@ -96,9 +96,11 @@ def evaluate(candidate: Candidate, decision: Decision, ctx: GateContext) -> Gate
         return _reject(f"no mark for {candidate.coin}")
     if not _mark_inside_levels(candidate, ctx.mark):
         return _reject(f"mark {ctx.mark} outside sl/tp — setup invalidated or played out")
-    rr_at_mark = _reward_risk_at(candidate, ctx.mark)
+    fee_frac = ctx.caps.taker_fee_pct / 100.0 if ctx.caps.fee_adjusted_rr else 0.0
+    rr_at_mark = _reward_risk_at(candidate, ctx.mark, fee_frac)
     if rr_at_mark < ctx.caps.rr_floor:
-        return _reject(f"R:R at mark {rr_at_mark:.2f} < floor {ctx.caps.rr_floor} (entry has run)")
+        net = " net of fees" if fee_frac > 0 else ""
+        return _reject(f"R:R at mark {rr_at_mark:.2f}{net} < floor {ctx.caps.rr_floor} (entry has run)")
 
     if candidate.coin in ctx.open_coins:
         return _reject(f"already in a position for {candidate.coin}")
@@ -209,10 +211,21 @@ def _mark_inside_levels(c: Candidate, mark: float) -> bool:
     return c.tp < mark < c.sl
 
 
-def _reward_risk_at(c: Candidate, mark: float) -> float:
-    """R:R measured from the mark — what a MARKET fill here would actually get."""
+def _reward_risk_at(c: Candidate, mark: float, fee_frac: float = 0.0) -> float:
+    """R:R measured from the mark — what a MARKET fill here would actually get.
+
+    With `fee_frac > 0` (the round-trip taker fee as a fraction, #2a), it's netted the
+    way P&L actually books: a win takes reward − fees, a stop pays risk + fees, so the
+    honest ratio is `(reward − 2·fee·mark) / (risk + 2·fee·mark)` — both legs priced at
+    the mark (entry ≈ mark; exit ≈ mark within a stop/target width). `fee_frac = 0`
+    reduces to the gross ratio exactly, so a disabled flag changes nothing."""
+    reward = abs(c.tp - mark)
     risk = abs(mark - c.sl)
-    return abs(c.tp - mark) / risk if risk > 0 else 0.0
+    if fee_frac > 0:
+        fee = 2 * fee_frac * mark
+        reward = max(0.0, reward - fee)
+        risk += fee
+    return reward / risk if risk > 0 else 0.0
 
 
 def _reject(reason: str) -> GateOutcome:

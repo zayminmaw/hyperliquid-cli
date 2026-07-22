@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from hlcli.cli.app import app
 from hlcli.core.config import get_caps
+from hlcli.state.store import StateStore
 
 runner = CliRunner()
 
@@ -45,6 +46,23 @@ def test_exec_report_surfaces_graduation(isolated_caps):
     assert result.exit_code == 0
     grad = json.loads(result.output)["graduation"]
     assert grad["ready"] is False and grad["n"] == 0  # empty ledger isn't mainnet-ready
+
+
+def test_exec_report_compare_is_read_only_and_emits_ab(isolated_caps, tmp_path):
+    # `--compare` diffs a second decision-source book WITHOUT mutating it (read-only open)
+    # and emits the a/b/delta structure. Empty books → n=0 both arms, no crash.
+    other = tmp_path / "other"
+    StateStore(other / "state-paper.db").close()  # a real but empty paper book
+    r = runner.invoke(app, ["--json", "exec", "report", "--compare", str(other)])
+    assert r.exit_code == 0
+    p = json.loads(r.output)
+    assert set(p) == {"network", "a", "b", "delta_b_minus_a"}
+    assert p["a"]["n"] == 0 and p["b"]["n"] == 0
+
+
+def test_exec_report_compare_missing_book_errors(isolated_caps, tmp_path):
+    r = runner.invoke(app, ["exec", "report", "--compare", str(tmp_path / "nope")])
+    assert r.exit_code != 0  # no paper book under that dir
 
 
 def test_config_show_works():

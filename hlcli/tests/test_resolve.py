@@ -165,6 +165,28 @@ def test_vanished_scaled_trade_keeps_the_mark_estimate(tmp_path):
     assert t["exit_price"] == 103.0     # mark estimate kept — the fill lookup is skipped
 
 
+def test_vanished_position_degrades_to_mark_when_the_fills_feed_errors(tmp_path):
+    # The live fills feed rides the SDK's `requests` session, NOT httpx, so the real-exit
+    # lookup must degrade to the mark/level estimate on ANY error — never crash the resolve
+    # pass. (Regression: the catch used to name only httpx, so a requests error escaped it.)
+    from hlcli.core.types import Network
+    from hlcli.tests.test_protect import FakeLiveExchange
+
+    state = StateStore(tmp_path / "state.db")
+    ex = FakeLiveExchange(Network.MAINNET, marks={"BTC": 103.0}, positions=[])
+
+    def _boom(_since_ms):
+        raise RuntimeError("connection reset by peer")  # a requests-layer error, not httpx
+
+    ex.recent_fills = _boom
+    _open(state)  # long, entry 100 — vanished, unscaled → the resolver reaches the fills lookup
+    n = resolve_open_trades(ex, state, caps(), clamp(TunableConfig()), NOW,
+                            marks={"BTC": 103.0}, native_protected=True)
+    assert n == 1
+    t = state.resolved_trades()[0]
+    assert t["status"] == "closed" and t["exit_price"] == 103.0  # mark estimate stands, no crash
+
+
 def test_realized_and_r_are_net_of_taker_fee(tmp_path):
     # Wave-2 K: with a taker fee configured, realized P&L and R are booked net of the
     # round-trip fee (charged on entry + exit notional), so graduation/tuner see the cost.
