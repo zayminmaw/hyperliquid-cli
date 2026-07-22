@@ -32,6 +32,19 @@ def test_prompt_deanchors_the_producer_verdict():
     assert "anchoring trap" in SYSTEM_PROMPT  # and it names the failure mode both ways
 
 
+def test_user_message_carries_the_producer_verdict():
+    # The prompt claims the context "may also carry the producer's own call" — this locks
+    # that the serialized context actually includes it, so a future _user_message refactor
+    # that hand-picks fields can't silently drop the verdict and make the prompt lie.
+    from hlcli.executor.decision import _user_message
+    c = Candidate(id="x", coin="BTC", side=Side.LONG, entry=100, tp=120, sl=90,
+                  source_direction="WAIT", source_confidence=0.4, created_at=NOW)
+    ctx = enrich(c, marks={"BTC": 100.0}, equity=10_000.0, positions=[],
+                 realized=0.0, recent=[], tunable=tunable())
+    msg = _user_message(ctx)
+    assert "source_direction" in msg and "WAIT" in msg
+
+
 def test_valid_payload_parses():
     d = validate_decision(_good(), "c1")
     assert (d.action, d.timing, d.conviction, d.candidate_id) == (Action.ACT, Timing.NOW, 0.7, "c1")

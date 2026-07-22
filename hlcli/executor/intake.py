@@ -128,7 +128,10 @@ def _content_id(normalized: dict) -> str:
     """A stable id from the item's content (created_at excluded when auto-assigned),
     so re-importing the same batch file dedupes instead of double-queueing. The
     producer's verdict fields join the hash only when present, so batches without
-    them keep their existing ids (no dedupe regression on upgrade)."""
+    them keep their existing ids (no dedupe regression on upgrade). The id keys on the
+    *raw* item values (not the normalized candidate), so re-importing the identical file
+    is always stable; adding a verdict to a previously-bare item is treated as a new
+    thesis (new id), which is intended."""
     material = {k: normalized.get(k) for k in ("coin", "entry", "tp", "sl", "reasoning", "news", "created_at")}
     for k in ("direction", "confidence"):
         if normalized.get(k) is not None:

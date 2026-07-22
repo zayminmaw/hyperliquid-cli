@@ -98,7 +98,16 @@ _REALIZED_KEY = "paper_realized"
 
 
 class StateStore:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, read_only: bool = False) -> None:
+        # Read-only inspects an existing book (e.g. `exec report --compare`) without
+        # touching it: no schema create, no additive migration, no write. Safe because
+        # every read is `SELECT *` + `dict.get(...)`, so an older schema missing newer
+        # columns still round-trips. Opening a book you only mean to compare must not
+        # mutate it, and must not contend with a live loop writing the same file.
+        if read_only:
+            self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            self._conn.row_factory = sqlite3.Row
+            return
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row

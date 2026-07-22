@@ -1,6 +1,6 @@
 # AGENT-CONTEXT
 
-> Last updated: 2026-07-20 | Session: fresh-eyes review of 074e58b..HEAD (2 phases) → fixed all 6 findings; 553 pass
+> Last updated: 2026-07-22 | Session: fresh-eyes review of ba623d0..HEAD (2 phases) → fixed all findings + synced docs; 572 pass
 
 ---
 
@@ -9,13 +9,17 @@
 - Task: Decision-layer improvements (meta-labeling framing) — research-backed, measurement-first. Threads: enabler (carry ThirdEye direction+confidence through intake), #1 calibration verdict, #5 value A/B, #2 cost-aware R:R, #3 de-anchor, #4 consensus. Spec: scratchpad/improvement-spec.md
 - Goal: earn hl-cli's independence from ThirdEye's skepticism via shadow-proven calibration, not a looser prompt
 - Status: **ALL THREADS DONE + committed on `feat/decision-improvements`** (main..HEAD: 01202ad #1+enabler+#5, 9728714 #2a, 46ee157 #3). 566 pass. Round-2 operational test PASSED live on testnet: same BTC/ETH ThirdEye WAIT signals (re-stamped now, content faithful) → executor declined both via **independent** reasoning (de-anchored prompt: LLM interrogated whether the producer's WAIT was "well-supported… not just cautious defaulting"), producer verdict (WAIT 0.45) logged alongside, both cleared the fee-adjusted floor. Sentry re-drilled (adopt→shadow 6b→manage 6c, all hold) + ledger booked + testnet flat (~997.41)
-- Next action: open a PR for `feat/decision-improvements` when the user asks; #2b funding + #4 consensus still parked
+- Next action: open a PR for `feat/decision-improvements` when the user asks (fresh-eyes review of the wave done + fixed); #2b funding + #4 consensus still parked
 - Blocked by: none. NOTE: one transient Anthropic 400 "Grammar compilation timed out" on a strict-tool decision call (retry succeeded) — API-side, not hl-cli; watch if it recurs
 
 ---
 
 ## 📍 LAST ACTION
 
+- Did: **Fresh-eyes review of `ba623d0..HEAD` (static + flow) → fixed all findings + synced docs.** (1) Centralized the graded-trades filter as `graduation.graded_trades` — `assess` + `exec report --compare`'s `_arm_stats` now share it (was a duplicated inline tuple that could drift). (2) `exec report --compare` now opens the other book `StateStore(path, read_only=True)` — no schema-create/migration/write on a book you only compare; also wrapped `report` in `try/finally: state.close()` (was leaking the primary store, matters in the REPL loop). (3) `_content_id` docstring clarifies it keys on RAW item values by design. Added 6 tests: read-only compare CLI (+ mtime-unchanged live smoke), `_arm_stats`/`_delta` units, read-only store refuses writes, `_user_message` carries the producer verdict (prompt-vs-payload contract). Docs: cli.md (`--compare` + read-only), modules.md (graded_trades + read-only ctor), decisions.md entry. Files: safety/graduation.py, cli/commands/exec_.py, state/store.py, executor/intake.py, tests/{test_cli,test_executor,test_state,test_decision}.py, docs/*.
+- Result: **572 pass** (+6). All findings were maintainability/drift-risk — no live-path correctness bug in the wave. Behavior preserved (read-only compare eliminated a write side-effect; grading output identical). Working tree UNCOMMITTED.
+
+### (prior) #3 de-anchor
 - Did: **#3 de-anchor the decision prompt (ORDER-PATH; user-approved wording).** Inserted a paragraph into `SYSTEM_PROMPT` "## Your role": the producer's `source_direction`/`source_confidence` + its `reasoning` conclusion are a "second opinion to weigh, not a verdict to ratify"; form your own read first, then reconcile; names BOTH failure modes (defer-to-WAIT anchoring AND overtrading) so it doesn't push toward overconfidence. Test locks the guidance into the prompt (`test_prompt_deanchors_the_producer_verdict`). Files: executor/decision.py, tests/test_decision.py. **566 pass** (+1). Validation = shadow A/B via #5 (de-anchored active_prompt.md vs default) — earns independence, not a looser prompt. **ALL PLAN THREADS DONE** (#1, enabler, #5, #2a, #3); #2b funding + #4 consensus parked.
 - Result: Full improvement set complete + committed on `feat/decision-improvements`. Next per user: second-round operational test with the BTC/ETH ThirdEye signals (now carrying direction/confidence, through the de-anchored prompt + fee-adjusted gate) + sentry re-test.
 

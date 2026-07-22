@@ -21,7 +21,7 @@ from hlcli.executor.reconcile import reconcile
 from hlcli.executor.runner import run_once
 from hlcli.safety.alerts import network_alerter
 from hlcli.safety.breaker import Breaker
-from hlcli.safety.graduation import assess
+from hlcli.safety.graduation import assess, graded_trades
 from hlcli.state.store import StateStore, open_state
 from hlcli.tuner.stats import (
     calibration_verdict,
@@ -200,10 +200,10 @@ def status(ctx: typer.Context, watch: bool = typer.Option(False, "-w", "--watch"
 
 def _arm_stats(trades: list[dict], caps) -> dict:
     """One decision-source book's headline expectancy — the A/B row for `--compare`.
-    Graded like graduation (partials + mechanical aborts + adopted rows excluded) so a
-    scale-out ladder or a run of protection failures can't flatter one arm over another."""
-    graded = [t for t in trades
-              if t.get("status") not in ("scaled", "aborted", "abort_failed") and not t.get("adopted")]
+    Graded via the shared `graded_trades` (partials + mechanical aborts + adopted rows
+    excluded), so a scale-out ladder or a run of protection failures can't flatter one
+    arm over another, and this can't drift from graduation's own grading rule."""
+    graded = graded_trades(trades)
     s = summary(graded)
     perf = performance(graded, starting_equity=caps.starting_equity)
     cal = calibration_verdict(trades, min_bucket_n=caps.calibration_min_bucket_n,
@@ -235,53 +235,56 @@ def report(
     profit factor, calibration) — the readout for the llm-vs-rule-vs-follow_source A/B."""
     g = state_of(ctx)
     exchange, state, caps, _tunable = open_env(g, for_write=False)
-    resolved = state.resolved_trades()
+    try:
+        resolved = state.resolved_trades()
 
-    if compare is not None:
-        other_db = compare / f"state-{g.network.value}.db"
-        if not other_db.exists():
-            raise typer.BadParameter(f"no {g.network.value} book under {compare} (expected {other_db.name})")
-        other = StateStore(other_db)
-        try:
-            b_trades = other.resolved_trades()
-        finally:
-            other.close()
-        a, b = _arm_stats(resolved, caps), _arm_stats(b_trades, caps)
+        if compare is not None:
+            other_db = compare / f"state-{g.network.value}.db"
+            if not other_db.exists():
+                raise typer.BadParameter(f"no {g.network.value} book under {compare} (expected {other_db.name})")
+            other = StateStore(other_db, read_only=True)  # compare must never mutate the other book
+            try:
+                b_trades = other.resolved_trades()
+            finally:
+                other.close()
+            a, b = _arm_stats(resolved, caps), _arm_stats(b_trades, caps)
+            emit(
+                {"network": g.network.value,
+                 "a": {"data_dir": str(caps.data_dir), **a},
+                 "b": {"data_dir": str(compare), **b},
+                 "delta_b_minus_a": _delta(b, a)},
+                as_json=g.json_out, title="exec report --compare",
+            )
+            return
+
+        positions = exchange.get_positions()
         emit(
-            {"network": g.network.value,
-             "a": {"data_dir": str(caps.data_dir), **a},
-             "b": {"data_dir": str(compare), **b},
-             "delta_b_minus_a": _delta(b, a)},
-            as_json=g.json_out, title="exec report --compare",
+            {
+                "network": g.network.value,
+                "equity": exchange.equity(),
+                "open_positions": len(positions),
+                "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
+                "breaker": "tripped" if Breaker(state, caps).tripped() else "clear",
+                "deferred": state.deferred_count(),  # WAIT candidates parked for re-check
+                "graduation": assess(resolved, caps),
+                # Risk-adjusted + path-risk view win-rate/expectancy hide (audit C/D): Sharpe,
+                # Sortino, max drawdown, profit factor, and realized entry slippage.
+                "performance": performance(resolved, starting_equity=caps.starting_equity),
+                # The evidence gate for re-enabling conviction→size scaling (audit L-1/L-4):
+                # scaling stays off until higher buckets show higher avg_r on real sample.
+                "conviction_calibration": conviction_calibration(resolved),
+                # Formal pass/fail on that gate: monotonic bucket avg_R + spread + sample floor.
+                # `ready: false` is the precondition guarding any flip of `sizing.enabled`.
+                "calibration_verdict": calibration_verdict(
+                    resolved,
+                    min_bucket_n=caps.calibration_min_bucket_n,
+                    min_spread_r=caps.calibration_min_spread_r,
+                ),
+                # Realized R by which management events fired (audit J) — the evidence a sentry
+                # tuner would act on: do trailed/scaled trades out-perform ones left on the initial stop?
+                "management_cohorts": management_cohorts(resolved),
+            },
+            as_json=g.json_out, title="exec report",
         )
-        return
-
-    positions = exchange.get_positions()
-    emit(
-        {
-            "network": g.network.value,
-            "equity": exchange.equity(),
-            "open_positions": len(positions),
-            "unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
-            "breaker": "tripped" if Breaker(state, caps).tripped() else "clear",
-            "deferred": state.deferred_count(),  # WAIT candidates parked for re-check
-            "graduation": assess(resolved, caps),
-            # Risk-adjusted + path-risk view win-rate/expectancy hide (audit C/D): Sharpe,
-            # Sortino, max drawdown, profit factor, and realized entry slippage.
-            "performance": performance(resolved, starting_equity=caps.starting_equity),
-            # The evidence gate for re-enabling conviction→size scaling (audit L-1/L-4):
-            # scaling stays off until higher buckets show higher avg_r on real sample.
-            "conviction_calibration": conviction_calibration(resolved),
-            # Formal pass/fail on that gate: monotonic bucket avg_R + spread + sample floor.
-            # `ready: false` is the precondition guarding any flip of `sizing.enabled`.
-            "calibration_verdict": calibration_verdict(
-                resolved,
-                min_bucket_n=caps.calibration_min_bucket_n,
-                min_spread_r=caps.calibration_min_spread_r,
-            ),
-            # Realized R by which management events fired (audit J) — the evidence a sentry
-            # tuner would act on: do trailed/scaled trades out-perform ones left on the initial stop?
-            "management_cohorts": management_cohorts(resolved),
-        },
-        as_json=g.json_out, title="exec report",
-    )
+    finally:
+        state.close()
